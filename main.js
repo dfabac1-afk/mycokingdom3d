@@ -2867,7 +2867,9 @@ class Game3D {
                 const angle = (i / (CONFIG.REGIONS.length - 1)) * Math.PI * 2;
                 const dist = reg.id === 'mushroomKingdom' ? 25 : 70;
                 const pos = new THREE.Vector3(Math.cos(angle) * dist, 0, Math.sin(angle) * dist);
-                const isLocked = !this.progression.data.unlockedRegions.includes(reg.id);
+                const isLocked = this.progression.isCollectorMode()
+                    ? false
+                    : !this.progression.data.unlockedRegions.includes(reg.id);
                 const portal = new Portal3D(this.scene, pos, reg.id, isLocked);
                 portal.requirementText = reg.requirement || "";
                 this.portals.push(portal);
@@ -5837,21 +5839,31 @@ class Game3D {
         const topPad  = isMobile ? 'calc(10px + env(safe-area-inset-top))' : '40px';
         const botPad  = isMobile ? 'calc(22px + env(safe-area-inset-bottom))' : '40px';
         const tapBtn  = 'min-height: 44px; touch-action: manipulation; -webkit-tap-highlight-color: transparent;';
+        const modeLabel = this.progression.data.gameMode === 'COLLECTOR' ? 'SPORE COLLECTOR' : 'STORY CAMPAIGN';
         const subtitleHtml = isMobile
-            ? 'RECLAIM THE<br>NETWORK HEART'
-            : 'RECLAIM THE NETWORK HEART';
+            ? 'EXPLORE • HARVEST<br>RECLAIM THE CROWN'
+            : 'EXPLORE • HARVEST • RECLAIM THE CROWN';
+        const statusLine = hasSave
+            ? `${modeLabel} • LEVEL ${this.progression.data.level}`
+            : 'ACTION RPG • WALLET OPTIONAL';
+        const walletLabel = isConnected
+            ? `WALLET LINKED: ${this.walletAddress.slice(0, 4)}...${this.walletAddress.slice(-4)}`
+            : 'LINK PHANTOM (OPTIONAL)';
+        const walletHint = isConnected
+            ? 'Identity synced for this device. Disconnect any time.'
+            : 'Wallet is optional. You can play the full game without connecting.';
         const graphicsHelper = this.progression.data.settings.lowPerfMode === true
             ? (isMobile ? 'BATTERY SAVER · longer play' : 'BATTERY SAVER · longer sessions')
             : this.progression.data.settings.lowPerfMode === false
                 ? 'HIGH FIDELITY · full effects'
-                : (isMobile ? 'SMART AUTO · auto-tuned' : 'SMART AUTO · adapts to this device');
+                : (isMobile ? 'SMART AUTO · tuned for this device' : 'SMART AUTO · tuned for this device');
 
         this.uiOverlay.innerHTML = `
-            <div id="start-screen-wrap" style="pointer-events: auto; width: 100%; min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: ${isMobile ? 'flex-start' : 'center'}; padding: ${topPad} 12px ${botPad} 12px; box-sizing: border-box;">
-                <div id="start-screen" style="display: flex; flex-direction: column; align-items: center; width: 100%; max-width: ${isMobile ? 334 : 500}px; background: linear-gradient(180deg, rgba(8,12,14,0.92), rgba(2,5,6,0.88)); padding: ${padIn}px; border: 3px solid rgba(57,255,20,0.82); border-radius: 18px; box-shadow: 0 18px 48px rgba(0,0,0,0.45), 0 0 24px rgba(57,255,20,0.16); text-align: center; box-sizing: border-box; backdrop-filter: blur(4px);">
+            <div id="start-screen-wrap" style="pointer-events: auto; width: 100%; min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: ${isMobile ? 'flex-start' : 'center'}; padding: ${topPad} ${isMobile ? 16 : 12}px ${botPad} ${isMobile ? 16 : 12}px; box-sizing: border-box;">
+                <div id="start-screen" style="display: flex; flex-direction: column; align-items: center; width: 100%; max-width: ${isMobile ? 326 : 500}px; background: linear-gradient(180deg, rgba(8,12,14,0.92), rgba(2,5,6,0.88)); padding: ${padIn}px; border: 3px solid rgba(57,255,20,0.82); border-radius: 18px; box-shadow: 0 18px 48px rgba(0,0,0,0.45), 0 0 24px rgba(57,255,20,0.16); text-align: center; box-sizing: border-box; backdrop-filter: blur(4px);">
                     <h1 class="neon-text" style="font-size: ${titleSz}px; margin: 0 0 8px 0; color: #39FF14; text-shadow: 0 0 10px #39FF14; line-height: 1.08;">MYCO KINGDOM</h1>
                     <p style="font-size: ${subSz}px; margin: 0 0 8px 0; color: #f5fff5; letter-spacing: ${isMobile ? 1.4 : 2}px; line-height: 1.45; max-width: ${isMobile ? 210 : 360}px;">${subtitleHtml}</p>
-                    <p style="font-size: ${lvlSz}px; margin: 0 0 ${isMobile ? 16 : 30}px 0; color: #b6c8c0; letter-spacing: 1px;">KING MYCO • LEVEL ${this.progression.data.level}</p>
+                    <p style="font-size: ${lvlSz}px; margin: 0 0 ${isMobile ? 16 : 30}px 0; color: #b6c8c0; letter-spacing: 1px;">${statusLine}</p>
 
                     <div style="display: flex; flex-direction: column; gap: ${gapSz}px; width: 100%; margin-bottom: ${isMobile ? 18 : 30}px;">
                         <button id="start-button" style="padding: 15px; font-size: ${startFs}px; background: #39FF14; border: none; color: black; font-family: inherit; cursor: pointer; ${tapBtn}">
@@ -5869,9 +5881,10 @@ class Game3D {
                     <div style="width: 100%; height: 1px; background: #333; margin-bottom: ${isMobile ? 16 : 25}px;"></div>
 
                     <div style="display: flex; flex-direction: column; gap: 10px; align-items: center; width: 100%;">
-                        <button id="wallet-button" style="padding: 12px 25px; font-size: ${smFs}px; background: ${isConnected ? '#333' : 'rgba(106,13,173,0.16)'}; border: 1px solid #6a0dad; color: white; font-family: inherit; cursor: pointer; border-radius: 5px; ${tapBtn}">
-                            ${isConnected ? `WALLET LINKED: ${this.walletAddress.slice(0, 4)}...${this.walletAddress.slice(-4)}` : 'LINK WALLET'}
+                        <button id="wallet-button" style="width: 100%; padding: 12px 16px; font-size: ${smFs}px; background: ${isConnected ? '#333' : 'rgba(106,13,173,0.16)'}; border: 1px solid #6a0dad; color: white; font-family: inherit; cursor: pointer; border-radius: 5px; ${tapBtn}">
+                            ${walletLabel}
                         </button>
+                        <div style="font-size: ${isMobile ? 9 : 8}px; color: #a0aba6; line-height: 1.55; max-width: ${isMobile ? '100%' : '340px'};">${walletHint}</div>
                         ${isConnected ? `<button id="disconnect-wallet" style="font-size: 8px; color: #666; background: none; border: none; cursor: pointer; text-decoration: underline; ${tapBtn}">Disconnect</button>` : ''}
                     </div>
 
@@ -5887,8 +5900,8 @@ class Game3D {
                         </button>
                     </div>
 
-                    <div style="margin-top: ${isMobile ? 14 : 24}px; font-size: 8px; color: #73817a; letter-spacing: 1px; opacity: 0.9;">
-                        v1.9.37
+                    <div style="margin-top: ${isMobile ? 16 : 24}px; font-size: ${isMobile ? 9 : 8}px; color: #7e8b85; letter-spacing: 1px; opacity: 0.95;">
+                        LIVE BUILD v1.9.38
                     </div>
                 </div>
             </div>
@@ -6007,6 +6020,14 @@ class Game3D {
 
         const advance = (mode) => {
             this.progression.setGameMode(mode);
+            if (Array.isArray(this.portals)) {
+                this.portals.forEach(portal => {
+                    const shouldLock = mode === 'COLLECTOR'
+                        ? false
+                        : !this.progression.data.unlockedRegions.includes(portal.regionId);
+                    if (portal && typeof portal.setLocked === 'function') portal.setLocked(shouldLock);
+                });
+            }
             if (mode === 'COLLECTOR') {
                 // Skip the prologue + clan selection in collector mode. Lock in a default clan
                 // so the player rig still renders correctly, but mark it as collector-default
