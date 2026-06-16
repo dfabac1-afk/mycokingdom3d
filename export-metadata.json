@@ -1,0 +1,16 @@
+{
+  "name": "Mycoverse: Solana Restoration Copy",
+  "revisionLabel": "Fix audio crash and populate Sporewood with NPCs",
+  "description": "",
+  "mode": "Universal",
+  "exportDate": "2026-06-09T13:48:53.475Z",
+  "rosebudBuiltInSplash": {
+    "present": true,
+    "version": 1
+  },
+  "assetCount": 59,
+  "assetTypes": [
+    "image",
+    "audio"
+  ]
+}
