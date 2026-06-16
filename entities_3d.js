@@ -2,6 +2,46 @@ import * as THREE from 'three';
 import * as TONE from 'tone';
 import { CONFIG } from './config.js';
 
+const SILENT_AUDIO_NODE = {
+    volume: { value: 0 },
+    playbackRate: { value: 1 },
+    positionX: { value: 0 },
+    positionY: { value: 0 },
+    positionZ: { value: 0 },
+    Q: { value: 0 },
+    frequency: { value: 0 },
+    detune: { value: 0 },
+    envelope: { attack: 0, decay: 0, sustain: 0, release: 0 },
+    noise: { type: 'white' },
+    oscillator: { type: 'sine' },
+    triggerAttackRelease() {},
+    triggerAttack() {},
+    triggerRelease() {},
+    start() { return this; },
+    stop() { return this; },
+    connect() { return this; },
+    toDestination() { return this; },
+    chain() { return this; },
+    fan() { return this; },
+    sync() { return this; },
+    unsync() { return this; },
+    dispose() {},
+    set() { return this; }
+};
+
+function canUseTone() {
+    return !!(window.game && window.game.audioUnlocked && window.game.sharedAudioReady);
+}
+
+function createToneNode(factory) {
+    if (!canUseTone()) return SILENT_AUDIO_NODE;
+    try {
+        return factory() || SILENT_AUDIO_NODE;
+    } catch (_) {
+        return SILENT_AUDIO_NODE;
+    }
+}
+
 export class Enemy3D {
     constructor(scene, position, regionConfig = null) {
         this.scene = scene;
@@ -2167,20 +2207,32 @@ export class Portal3D {
 
         // Spatial Audio
         if (!isLocked) {
-            this.panner = new TONE.Panner3D({
+            this.panner = createToneNode(() => new TONE.Panner3D({
                 positionX: position.x,
                 positionY: position.y,
                 positionZ: position.z,
                 rolloffFactor: 4 // Sharper rolloff for portals
-            }).toDestination();
+            }).toDestination());
             
-            this.hum = new TONE.Oscillator(100, "sine").connect(this.panner).start();
+            this.hum = createToneNode(() => new TONE.Oscillator(100, "sine").connect(this.panner).start());
             this.hum.volume.value = -30; // Lowered from -20
         }
 
         this.mesh.position.copy(position);
         this.mesh.position.y = 4.5;
         this.scene.add(this.mesh);
+    }
+
+    enableAudio() {
+        if (this.isLocked || this.panner !== SILENT_AUDIO_NODE || !canUseTone()) return;
+        this.panner = createToneNode(() => new TONE.Panner3D({
+            positionX: this.mesh.position.x,
+            positionY: this.mesh.position.y,
+            positionZ: this.mesh.position.z,
+            rolloffFactor: 4
+        }).toDestination());
+        this.hum = createToneNode(() => new TONE.Oscillator(100, "sine").connect(this.panner).start());
+        this.hum.volume.value = -30;
     }
 
     createTextSprite(text) {
@@ -2224,6 +2276,15 @@ export class Portal3D {
         this.label = this.createTextSprite(locked ? `LOCKED: ${regionConfig.name}` : regionConfig.name);
         this.label.position.y = 5.5;
         this.mesh.add(this.label);
+
+        if (locked) {
+            if (this.hum) this.hum.stop();
+            if (this.panner) this.panner.dispose();
+            this.hum = null;
+            this.panner = null;
+        } else {
+            this.enableAudio();
+        }
     }
 
     update() {
@@ -2494,14 +2555,14 @@ export class EnemyProjectile3D {
         this.life = 150;
         
         // Spatial Audio
-        this.panner = new TONE.Panner3D({
+        this.panner = createToneNode(() => new TONE.Panner3D({
             positionX: position.x,
             positionY: position.y,
             positionZ: position.z,
             rolloffFactor: 2
-        }).toDestination();
+        }).toDestination());
         
-        this.buzz = new TONE.Oscillator(200, "sawtooth").connect(this.panner).start();
+        this.buzz = createToneNode(() => new TONE.Oscillator(200, "sawtooth").connect(this.panner).start());
         this.buzz.volume.value = -30;
         
         this.scene.add(this.mesh);
@@ -3189,22 +3250,22 @@ export class Player3D {
         this.projectiles = [];
         
         // Audio
-        this.synth = new TONE.Synth({
+        this.synth = createToneNode(() => new TONE.Synth({
             oscillator: { type: "triangle" },
             envelope: { attack: 0.01, decay: 0.1, sustain: 0, release: 0.1 }
-        }).toDestination();
+        }).toDestination());
         
-        this.shootSynth = new TONE.NoiseSynth({
+        this.shootSynth = createToneNode(() => new TONE.NoiseSynth({
             noise: { type: "white" },
             envelope: { attack: 0.005, decay: 0.1, sustain: 0 }
-        }).toDestination();
+        }).toDestination());
 
-        this.footstepSynth = new TONE.NoiseSynth({
+        this.footstepSynth = createToneNode(() => new TONE.NoiseSynth({
             envelope: { attack: 0.005, decay: 0.08, sustain: 0 },
             volume: -25
-        }).toDestination();
+        }).toDestination());
 
-        this.levelUpSynth = new TONE.PolySynth().toDestination();
+        this.levelUpSynth = createToneNode(() => new TONE.PolySynth().toDestination());
         
         // Stats
         this.level = 1;
@@ -3667,6 +3728,26 @@ export class Player3D {
         }
     }
 
+    enableAudio() {
+        if (!canUseTone()) return;
+        this.synth = createToneNode(() => new TONE.Synth({
+            oscillator: { type: "triangle" },
+            envelope: { attack: 0.01, decay: 0.1, sustain: 0, release: 0.1 }
+        }).toDestination());
+
+        this.shootSynth = createToneNode(() => new TONE.NoiseSynth({
+            noise: { type: "white" },
+            envelope: { attack: 0.005, decay: 0.1, sustain: 0 }
+        }).toDestination());
+
+        this.footstepSynth = createToneNode(() => new TONE.NoiseSynth({
+            envelope: { attack: 0.005, decay: 0.08, sustain: 0 },
+            volume: -25
+        }).toDestination());
+
+        this.levelUpSynth = createToneNode(() => new TONE.PolySynth().toDestination());
+    }
+
     setClan(clanId) {
         const config = this.clanColors[clanId];
         if (!config) return;
@@ -3882,7 +3963,6 @@ export class Player3D {
             // V1.9.6 Core Linkage - Robust dual-path input (code + key) and stop arrow-key scroll
             if (this.handleKeyCode(e.code, true)) e.preventDefault();
             this.handleKey(e.key.toLowerCase(), true);
-            if (e.code === 'KeyP' && window.game) window.game.spawnShardcapWarden(); // Debug spawn
         });
         window.addEventListener('keyup', (e) => {
             if (this.handleKeyCode(e.code, false)) e.preventDefault();

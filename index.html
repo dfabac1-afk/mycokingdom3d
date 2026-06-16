@@ -6,7 +6,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <title>Myco Quest: The Solana Restoration</title>
+    <title>Myco Quest | Myco Kingdom</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
@@ -17,7 +17,8 @@
         console.warn = function(...args) {
           if (typeof args[0] === 'string' && (
             args[0].includes('bigint: Failed to load bindings') || 
-            args[0].includes('Shared Storage API is deprecated')
+            args[0].includes('Shared Storage API is deprecated') ||
+            args[0].includes('The AudioContext was not allowed to start')
           )) return;
           originalWarn.apply(console, args);
         };
@@ -86,124 +87,9 @@
         transform: scale(0.95);
       }
     </style>
-  
-<style>
-    #rosebud-exported-splash {
-        position: fixed;
-        inset: 0;
-        z-index: 2147483647;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: #000;
-        opacity: 1;
-        transition: opacity 500ms ease-in-out;
-    }
-
-    #rosebud-exported-splash.is-hiding {
-        opacity: 0;
-    }
-
-    #rosebud-exported-splash .rosebud-exported-splash__content {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 20px;
-        text-align: center;
-        color: #fff;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    }
-
-    #rosebud-exported-splash .rosebud-exported-splash__logo {
-        width: 100px;
-        height: 100px;
-        animation: rosebud-exported-splash-breathe 2.4s ease-in-out infinite;
-    }
-
-    #rosebud-exported-splash .rosebud-exported-splash__text {
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-        font-size: 16px;
-        line-height: 1.25;
-        letter-spacing: 0.06em;
-    }
-
-    #rosebud-exported-splash .rosebud-exported-splash__text strong {
-        font-weight: 700;
-    }
-
-    #rosebud-exported-splash .rosebud-exported-splash__text span:last-child {
-        opacity: 0.88;
-    }
-
-    @keyframes rosebud-exported-splash-breathe {
-        0%,
-        100% {
-            transform: scale(1);
-        }
-        50% {
-            transform: scale(1.05);
-        }
-    }
-</style></head>
+</head>
   <body>
-<div id="rosebud-exported-splash" aria-live="polite">
-    <div class="rosebud-exported-splash__content">
-        <img
-            class="rosebud-exported-splash__logo"
-            src="__rosebud/rosebud-icon.png"
-            alt="Rosebud Logo"
-            width="100"
-            height="100"
-        />
-        <div class="rosebud-exported-splash__text" aria-label="Rosebud.AI Make Games">
-            <strong>Rosebud.AI</strong>
-            <span>Make Games</span>
-        </div>
-    </div>
-</div>
     <div id="game-container"></div>
     <script type="module" src="main.js"></script>
-    <script src="https://storage.googleapis.com/rosebud_staticfiles/ChatManager.js"></script>
-    <script src="https://storage.googleapis.com/rosebud_staticfiles/ImageGenerator.js"></script>
-    <script src="https://storage.googleapis.com/rosebud_staticfiles/ProgressLogger.js"></script>
-    <script src="https://storage.googleapis.com/rosebud_staticfiles/OGP.js"></script>
-  
-<script>
-    (() => {
-        const splashRoot = document.getElementById('rosebud-exported-splash');
-        if (!splashRoot) return;
-
-        let isReady = false;
-        let isMinimumVisibleTimeElapsed = false;
-        let isHidden = false;
-
-        const maybeHideSplash = () => {
-            if (isHidden || !isReady || !isMinimumVisibleTimeElapsed) return;
-
-            isHidden = true;
-            splashRoot.classList.add('is-hiding');
-            window.setTimeout(() => splashRoot.remove(), 500);
-        };
-
-        const markReady = () => {
-            isReady = true;
-            maybeHideSplash();
-        };
-
-        window.setTimeout(() => {
-            isMinimumVisibleTimeElapsed = true;
-            maybeHideSplash();
-        }, 1000);
-
-        if (document.readyState === 'complete') {
-            markReady();
-        } else {
-            window.addEventListener('load', markReady, { once: true });
-        }
-
-        
-    })();
-</script></body>
+</body>
 </html>

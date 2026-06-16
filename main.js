@@ -6,9 +6,12 @@
 // (including any genuine future Tone or browser warnings) untouched.
 (() => {
     const originalWarn = console.warn.bind(console);
-    const SUPPRESS = 'The AudioContext is "suspended"';
+    const suppressedWarnings = [
+        'The AudioContext is "suspended"',
+        'The AudioContext was not allowed to start'
+    ];
     console.warn = (...args) => {
-        if (args.length && typeof args[0] === 'string' && args[0].includes(SUPPRESS)) return;
+        if (args.length && typeof args[0] === 'string' && suppressedWarnings.some(msg => args[0].includes(msg))) return;
         originalWarn(...args);
     };
 })();
@@ -22,6 +25,16 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { Player3D, Enemy3D, RotInfectedEnemy3D, LightPool3D, Boss3D, ShardcapWarden3D, DarkMycelius3D, GrandRotBoss3D, BogbellyMyconid3D, WidowcapWeaver3D, Collectible3D, NPC3D, Portal3D, Chest3D, NetTrap3D, Hazard3D, PuzzlePillar3D, SporeBomb3D, VoxelCorruptedHazard3D, InteractiveBuilding3D, RotCluster3D, CitadelGate3D } from './entities_3d.js';
 import { CONFIG } from './config.js';
+
+const SILENT_AUDIO_NODE = Object.freeze({
+    triggerAttackRelease() {},
+    start() {},
+    stop() {},
+    releaseAll() {},
+    connect() { return this; },
+    toDestination() { return this; },
+    dispose() {}
+});
 
 class LeaderboardManager {
     constructor() {
@@ -769,27 +782,19 @@ class Game3D {
         this.isPuzzleSolved = false;
         this.hitStopFrames = 0;
         
-        // Shared Audio - REFINED VOLUME FOR V1.8.4 MASTERING
-        this.uiSynth = new TONE.Synth({ volume: -12 }).toDestination();
-        this.cooldownSynth = new TONE.Synth({
-            oscillator: { type: "triangle" },
-            envelope: { attack: 0.01, decay: 0.1, sustain: 0.5, release: 0.2 },
-            volume: -20
-        }).toDestination();
-        this.impactSynth = new TONE.NoiseSynth({ volume: -15 }).toDestination();
-        this.burnSynth = new TONE.NoiseSynth({
-            noise: { type: 'brown' },
-            envelope: { attack: 0.1, decay: 0.8, sustain: 0 },
-            volume: -18
-        }).toDestination();
-        this.chestSynth = new TONE.PolySynth({ volume: -15 }).toDestination();
-        this.forgeSynth = new TONE.MembraneSynth({ volume: -10 }).toDestination();
-        this.restSynth = new TONE.PolySynth({ volume: -12 }).toDestination();
-        this.cookingSynth = new TONE.MembraneSynth({ volume: -15 }).toDestination();
-        this.gateActivationSynth = new TONE.PolySynth({ 
-            volume: -8,
-            oscillator: { type: "triangle" }
-        }).toDestination();
+        // Shared Audio - created lazily after the first real user gesture so
+        // browsers do not spam autoplay warnings during boot.
+        this.audioUnlocked = false;
+        this.sharedAudioReady = false;
+        this.uiSynth = SILENT_AUDIO_NODE;
+        this.cooldownSynth = SILENT_AUDIO_NODE;
+        this.impactSynth = SILENT_AUDIO_NODE;
+        this.burnSynth = SILENT_AUDIO_NODE;
+        this.chestSynth = SILENT_AUDIO_NODE;
+        this.forgeSynth = SILENT_AUDIO_NODE;
+        this.restSynth = SILENT_AUDIO_NODE;
+        this.cookingSynth = SILENT_AUDIO_NODE;
+        this.gateActivationSynth = SILENT_AUDIO_NODE;
 
         this.isMuted = false;
         this.thronecapStartTime = null;
@@ -848,97 +853,105 @@ class Game3D {
         this.tooltip.style.display = 'none';
     }
 
-    syncWithSolana() {
-        this.showGlobalNotification("INITIATING CLOUD RESTORATION...", "#00ffff");
-        this.uiSynth.triggerAttackRelease("C4", "8n");
-        
-        let progress = 0;
-        const totalDuration = 5000; // 5 seconds
-        const startTime = Date.now();
-        
-        const overlay = document.createElement('div');
-        overlay.id = 'restoration-modal';
-        overlay.style.cssText = `
-            position: absolute;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.9);
-            display: flex; flex-direction: column; justify-content: center; align-items: center;
-            z-index: 10000; font-family: 'Press Start 2P', cursive; color: #00ffff;
-            pointer-events: auto;
-        `;
-        document.body.appendChild(overlay);
+    ensureSharedAudio() {
+        if (this.sharedAudioReady) return;
 
-        const title = document.createElement('h2');
-        title.innerText = "SOLANA NETWORK SYNC";
-        title.style.marginBottom = "30px";
-        overlay.appendChild(title);
+        this.uiSynth = new TONE.Synth({ volume: -12 }).toDestination();
+        this.cooldownSynth = new TONE.Synth({
+            oscillator: { type: "triangle" },
+            envelope: { attack: 0.01, decay: 0.1, sustain: 0.5, release: 0.2 },
+            volume: -20
+        }).toDestination();
+        this.impactSynth = new TONE.NoiseSynth({ volume: -15 }).toDestination();
+        this.burnSynth = new TONE.NoiseSynth({
+            noise: { type: 'brown' },
+            envelope: { attack: 0.1, decay: 0.8, sustain: 0 },
+            volume: -18
+        }).toDestination();
+        this.chestSynth = new TONE.PolySynth({ volume: -15 }).toDestination();
+        this.forgeSynth = new TONE.MembraneSynth({ volume: -10 }).toDestination();
+        this.restSynth = new TONE.PolySynth({ volume: -12 }).toDestination();
+        this.cookingSynth = new TONE.MembraneSynth({ volume: -15 }).toDestination();
+        this.gateActivationSynth = new TONE.PolySynth({
+            volume: -8,
+            oscillator: { type: "triangle" }
+        }).toDestination();
+        this.sharedAudioReady = true;
 
-        const barContainer = document.createElement('div');
-        barContainer.style.cssText = `
-            width: 80%; max-width: 600px; height: 30px;
-            border: 2px solid #00ffff; padding: 3px; position: relative;
-        `;
-        overlay.appendChild(barContainer);
-
-        const bar = document.createElement('div');
-        bar.style.cssText = `
-            width: 0%; height: 100%; background: #00ffff;
-            box-shadow: 0 0 15px #00ffff; transition: width 0.1s;
-        `;
-        barContainer.appendChild(bar);
-
-        const milestoneLabel = document.createElement('p');
-        milestoneLabel.style.cssText = `
-            margin-top: 20px; font-size: 10px; color: #fff; text-align: center; line-height: 1.5;
-        `;
-        overlay.appendChild(milestoneLabel);
-
-        const detailLabel = document.createElement('p');
-        detailLabel.style.cssText = `
-            margin-top: 10px; font-size: 8px; color: #666; text-align: center;
-        `;
-        overlay.appendChild(detailLabel);
-
-        const updateSync = () => {
-            const now = Date.now();
-            const elapsed = now - startTime;
-            progress = Math.min(100, (elapsed / totalDuration) * 100);
-            
-            bar.style.width = progress + '%';
-            
-            // Find current milestone
-            const milestone = CONFIG.RESTORATION_MILESTONES.slice().reverse().find(m => progress >= m.progress) || CONFIG.RESTORATION_MILESTONES[0];
-            milestoneLabel.innerText = `STATUS: ${milestone.label}`;
-            detailLabel.innerText = milestone.desc;
-
-            // Visual feedback in world
-            this.glitchIntensity = Math.max(0, 0.5 - (progress / 100)); // Glitch recedes as we sync
-
-            if (progress < 100) {
-                requestAnimationFrame(updateSync);
-            } else {
-                setTimeout(() => {
-                    overlay.remove();
-                    this.showGlobalNotification("NETWORK FULLY CALIBRATED", "#39FF14");
-                    this.uiSynth.triggerAttackRelease("C5", "4n");
-                    // Refresh landmarks after sync
-                    this.spawnRestorationLandmarks();
-                    
-                    // Restoration Burst Visual
-                    if (this.player) {
-                        this.showBossDefeatEffect(this.player.group.position);
-                        this.showFloatingText("SYNCHRONIZED!", 0x00ffff, true);
-                    }
-                }, 1000);
+        try {
+            TONE.Destination.mute = this.isMuted;
+            const vol = this.progression?.data?.settings?.masterVolume;
+            if (typeof vol === 'number') {
+                TONE.Destination.volume.value = TONE.gainToDb(vol);
             }
+        } catch (_) {}
+    }
+
+    attachRestorationHeartAudio() {
+        if (!this.audioUnlocked || !this.heartParticles) return;
+
+        if (this.heartHum) this.heartHum.dispose();
+        if (this.heartPanner) this.heartPanner.dispose();
+
+        this.heartPanner = new TONE.Panner3D({
+            positionX: 0,
+            positionY: 10,
+            positionZ: -40,
+            rolloffFactor: 2
+        }).toDestination();
+
+        this.heartHum = new TONE.Player({
+            url: "assets/audio/network-heart-hum.mp3",
+            loop: true,
+            autostart: true,
+            volume: -35
+        }).connect(this.heartPanner);
+    }
+
+    async unlockAudio() {
+        try {
+            await TONE.start();
+        } catch (_) {}
+        this.audioUnlocked = true;
+        this.ensureSharedAudio();
+        if (this.player?.enableAudio) this.player.enableAudio();
+        if (Array.isArray(this.portals)) this.portals.forEach(portal => portal?.enableAudio?.());
+        this.attachRestorationHeartAudio();
+    }
+
+    updateOverlayChrome() {
+        const showWorldHud = this.gameState === 'PLAYING';
+        if (this.clockUI) this.clockUI.style.display = showWorldHud ? 'flex' : 'none';
+        if (this.restorationHUD) this.restorationHUD.style.display = 'none';
+    }
+
+    syncWithSolana() {
+        const payload = {
+            exportedAt: new Date().toISOString(),
+            build: '1.9.37',
+            walletAddress: this.walletAddress || null,
+            progression: this.progression?.data || null,
+            leaderboard: this.leaderboard?.data || null
         };
 
-        requestAnimationFrame(updateSync);
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `myco-quest-backup-${stamp}.json`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+        this.showGlobalNotification('ADVENTURE BACKUP DOWNLOADED', '#39FF14');
+        this.uiSynth.triggerAttackRelease('E4', '8n');
     }
 
     toggleSound() {
         this.isMuted = !this.isMuted;
-        TONE.Destination.mute = this.isMuted;
+        if (this.sharedAudioReady) TONE.Destination.mute = this.isMuted;
         this.updateHud();
         this.uiSynth.triggerAttackRelease("C4", "16n");
     }
@@ -1049,7 +1062,7 @@ class Game3D {
         volumeSlider.addEventListener('input', (e) => {
             const vol = parseFloat(e.target.value);
             settings.masterVolume = vol;
-            TONE.Destination.volume.value = TONE.gainToDb(vol);
+            if (this.sharedAudioReady) TONE.Destination.volume.value = TONE.gainToDb(vol);
             const label = volumeSlider.previousElementSibling;
             if (label) label.innerText = `MASTER RESONANCE: ${Math.round(vol * 100)}%`;
         });
@@ -1249,8 +1262,8 @@ class Game3D {
                 </div>
 
                 <div style="margin-top: 20px; border-top: 1px solid #333; padding-top: 15px;">
-                    <button onclick="window.game.syncWithSolana()" class="tooltip-trigger" data-tip="Sync progress to the Solana network" style="width: 100%; padding: 10px; background: #00ffff; border: none; font-family: inherit; font-size: 8px; cursor: pointer; color: #000;">
-                        SYNC WITH SOLANA (MOCK)
+                    <button onclick="window.game.syncWithSolana()" class="tooltip-trigger" data-tip="Download a local backup of your adventure" style="width: 100%; padding: 10px; background: #00ffff; border: none; font-family: inherit; font-size: 8px; cursor: pointer; color: #000;">
+                        EXPORT SAVE BACKUP
                     </button>
                 </div>
             </div>
@@ -1272,7 +1285,7 @@ class Game3D {
             volumeSlider.addEventListener('input', (e) => {
                 const vol = parseFloat(e.target.value);
                 settings.masterVolume = vol;
-                TONE.Destination.volume.value = TONE.gainToDb(vol);
+                if (this.sharedAudioReady) TONE.Destination.volume.value = TONE.gainToDb(vol);
                 this.progression.save();
                 const label = volumeSlider.previousElementSibling;
                 if (label) label.innerText = `MASTER RESONANCE: ${Math.round(vol * 100)}%`;
@@ -1862,7 +1875,7 @@ class Game3D {
             font-family: "Press Start 2P", cursive;
             font-size: 10px;
             z-index: 1000;
-            display: flex;
+            display: none;
             flex-direction: column;
             align-items: center;
             gap: 5px;
@@ -1898,7 +1911,7 @@ class Game3D {
             font-family: "Press Start 2P", cursive;
             font-size: 8px;
             z-index: 1000;
-            display: flex;
+            display: none;
             flex-direction: column;
             gap: 8px;
             min-width: 180px;
@@ -3643,23 +3656,8 @@ class Game3D {
         group.add(particles);
         this.heartParticles = particles;
 
-        // Spatial Audio Hum - REFINED FOR V1.8.4
-        if (this.heartHum) this.heartHum.dispose();
-        if (this.heartPanner) this.heartPanner.dispose();
-
-        this.heartPanner = new TONE.Panner3D({
-            positionX: 0,
-            positionY: 10,
-            positionZ: -40,
-            rolloffFactor: 2 // Slightly higher rolloff for better spatial focus
-        }).toDestination();
-
-        this.heartHum = new TONE.Player({
-            url: "assets/audio/network-heart-hum.mp3",
-            loop: true,
-            autostart: true,
-            volume: -35 // Lowered from -25 for better background balance
-        }).connect(this.heartPanner);
+        // Spatial audio is attached lazily after the first real user gesture.
+        this.attachRestorationHeartAudio();
 
         return group;
     }
@@ -4752,15 +4750,16 @@ class Game3D {
         const minutes = Math.floor((this.timeOfDay % 1) * 60);
         const timeStr = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
         
-        let period = "MIDNIGHT";
+        let period = "NIGHT";
         if (hours >= 5 && hours < 8) period = "SUNRISE";
-        else if (hours >= 8 && hours < 17) period = "DAYLIGHT";
+        else if (hours >= 8 && hours < 17) period = "DAY";
         else if (hours >= 17 && hours < 20) period = "SUNSET";
         else if (hours >= 20 || hours < 5) period = "NIGHT";
 
         this.clockUI.innerHTML = `
-            <div style="font-size: 8px; color: #fff;">${period}</div>
-            <div style="font-size: 14px;">${timeStr}</div>
+            <div style="font-size: 7px; color: #9be98a; letter-spacing: 1px;">WORLD TIME</div>
+            <div style="font-size: 8px; color: #ffffff;">${period}</div>
+            <div style="font-size: 14px; color: #ffffff;">${timeStr}</div>
         `;
 
         // Don't apply cycle lighting if interior
@@ -5529,7 +5528,7 @@ class Game3D {
             this.uiOverlay.innerHTML = `
                 <div style="pointer-events: auto; background: rgba(10,0,0,0.95); padding: 30px; border: 2px solid #ff0000; width: 90%; max-width: 800px; text-align: center; box-shadow: 0 0 30px #ff0000;">
                     <h2 style="color: #ff0000; margin-bottom: 10px; font-size: 24px; text-shadow: 0 0 10px #f00;">THE GREAT SPORE BURN</h2>
-                    <p style="color: #ffaa00; font-size: 10px; margin-bottom: 20px;">Burn Spores to restore the Solana Network.<br>Every Sunday at 8PM CST, Spores are converted to $KINGMYCO.</p>
+                    <p style="color: #ffaa00; font-size: 10px; margin-bottom: 20px;">Burn Spores to restore the Myco Kingdom network heart.<br>Every Sunday at 8PM CST, Spores are converted to $KINGMYCO.</p>
                     
                     <div style="background: rgba(255,0,0,0.1); padding: 15px; border-radius: 5px; margin-bottom: 25px;">
                         <p style="color: #fff; font-size: 12px; margin-bottom: 5px;">NEXT CONVERSION IN:</p>
@@ -5743,26 +5742,26 @@ class Game3D {
                     <div style="width: 32px; height: 32px; background: #ff0000; border-radius: 50%; margin-right: 10px; display: flex; align-items: center; justify-content: center; font-weight: bold; color: white;">B</div>
                     <div style="flex: 1;">
                         <div style="color: white; font-size: 14px; font-weight: bold;">Fungal Restoration</div>
-                        <div style="color: #888; font-size: 11px;">myco-quest.rosebud.ai</div>
+                        <div style="color: #888; font-size: 11px;">Myco Kingdom Network</div>
                     </div>
                 </div>
                 <div style="padding: 20px; text-align: center;">
-                    <div style="color: #888; font-size: 12px; margin-bottom: 5px;">Spores to be Consumed</div>
+                    <div style="color: #888; font-size: 12px; margin-bottom: 5px;">Spores to Burn</div>
                     <div style="color: #ff4444; font-size: 24px; font-weight: bold; margin-bottom: 10px;">-${amount} Spores</div>
                     <div style="color: #39FF14; font-size: 12px; margin-bottom: 20px;">Burn Value: ${(amount * 0.10).toFixed(2)} $KINGMYCO</div>
                     
                     <div style="background: #222; border-radius: 8px; padding: 12px; text-align: left; margin-bottom: 20px;">
                         <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-                            <span style="color: #888; font-size: 11px;">Restoration Fee</span>
-                            <span style="color: #39FF14; font-size: 11px;">0.000005 SOL</span>
+                            <span style="color: #888; font-size: 11px;">Destination</span>
+                            <span style="color: white; font-size: 11px;">Kingdom Burn Ledger</span>
                         </div>
                         <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-                            <span style="color: #888; font-size: 11px;">Target</span>
-                            <span style="color: white; font-size: 11px;">Solana Incinerator</span>
+                            <span style="color: #888; font-size: 11px;">Settlement</span>
+                            <span style="color: #39FF14; font-size: 11px;">Sunday reward conversion</span>
                         </div>
                         <div style="display: flex; justify-content: space-between;">
-                            <span style="color: #888; font-size: 11px;">Signature</span>
-                            <span style="color: #00ffff; font-size: 8px; font-family: monospace;">5f8e...3a1c</span>
+                            <span style="color: #888; font-size: 11px;">Result</span>
+                            <span style="color: #00ffff; font-size: 8px; font-family: monospace;">Local adventure progress updates instantly</span>
                         </div>
                     </div>
 
@@ -5772,7 +5771,7 @@ class Game3D {
                     </div>
                 </div>
                 <div style="padding: 10px; text-align: center; color: #555; font-size: 10px; border-top: 1px solid #333;">
-                    Spore Burn Protocol V1.2.0 - Mainnet Bridge
+                    Spore Burn Protocol V1.2.0
                 </div>
             </div>
         `;
@@ -5793,8 +5792,6 @@ class Game3D {
             setTimeout(() => {
                 approveBtn.innerText = "Finalizing...";
                 setTimeout(() => {
-                    const sig = Array.from({length: 64}, () => Math.floor(Math.random() * 16).toString(16)).join('');
-                    console.log(`%c[SOLANA] Burn successful! Signature: ${sig}`, "color: #00ffa3; font-weight: bold;");
                     overlay.remove();
                     onComplete();
                 }, 1200);
@@ -5832,67 +5829,67 @@ class Game3D {
         const titleSz = isMobile ? 32 : 48;
         const subSz   = isMobile ? 11 : 14;
         const lvlSz   = isMobile ? 9  : 10;
-        const padIn   = isMobile ? 24 : 50;
-        const gapSz   = isMobile ? 12 : 15;
+        const padIn   = isMobile ? 20 : 50;
+        const gapSz   = isMobile ? 10 : 15;
         const startFs = isMobile ? 15 : 18;
         const btnFs   = isMobile ? 11 : 12;
         const smFs    = isMobile ? 10 : 10;
-        const topPad  = isMobile ? 'calc(20px + env(safe-area-inset-top))' : '40px';
-        const botPad  = isMobile ? 'calc(40px + env(safe-area-inset-bottom))' : '40px';
+        const topPad  = isMobile ? 'calc(12px + env(safe-area-inset-top))' : '40px';
+        const botPad  = isMobile ? 'calc(28px + env(safe-area-inset-bottom))' : '40px';
         const tapBtn  = 'min-height: 44px; touch-action: manipulation; -webkit-tap-highlight-color: transparent;';
 
         this.uiOverlay.innerHTML = `
             <div id="start-screen-wrap" style="pointer-events: auto; width: 100%; min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: ${isMobile ? 'flex-start' : 'center'}; padding: ${topPad} 12px ${botPad} 12px; box-sizing: border-box;">
-                <div id="start-screen" style="display: flex; flex-direction: column; align-items: center; width: 100%; max-width: ${isMobile ? 360 : 480}px; background: rgba(0,0,0,0.85); padding: ${padIn}px; border: 4px solid #39FF14; border-radius: 15px; box-shadow: 0 0 30px #39FF14; text-align: center; box-sizing: border-box;">
-                    <h1 class="neon-text" style="font-size: ${titleSz}px; margin: 0 0 10px 0; color: #39FF14; text-shadow: 0 0 10px #39FF14; line-height: 1.1;">MYCO QUEST</h1>
-                    <p style="font-size: ${subSz}px; margin: 0 0 5px 0; color: #fff; letter-spacing: 2px;">THE SOLANA RESTORATION</p>
-                    <p style="font-size: ${lvlSz}px; margin: 0 0 ${isMobile ? 18 : 30}px 0; color: #888;">LVL ${this.progression.data.level} KING MYCO</p>
+                <div id="start-screen" style="display: flex; flex-direction: column; align-items: center; width: 100%; max-width: ${isMobile ? 344 : 500}px; background: linear-gradient(180deg, rgba(8,12,14,0.92), rgba(2,5,6,0.88)); padding: ${padIn}px; border: 3px solid rgba(57,255,20,0.82); border-radius: 18px; box-shadow: 0 18px 48px rgba(0,0,0,0.45), 0 0 24px rgba(57,255,20,0.16); text-align: center; box-sizing: border-box; backdrop-filter: blur(4px);">
+                    <h1 class="neon-text" style="font-size: ${titleSz}px; margin: 0 0 10px 0; color: #39FF14; text-shadow: 0 0 10px #39FF14; line-height: 1.1;">MYCO KINGDOM</h1>
+                    <p style="font-size: ${subSz}px; margin: 0 0 5px 0; color: #fff; letter-spacing: 2px;">RECLAIM THE NETWORK HEART</p>
+                    <p style="font-size: ${lvlSz}px; margin: 0 0 ${isMobile ? 18 : 30}px 0; color: #8ca098; letter-spacing: 1px;">KING MYCO • LEVEL ${this.progression.data.level}</p>
 
                     <div style="display: flex; flex-direction: column; gap: ${gapSz}px; width: 100%; margin-bottom: ${isMobile ? 18 : 30}px;">
                         <button id="start-button" style="padding: 15px; font-size: ${startFs}px; background: #39FF14; border: none; color: black; font-family: inherit; cursor: pointer; ${tapBtn}">
-                            ${hasSave ? 'RESUME ADVENTURE' : 'BEGIN JOURNEY'}
+                            ${hasSave ? 'CONTINUE ADVENTURE' : 'START ADVENTURE'}
                         </button>
                         ${hasSave ? `<button id="new-game-button" style="padding: 12px; font-size: ${btnFs}px; background: #ff4400; border: none; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">NEW JOURNEY</button>` : ''}
-                        ${hasSave ? `<button id="change-mode-button" style="padding: 10px; font-size: ${smFs}px; background: #6a0dad; border: none; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">CHANGE MODE ${this.progression.data.gameMode === 'COLLECTOR' ? '(SPORE COLLECTOR)' : '(STORY)'}</button>` : ''}
+                        ${hasSave ? `<button id="change-mode-button" style="padding: 10px; font-size: ${smFs}px; background: #6a0dad; border: none; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">${this.progression.data.gameMode === 'COLLECTOR' ? 'GAME MODE: SPORE COLLECTOR' : 'GAME MODE: STORY CAMPAIGN'}</button>` : ''}
                         <div style="display: flex; gap: 10px;">
-                            <button id="leaderboard-button" style="flex: 1; padding: 12px; font-size: ${smFs}px; background: #00ffff; border: none; color: black; font-family: inherit; cursor: pointer; ${tapBtn}">LEADERBOARD</button>
-                            <button id="hall-of-fame-button" style="flex: 1; padding: 12px; font-size: ${smFs}px; background: #ffaa00; border: none; color: black; font-family: inherit; cursor: pointer; ${tapBtn}">HALL OF FAME</button>
+                            <button id="leaderboard-button" style="flex: 1; padding: 12px; font-size: ${smFs}px; background: rgba(0,255,255,0.12); border: 1px solid #00ffff; color: #b8ffff; font-family: inherit; cursor: pointer; ${tapBtn}">LEADERBOARD</button>
+                            <button id="hall-of-fame-button" style="flex: 1; padding: 12px; font-size: ${smFs}px; background: rgba(255,170,0,0.12); border: 1px solid #ffaa00; color: #ffd280; font-family: inherit; cursor: pointer; ${tapBtn}">HALL OF FAME</button>
                         </div>
-                        <button id="settings-button" style="padding: 12px; font-size: ${btnFs}px; background: #555; border: none; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">SETTINGS</button>
+                        <button id="settings-button" style="padding: 12px; font-size: ${btnFs}px; background: #2f3436; border: 1px solid #6f7a74; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">SETTINGS</button>
                     </div>
 
                     <div style="width: 100%; height: 1px; background: #333; margin-bottom: ${isMobile ? 16 : 25}px;"></div>
 
                     <div style="display: flex; flex-direction: column; gap: 10px; align-items: center; width: 100%;">
-                        <button id="wallet-button" style="padding: 12px 25px; font-size: ${smFs}px; background: ${isConnected ? '#333' : '#6a0dad'}; border: 1px solid #6a0dad; color: white; font-family: inherit; cursor: pointer; border-radius: 5px; ${tapBtn}">
-                            ${isConnected ? `CONNECTED: ${this.walletAddress.slice(0, 4)}...${this.walletAddress.slice(-4)}` : 'CONNECT SOLANA WALLET'}
+                        <button id="wallet-button" style="padding: 12px 25px; font-size: ${smFs}px; background: ${isConnected ? '#333' : 'rgba(106,13,173,0.16)'}; border: 1px solid #6a0dad; color: white; font-family: inherit; cursor: pointer; border-radius: 5px; ${tapBtn}">
+                            ${isConnected ? `WALLET LINKED: ${this.walletAddress.slice(0, 4)}...${this.walletAddress.slice(-4)}` : 'LINK WALLET'}
                         </button>
                         ${isConnected ? `<button id="disconnect-wallet" style="font-size: 8px; color: #666; background: none; border: none; cursor: pointer; text-decoration: underline; ${tapBtn}">Disconnect</button>` : ''}
                     </div>
 
                     <div style="margin-top: ${isMobile ? 16 : 24}px; width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; background: rgba(255,255,255,0.03); border: 1px solid #222; border-radius: 6px;">
                         <div style="text-align: left; flex: 1;">
-                            <div style="font-size: 9px; color: #ccc; letter-spacing: 1px;">LOW PERF MODE</div>
-                            <div style="font-size: 7px; color: #666; margin-top: 2px;">
-                                ${this.progression.data.settings.lowPerfMode === true ? 'FORCED ON · cheaper rendering' :
-                                  this.progression.data.settings.lowPerfMode === false ? 'FORCED OFF · full effects' :
-                                  `AUTO (${this.mobilePerf ? 'on' : 'off'})`}
+                            <div style="font-size: 9px; color: #ccc; letter-spacing: 1px;">GRAPHICS PROFILE</div>
+                            <div style="font-size: 7px; color: #7f8b85; margin-top: 2px;">
+                                ${this.progression.data.settings.lowPerfMode === true ? 'BATTERY SAVER · longer sessions' :
+                                  this.progression.data.settings.lowPerfMode === false ? 'HIGH FIDELITY · full effects' :
+                                  'SMART AUTO · adapts to this device'}
                             </div>
                         </div>
                         <button id="low-perf-toggle" style="padding: 8px 12px; font-size: 9px; background: ${this.progression.data.settings.lowPerfMode === true ? '#ff8800' : this.progression.data.settings.lowPerfMode === false ? '#39FF14' : '#444'}; color: ${this.progression.data.settings.lowPerfMode === false ? '#000' : '#fff'}; border: none; font-family: inherit; cursor: pointer; border-radius: 4px; min-width: 70px; ${tapBtn}">
-                            ${this.progression.data.settings.lowPerfMode === true ? 'ON' : this.progression.data.settings.lowPerfMode === false ? 'OFF' : 'AUTO'}
+                            ${this.progression.data.settings.lowPerfMode === true ? 'BATTERY' : this.progression.data.settings.lowPerfMode === false ? 'HIGH' : 'AUTO'}
                         </button>
                     </div>
 
-                    <div style="margin-top: ${isMobile ? 16 : 24}px; font-size: 8px; color: #444;">
-                        V1.9.37 - SPOREWOOD ROSTER
+                    <div style="margin-top: ${isMobile ? 14 : 24}px; font-size: 8px; color: #73817a; letter-spacing: 1px; opacity: 0.9;">
+                        v1.9.37
                     </div>
                 </div>
             </div>
         `;
 
         document.getElementById('start-button').addEventListener('click', async () => {
-            await TONE.start();
+            await this.unlockAudio();
             if (hasSave) {
                 this.showLoadConfirmation();
             } else {
@@ -5938,9 +5935,9 @@ class Game3D {
                 // Re-render the start screen so the row updates immediately.
                 // Then offer a reload so the renderer actually re-initializes.
                 this.setupStartScreen();
-                const label = next === true ? 'LOW PERF MODE: ON' :
-                              next === false ? 'LOW PERF MODE: OFF' :
-                              'LOW PERF MODE: AUTO';
+                const label = next === true ? 'GRAPHICS: BATTERY SAVER' :
+                              next === false ? 'GRAPHICS: HIGH FIDELITY' :
+                              'GRAPHICS: SMART AUTO';
                 if (confirm(`${label}\n\nReload now to apply graphics changes?`)) {
                     location.reload();
                 }
@@ -5965,7 +5962,7 @@ class Game3D {
                          onmouseout="this.style.borderColor='${current === 'STORY' ? '#39FF14' : '#333'}'; this.style.boxShadow='none'; this.style.transform='translateY(0)'">
                         <div style="font-size: 32px; margin-bottom: 8px;">⚔️</div>
                         <h3 style="color: #39FF14; font-size: 16px; margin: 0 0 6px 0; letter-spacing: 1px;">STORY MODE</h3>
-                        <p style="color: #888; font-size: 9px; letter-spacing: 1px; margin: 0 0 14px 0;">THE SOLANA RESTORATION</p>
+                        <p style="color: #888; font-size: 9px; letter-spacing: 1px; margin: 0 0 14px 0;">FULL CAMPAIGN</p>
                         <ul style="color: #ddd; font-size: 11px; line-height: 1.6; padding-left: 18px; margin: 0 0 18px 0;">
                             <li>Full quest, combat, and progression</li>
                             <li>Reclaim 7 Crown Shards</li>
@@ -6535,7 +6532,7 @@ class Game3D {
         `;
 
         document.getElementById('confirm-load').addEventListener('click', async () => {
-            await TONE.start();
+            await this.unlockAudio();
             this.uiSynth.triggerAttackRelease("C5", "8n");
             this.startGameplay();
         });
@@ -6548,11 +6545,11 @@ class Game3D {
     showNewGameConfirmation() {
         this.uiOverlay.innerHTML = `
             <div style="pointer-events: auto; display: flex; flex-direction: column; align-items: center; background: rgba(0,0,0,0.95); padding: 40px; border: 4px solid #ff4400; border-radius: 10px; box-shadow: 0 0 30px #ff4400; text-align: center; max-width: 500px;">
-                <h2 style="color: #ff4400; font-size: 20px; margin-bottom: 20px;">WIPE NETWORK CACHE?</h2>
-                <p style="color: #fff; font-size: 12px; margin-bottom: 30px; line-height: 1.6;">Starting a New Journey will erase all current progress, including levels, spores, and unlocked regions.<br><br><span style="color: #ff4400;">THIS CANNOT BE UNDONE.</span></p>
+                <h2 style="color: #ff4400; font-size: 20px; margin-bottom: 20px;">START A FRESH ADVENTURE?</h2>
+                <p style="color: #fff; font-size: 12px; margin-bottom: 30px; line-height: 1.6;">Starting a new adventure will erase your current progress, including levels, spores, and unlocked regions.<br><br><span style="color: #ff4400;">THIS CANNOT BE UNDONE.</span></p>
                 <div style="display: flex; gap: 20px; width: 100%;">
-                    <button id="confirm-new" style="flex: 1; padding: 15px; background: #ff4400; border: none; color: white; font-family: inherit; cursor: pointer;">WIPE & START</button>
-                    <button id="cancel-new" style="flex: 1; padding: 15px; background: #333; border: none; color: white; font-family: inherit; cursor: pointer;">ABORT</button>
+                    <button id="confirm-new" style="flex: 1; padding: 15px; background: #ff4400; border: none; color: white; font-family: inherit; cursor: pointer;">RESET & START</button>
+                    <button id="cancel-new" style="flex: 1; padding: 15px; background: #333; border: none; color: white; font-family: inherit; cursor: pointer;">GO BACK</button>
                 </div>
             </div>
         `;
@@ -6574,7 +6571,6 @@ class Game3D {
                 const provider = window.solana;
                 if (provider.isPhantom) return provider;
             }
-            // Return null but simulate the flow if we're in an environment without Phantom
             return null;
         };
 
@@ -6592,8 +6588,7 @@ class Game3D {
                 this.showFloatingText("CONNECTION REJECTED", 0xff0000);
             }
         } else {
-            // Simulated Phantom Flow for users without the extension in sandbox
-            this.showSimulatedWalletConnection();
+            this.showWalletConnectionHelp();
         }
     }
 
@@ -6605,8 +6600,11 @@ class Game3D {
 
     loadWalletConnection() {
         const saved = localStorage.getItem('myco_quest_wallet');
-        if (saved) {
+        const isValidSolanaAddress = typeof saved === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(saved);
+        if (isValidSolanaAddress) {
             this.walletAddress = saved;
+        } else if (saved) {
+            localStorage.removeItem('myco_quest_wallet');
         }
     }
 
@@ -6617,7 +6615,7 @@ class Game3D {
         this.showFloatingText("WALLET DISCONNECTED", 0x888888);
     }
 
-    showSimulatedWalletConnection() {
+    showWalletConnectionHelp() {
         const overlay = document.createElement('div');
         overlay.style.position = 'absolute';
         overlay.style.top = '0';
@@ -6633,36 +6631,28 @@ class Game3D {
         document.body.appendChild(overlay);
 
         overlay.innerHTML = `
-            <div style="background: #1a1a1a; width: 320px; border-radius: 12px; font-family: sans-serif; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid #333;">
+            <div style="background: #1a1a1a; width: 340px; border-radius: 12px; font-family: sans-serif; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid #333;">
                 <div style="background: #2a2a2a; padding: 20px; text-align: center; border-bottom: 1px solid #333;">
                     <img src="https://phantom.app/img/logo.png" style="width: 64px; height: 64px; margin-bottom: 15px; border-radius: 15px;">
-                    <div style="color: white; font-size: 18px; font-weight: bold;">Connect Phantom</div>
-                    <div style="color: #888; font-size: 13px; margin-top: 5px;">myco-quest.rosebud.ai</div>
+                    <div style="color: white; font-size: 18px; font-weight: bold;">Wallet Not Detected</div>
+                    <div style="color: #888; font-size: 13px; margin-top: 5px;">Myco Kingdom</div>
                 </div>
                 <div style="padding: 20px;">
-                    <p style="color: #ccc; font-size: 13px; text-align: center; margin-bottom: 20px;">
-                        Simulating a secure connection to your Solana wallet.
+                    <p style="color: #ccc; font-size: 13px; text-align: center; margin-bottom: 20px; line-height: 1.6;">
+                        Install or open a Solana wallet such as Phantom in this browser to connect your account. You can keep playing without a wallet for now.
                     </p>
                     <div style="display: flex; gap: 10px;">
-                        <button id="sim-cancel" style="flex: 1; padding: 12px; border-radius: 8px; border: 1px solid #444; background: transparent; color: white; font-weight: bold; cursor: pointer;">Cancel</button>
-                        <button id="sim-connect" style="flex: 1; padding: 12px; border-radius: 8px; border: none; background: #6a0dad; color: white; font-weight: bold; cursor: pointer;">Connect</button>
+                        <button id="wallet-help-close" style="flex: 1; padding: 12px; border-radius: 8px; border: 1px solid #444; background: transparent; color: white; font-weight: bold; cursor: pointer;">Not Now</button>
+                        <button id="wallet-help-continue" style="flex: 1; padding: 12px; border-radius: 8px; border: none; background: #6a0dad; color: white; font-weight: bold; cursor: pointer;">Keep Playing</button>
                     </div>
                 </div>
             </div>
         `;
 
-        overlay.querySelector('#sim-cancel').onclick = () => overlay.remove();
-        overlay.querySelector('#sim-connect').onclick = () => {
-            const btn = overlay.querySelector('#sim-connect');
-            btn.innerText = "Connecting...";
-            btn.disabled = true;
-            setTimeout(() => {
-                this.walletAddress = "B9r7...mYc0"; // Simulated addr
-                this.saveWalletConnection();
-                overlay.remove();
-                this.setupStartScreen();
-                this.showFloatingText("MOCK WALLET CONNECTED", 0x39FF14);
-            }, 800);
+        overlay.querySelector('#wallet-help-close').onclick = () => overlay.remove();
+        overlay.querySelector('#wallet-help-continue').onclick = () => {
+            overlay.remove();
+            this.showFloatingText("PLAYING WITHOUT WALLET", 0x888888);
         };
     }
 
@@ -6918,7 +6908,7 @@ class Game3D {
                         </div>
                         <div style="text-align: right;">
                             <p style="color: #444; font-size: 8px;">DATE: ${new Date(entry.date).toLocaleDateString()}</p>
-                            <p style="color: #333; font-size: 6px; margin-top: 5px;">VERIFIED BY SOLANA MAINNET BRIDGE</p>
+                            <p style="color: #333; font-size: 6px; margin-top: 5px;">VERIFIED BY THE KINGDOM ARCHIVE</p>
                         </div>
                     </div>
                 </div>
@@ -6940,7 +6930,7 @@ class Game3D {
         
         document.getElementById('close-cert').onclick = () => certOverlay.remove();
         document.getElementById('copy-cert').onclick = () => {
-            const shareText = `🍄 I restored the Solana Network in Myco Quest! 🍄\n\nRank: ${rankText}\nTime: ${entry.time.toFixed(2)}s\nClan: ${entry.clan.toUpperCase()}\n\nPlay now: ${window.location.href}`;
+            const shareText = `🍄 I restored the Network Heart in Myco Quest! 🍄\n\nRank: ${rankText}\nTime: ${entry.time.toFixed(2)}s\nClan: ${entry.clan.toUpperCase()}\n\nPlay now: ${window.location.href}`;
             navigator.clipboard.writeText(shareText).then(() => {
                 const btn = document.getElementById('copy-cert');
                 const oldText = btn.innerText;
@@ -7052,14 +7042,14 @@ class Game3D {
 
     async startEpicStory() {
         this.gameState = 'PROLOGUE';
-        await TONE.start();
+        await this.unlockAudio();
         this.playEpicMusic('START');
 
         this.uiOverlay.innerHTML = `
             <div class="scrolling-story">
                 <h2 class="neon-text" style="font-size: 32px; margin-bottom: 50px;">A TALE OF TWO NETWORKS</h2>
                 <p style="line-height: 2.5; font-size: 16px; margin-bottom: 100px; padding: 0 20px;">
-                    In an era where the Solana network hummed in perfect harmony,<br>
+                    In an era where the Network Heart hummed in perfect harmony,<br>
                     the Mycoverse flourished under the light of pure data.<br><br>
                     But the Rot came—a corruptive darkness from the deep void,<br>
                     shattering the sacred crown of King Myco.<br><br>
@@ -7067,7 +7057,7 @@ class Game3D {
                     and the neon pulse of our world began to fade.<br><br>
                     You, King Myco, must rise from the fungal depths.<br>
                     Scale the heights, reclaim the golden spores,<br>
-                    and restore the stability of the Solana network.<br><br>
+                    and restore balance to the Mycoverse.<br><br>
                     Your journey begins in the Neon Grove...
                 </p>
                 <button id="skip-story" style="pointer-events: auto; padding: 15px 30px; background: white; border: none; color: black;">SKIP TALE</button>
@@ -7500,7 +7490,7 @@ class Game3D {
             <div style="background: #111; padding: ${isMobile ? 24 : 40}px; border: 4px solid ${color}; max-width: 500px; width: 100%; text-align: center; border-radius: 15px; box-shadow: 0 0 40px ${color}; box-sizing: border-box;">
                 <h2 style="color: ${color}; margin-bottom: 20px; font-size: ${isMobile ? 16 : 20}px;">PLEDGE TO ${clanName}?</h2>
                 <p style="color: #fff; font-size: ${isMobile ? 11 : 12}px; margin-bottom: ${isMobile ? 22 : 30}px; line-height: 1.6;">
-                    "I, King Myco, swear my allegiance to the ${clanName} Clan. I will use the ${config.powerName} to restore the Solana network and defend our fungal sovereignty."
+                    "I, King Myco, swear my allegiance to the ${clanName} Clan. I will use the ${config.powerName} to restore the Network Heart and defend our fungal sovereignty."
                 </p>
                 <div style="display: flex; gap: ${isMobile ? 12 : 20}px; justify-content: center; flex-wrap: wrap;">
                     <button id="pledge-decline" style="padding: 15px 24px; background: #333; color: white; border: none; font-family: inherit; cursor: pointer; min-height: 48px; min-width: 120px; touch-action: manipulation; -webkit-tap-highlight-color: transparent; font-size: ${isMobile ? 11 : 12}px;">DECLINE</button>
@@ -7797,6 +7787,14 @@ class Game3D {
             const magicPercent = Math.max(0, Math.min(100, (magicCur / magicMax) * 100));
             const alignment = (p.alignment != null) ? p.alignment : 50;
             const alignPercent = Math.max(0, Math.min(100, alignment));
+            const isCollectorMode = this.progression.isCollectorMode();
+            const regionLabel = (this.currentRegion?.name || 'Sanctuary').toUpperCase();
+            const shardCount = prog.shardsCollected || 0;
+            const statusLabel = isCollectorMode ? 'SPORE COLLECTOR' : 'STORY CAMPAIGN';
+            const statusTitle = isCollectorMode ? 'Daily harvest active' : 'Expedition in progress';
+            const statusDetail = isCollectorMode
+                ? `${this.progression.getCollectorRemainingToday()} spores left today`
+                : `${shardCount}/7 crown shards reclaimed`;
             // Color the morality bar: low alignment = rot purple, mid = neutral white,
             // high = clan-green so the player can read their standing at a glance.
             let moralColor;
@@ -7853,10 +7851,14 @@ class Game3D {
                     </div>
                     ` : ''}
 
-                    <!-- Top Left Chat Mock -->
-                    <div style="position: absolute; top: 10px; left: 10px; width: 250px; background: rgba(0,0,0,0.3); padding: 5px; border-radius: 5px;">
-                        <div style="color: white; font-size: 12px; margin-bottom: 2px;">[System]: Welcome to Myco Quest!</div>
-                        <div style="color: #00ffff; font-size: 12px;">[King Myco]: Solana restored soon.</div>
+                    <!-- Top Left Session Status -->
+                    <div style="position: absolute; top: 10px; left: 10px; width: 240px; background: rgba(4,8,10,0.55); border: 1px solid rgba(0,255,255,0.24); border-radius: 8px; padding: 8px 10px; box-shadow: 0 0 12px rgba(0,0,0,0.35);">
+                        <div style="display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px;">
+                            <span style="color: #9fdcff; font-size: 9px; font-weight: bold; letter-spacing: 1px;">${statusLabel}</span>
+                            <span style="color: #7effa1; font-size: 9px; font-weight: bold; letter-spacing: 1px;">${regionLabel}</span>
+                        </div>
+                        <div style="color: white; font-size: 11px; font-weight: bold; margin-bottom: 3px;">${statusTitle}</div>
+                        <div style="color: #c2d1d6; font-size: 9px; line-height: 1.5;">${statusDetail}</div>
                     </div>
 
                     <!-- V1.9.16 - Top Center King Myco Vitals: HP / Magic / Morality -->
@@ -8722,6 +8724,7 @@ class Game3D {
     animate() {
         requestAnimationFrame(() => this.animate());
         this._frame = (this._frame || 0) + 1;
+        this.updateOverlayChrome();
         
         // Hit Stop Logic
         if (this.hitStopFrames > 0) {
@@ -8792,19 +8795,21 @@ class Game3D {
             this.camera.lookAt(this.player.group.position.x, this.player.group.position.y + 1.5, this.player.group.position.z);
 
             // Update Spatial Audio Listener
-            const listener = TONE.getListener();
-            listener.positionX.value = this.camera.position.x;
-            listener.positionY.value = this.camera.position.y;
-            listener.positionZ.value = this.camera.position.z;
-            
-            const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
-            const up = new THREE.Vector3(0, 1, 0).applyQuaternion(this.camera.quaternion);
-            listener.forwardX.value = forward.x;
-            listener.forwardY.value = forward.y;
-            listener.forwardZ.value = forward.z;
-            listener.upX.value = up.x;
-            listener.upY.value = up.y;
-            listener.upZ.value = up.z;
+            if (this.audioUnlocked) {
+                const listener = TONE.getListener();
+                listener.positionX.value = this.camera.position.x;
+                listener.positionY.value = this.camera.position.y;
+                listener.positionZ.value = this.camera.position.z;
+                
+                const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+                const up = new THREE.Vector3(0, 1, 0).applyQuaternion(this.camera.quaternion);
+                listener.forwardX.value = forward.x;
+                listener.forwardY.value = forward.y;
+                listener.forwardZ.value = forward.z;
+                listener.upX.value = up.x;
+                listener.upY.value = up.y;
+                listener.upZ.value = up.z;
+            }
 
             // V1.9.10 perf: throttle DOM-heavy HUD work to every 4 frames (~15 Hz at 60fps),
             // and the minimap canvas redraw to every 6 frames. Both are visually identical.
