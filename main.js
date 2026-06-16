@@ -5826,24 +5826,32 @@ class Game3D {
         // every button, and let the menu breathe vertically so the title is always
         // the first thing visible.
         const isMobile = !!this.isMobile;
-        const titleSz = isMobile ? 32 : 48;
-        const subSz   = isMobile ? 11 : 14;
-        const lvlSz   = isMobile ? 9  : 10;
-        const padIn   = isMobile ? 20 : 50;
-        const gapSz   = isMobile ? 10 : 15;
+        const titleSz = isMobile ? 30 : 48;
+        const subSz   = isMobile ? 10 : 13;
+        const lvlSz   = isMobile ? 10 : 10;
+        const padIn   = isMobile ? 18 : 50;
+        const gapSz   = isMobile ? 9 : 15;
         const startFs = isMobile ? 15 : 18;
         const btnFs   = isMobile ? 11 : 12;
         const smFs    = isMobile ? 10 : 10;
-        const topPad  = isMobile ? 'calc(12px + env(safe-area-inset-top))' : '40px';
-        const botPad  = isMobile ? 'calc(28px + env(safe-area-inset-bottom))' : '40px';
+        const topPad  = isMobile ? 'calc(10px + env(safe-area-inset-top))' : '40px';
+        const botPad  = isMobile ? 'calc(22px + env(safe-area-inset-bottom))' : '40px';
         const tapBtn  = 'min-height: 44px; touch-action: manipulation; -webkit-tap-highlight-color: transparent;';
+        const subtitleHtml = isMobile
+            ? 'RECLAIM THE<br>NETWORK HEART'
+            : 'RECLAIM THE NETWORK HEART';
+        const graphicsHelper = this.progression.data.settings.lowPerfMode === true
+            ? (isMobile ? 'BATTERY SAVER · longer play' : 'BATTERY SAVER · longer sessions')
+            : this.progression.data.settings.lowPerfMode === false
+                ? 'HIGH FIDELITY · full effects'
+                : (isMobile ? 'SMART AUTO · auto-tuned' : 'SMART AUTO · adapts to this device');
 
         this.uiOverlay.innerHTML = `
             <div id="start-screen-wrap" style="pointer-events: auto; width: 100%; min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: ${isMobile ? 'flex-start' : 'center'}; padding: ${topPad} 12px ${botPad} 12px; box-sizing: border-box;">
-                <div id="start-screen" style="display: flex; flex-direction: column; align-items: center; width: 100%; max-width: ${isMobile ? 344 : 500}px; background: linear-gradient(180deg, rgba(8,12,14,0.92), rgba(2,5,6,0.88)); padding: ${padIn}px; border: 3px solid rgba(57,255,20,0.82); border-radius: 18px; box-shadow: 0 18px 48px rgba(0,0,0,0.45), 0 0 24px rgba(57,255,20,0.16); text-align: center; box-sizing: border-box; backdrop-filter: blur(4px);">
-                    <h1 class="neon-text" style="font-size: ${titleSz}px; margin: 0 0 10px 0; color: #39FF14; text-shadow: 0 0 10px #39FF14; line-height: 1.1;">MYCO KINGDOM</h1>
-                    <p style="font-size: ${subSz}px; margin: 0 0 5px 0; color: #fff; letter-spacing: 2px;">RECLAIM THE NETWORK HEART</p>
-                    <p style="font-size: ${lvlSz}px; margin: 0 0 ${isMobile ? 18 : 30}px 0; color: #8ca098; letter-spacing: 1px;">KING MYCO • LEVEL ${this.progression.data.level}</p>
+                <div id="start-screen" style="display: flex; flex-direction: column; align-items: center; width: 100%; max-width: ${isMobile ? 334 : 500}px; background: linear-gradient(180deg, rgba(8,12,14,0.92), rgba(2,5,6,0.88)); padding: ${padIn}px; border: 3px solid rgba(57,255,20,0.82); border-radius: 18px; box-shadow: 0 18px 48px rgba(0,0,0,0.45), 0 0 24px rgba(57,255,20,0.16); text-align: center; box-sizing: border-box; backdrop-filter: blur(4px);">
+                    <h1 class="neon-text" style="font-size: ${titleSz}px; margin: 0 0 8px 0; color: #39FF14; text-shadow: 0 0 10px #39FF14; line-height: 1.08;">MYCO KINGDOM</h1>
+                    <p style="font-size: ${subSz}px; margin: 0 0 8px 0; color: #f5fff5; letter-spacing: ${isMobile ? 1.4 : 2}px; line-height: 1.45; max-width: ${isMobile ? 210 : 360}px;">${subtitleHtml}</p>
+                    <p style="font-size: ${lvlSz}px; margin: 0 0 ${isMobile ? 16 : 30}px 0; color: #b6c8c0; letter-spacing: 1px;">KING MYCO • LEVEL ${this.progression.data.level}</p>
 
                     <div style="display: flex; flex-direction: column; gap: ${gapSz}px; width: 100%; margin-bottom: ${isMobile ? 18 : 30}px;">
                         <button id="start-button" style="padding: 15px; font-size: ${startFs}px; background: #39FF14; border: none; color: black; font-family: inherit; cursor: pointer; ${tapBtn}">
@@ -5867,16 +5875,14 @@ class Game3D {
                         ${isConnected ? `<button id="disconnect-wallet" style="font-size: 8px; color: #666; background: none; border: none; cursor: pointer; text-decoration: underline; ${tapBtn}">Disconnect</button>` : ''}
                     </div>
 
-                    <div style="margin-top: ${isMobile ? 16 : 24}px; width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; background: rgba(255,255,255,0.03); border: 1px solid #222; border-radius: 6px;">
+                    <div style="margin-top: ${isMobile ? 14 : 24}px; width: 100%; display: flex; flex-direction: ${isMobile ? 'column' : 'row'}; align-items: ${isMobile ? 'stretch' : 'center'}; justify-content: space-between; gap: ${isMobile ? 8 : 10}px; padding: 8px 10px; background: rgba(255,255,255,0.03); border: 1px solid #222; border-radius: 6px;">
                         <div style="text-align: left; flex: 1;">
                             <div style="font-size: 9px; color: #ccc; letter-spacing: 1px;">GRAPHICS PROFILE</div>
-                            <div style="font-size: 7px; color: #7f8b85; margin-top: 2px;">
-                                ${this.progression.data.settings.lowPerfMode === true ? 'BATTERY SAVER · longer sessions' :
-                                  this.progression.data.settings.lowPerfMode === false ? 'HIGH FIDELITY · full effects' :
-                                  'SMART AUTO · adapts to this device'}
+                            <div style="font-size: 7px; color: #8b9992; margin-top: 2px; line-height: 1.4;">
+                                ${graphicsHelper}
                             </div>
                         </div>
-                        <button id="low-perf-toggle" style="padding: 8px 12px; font-size: 9px; background: ${this.progression.data.settings.lowPerfMode === true ? '#ff8800' : this.progression.data.settings.lowPerfMode === false ? '#39FF14' : '#444'}; color: ${this.progression.data.settings.lowPerfMode === false ? '#000' : '#fff'}; border: none; font-family: inherit; cursor: pointer; border-radius: 4px; min-width: 70px; ${tapBtn}">
+                        <button id="low-perf-toggle" style="padding: 8px 12px; font-size: 9px; background: ${this.progression.data.settings.lowPerfMode === true ? '#ff8800' : this.progression.data.settings.lowPerfMode === false ? '#39FF14' : '#444'}; color: ${this.progression.data.settings.lowPerfMode === false ? '#000' : '#fff'}; border: none; font-family: inherit; cursor: pointer; border-radius: 4px; min-width: 70px; width: ${isMobile ? '100%' : 'auto'}; ${tapBtn}">
                             ${this.progression.data.settings.lowPerfMode === true ? 'BATTERY' : this.progression.data.settings.lowPerfMode === false ? 'HIGH' : 'AUTO'}
                         </button>
                     </div>
