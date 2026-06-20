@@ -6,40 +6,151 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Myco Kingdom" />
+    <meta name="application-name" content="Myco Kingdom" />
+    <meta name="format-detection" content="telephone=no, date=no, email=no, address=no" />
     <meta name="theme-color" content="#050807" />
     <meta name="description" content="Myco Kingdom is a fast psychedelic action RPG. Explore, harvest spores, battle the rot, and reclaim the crown." />
+    <meta name="myco-api-base" content="https://kingdom.kingmyco.com" />
     <title>Myco Quest | Myco Kingdom</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://unpkg.com" crossorigin>
+    <link rel="preconnect" href="https://esm.sh" crossorigin>
+    <link rel="preconnect" href="https://ga.jspm.io" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
     <script>
-      // Early silence for noisy library warnings
+      // V1.9.39 - Early iOS/mobile bootstrap hardening.
+      // 1) Surface boot failures before the module graph even executes.
+      // 2) Offer a Phantom deep-link recovery path on mobile.
+      // 3) Keep the console clean without muting real errors.
       (function() {
-        const originalWarn = console.warn;
+        const originalWarn = typeof console.warn === 'function'
+          ? console.warn.bind(console)
+          : function() {};
+
         console.warn = function(...args) {
           if (typeof args[0] === 'string' && (
-            args[0].includes('bigint: Failed to load bindings') || 
+            args[0].includes('bigint: Failed to load bindings') ||
             args[0].includes('Shared Storage API is deprecated') ||
             args[0].includes('The AudioContext was not allowed to start')
           )) return;
           originalWarn.apply(console, args);
         };
-        // Mock process for Web3 libs
-        window.process = { env: {} };
+
+        function buildPhantomBrowseUrl() {
+          return 'https://phantom.app/ul/browse/'
+            + encodeURIComponent(window.location.href)
+            + '?ref=' + encodeURIComponent(window.location.origin);
+        }
+
+        function ensureBootPanel(title, bodyHtml) {
+          let panel = document.getElementById('boot-error-panel');
+          if (!panel) {
+            panel = document.createElement('div');
+            panel.id = 'boot-error-panel';
+            panel.style.cssText = [
+              'position:fixed', 'inset:0', 'z-index:2147483647',
+              'display:flex', 'align-items:flex-start', 'justify-content:center',
+              'padding:calc(14px + env(safe-area-inset-top, 0px)) calc(14px + env(safe-area-inset-right, 0px)) calc(18px + env(safe-area-inset-bottom, 0px)) calc(14px + env(safe-area-inset-left, 0px))',
+              'box-sizing:border-box', 'overflow-y:auto', '-webkit-overflow-scrolling:touch',
+              'background:rgba(3,6,5,0.96)', 'color:#f4fff6',
+              'font-family:Arial,sans-serif'
+            ].join(';');
+            document.addEventListener('DOMContentLoaded', function() {
+              if (!panel.isConnected) document.body.appendChild(panel);
+            }, { once: true });
+            if (document.body) document.body.appendChild(panel);
+          }
+
+          panel.innerHTML = '';
+          const card = document.createElement('div');
+          card.style.cssText = [
+            'width:min(100%,420px)', 'background:#0d1511',
+            'border:1px solid rgba(57,255,20,0.28)', 'border-radius:16px',
+            'box-shadow:0 24px 60px rgba(0,0,0,0.5)',
+            'padding:18px', 'line-height:1.6', 'margin:0 auto',
+            'max-height:calc(100dvh - 32px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px))',
+            'overflow:auto', '-webkit-overflow-scrolling:touch'
+          ].join(';');
+          card.innerHTML = ''
+            + '<div style="font-family:\'Press Start 2P\', cursive; color:#39FF14; font-size:12px; line-height:1.5; margin-bottom:12px;">' + title + '</div>'
+            + '<div style="font-size:14px; color:#d7e3da; margin-bottom:16px;">' + bodyHtml + '</div>';
+          panel.appendChild(card);
+          return { panel: panel, card: card };
+        }
+
+        window.__MYCO_BOOT_OK = false;
+        window.__MYCO_MARK_BOOT_OK = function() {
+          window.__MYCO_BOOT_OK = true;
+          if (window.__MYCO_BOOT_TIMEOUT) {
+            clearTimeout(window.__MYCO_BOOT_TIMEOUT);
+            window.__MYCO_BOOT_TIMEOUT = null;
+          }
+          const panel = document.getElementById('boot-error-panel');
+          if (panel) panel.remove();
+        };
+
+        window.__MYCO_SHOW_BOOT_ERROR = function(where, err) {
+          const detail = err && (err.stack || err.message) ? (err.stack || err.message) : String(err || 'Unknown error');
+          const ui = ensureBootPanel(
+            'LOAD ERROR',
+            '<div style="margin-bottom:12px;"><strong>' + String(where).replace(/</g, '&lt;') + '</strong></div>'
+            + '<div style="font-family:monospace; font-size:12px; white-space:pre-wrap; word-break:break-word; color:#ffb6bf; background:rgba(255,0,64,0.08); border:1px solid rgba(255,0,64,0.22); border-radius:10px; padding:12px;">'
+            + String(detail).replace(/</g, '&lt;') + '</div>'
+          );
+          const actions = document.createElement('div');
+          actions.style.cssText = 'display:flex; gap:10px; flex-wrap:wrap; margin-top:16px;';
+          actions.innerHTML = ''
+            + '<button id="boot-reload" style="flex:1; min-width:140px; min-height:44px; border:none; border-radius:10px; background:#39FF14; color:#081007; font-weight:700; cursor:pointer;">Reload</button>'
+            + '<button id="boot-open-phantom" style="flex:1; min-width:140px; min-height:44px; border:none; border-radius:10px; background:#6a0dad; color:#fff; font-weight:700; cursor:pointer;">Open in Phantom</button>';
+          ui.card.appendChild(actions);
+          actions.querySelector('#boot-reload').onclick = function() { window.location.reload(); };
+          actions.querySelector('#boot-open-phantom').onclick = function() { window.location.href = buildPhantomBrowseUrl(); };
+        };
+
+        window.addEventListener('error', function(event) {
+          if (window.__MYCO_BOOT_OK) return;
+          window.__MYCO_SHOW_BOOT_ERROR('window.onerror', event && (event.error || event.message));
+        });
+
+        window.addEventListener('unhandledrejection', function(event) {
+          if (window.__MYCO_BOOT_OK) return;
+          window.__MYCO_SHOW_BOOT_ERROR('unhandled promise rejection', event && event.reason);
+        });
+
+        window.__MYCO_BOOT_TIMEOUT = window.setTimeout(function() {
+          if (window.__MYCO_BOOT_OK) return;
+          const ua = navigator.userAgent || '';
+          const isIOS = /iPad|iPhone|iPod/.test(ua) || (ua.indexOf('Mac') !== -1 && navigator.maxTouchPoints > 1);
+          const copy = isIOS
+            ? 'If you are on iPhone or iPad, this browser may be stalling before the game finishes loading. Try the latest Safari, or open this page inside Phantom for wallet-friendly mobile play.'
+            : 'The game is taking longer than expected to start. Reload the page, or open it inside Phantom if you want mobile wallet support.';
+          const ui = ensureBootPanel('STILL LOADING', copy);
+          const actions = document.createElement('div');
+          actions.style.cssText = 'display:flex; gap:10px; flex-wrap:wrap; margin-top:16px;';
+          actions.innerHTML = ''
+            + '<button id="boot-reload-delayed" style="flex:1; min-width:140px; min-height:44px; border:none; border-radius:10px; background:#39FF14; color:#081007; font-weight:700; cursor:pointer;">Reload</button>'
+            + '<button id="boot-open-phantom-delayed" style="flex:1; min-width:140px; min-height:44px; border:none; border-radius:10px; background:#6a0dad; color:#fff; font-weight:700; cursor:pointer;">Open in Phantom</button>';
+          ui.card.appendChild(actions);
+          actions.querySelector('#boot-reload-delayed').onclick = function() { window.location.reload(); };
+          actions.querySelector('#boot-open-phantom-delayed').onclick = function() { window.location.href = buildPhantomBrowseUrl(); };
+        }, 8000);
       })();
     </script>
-    <script type="importmap">
+    <script async src="https://ga.jspm.io/npm:es-module-shims@2.6.2/dist/es-module-shims.js" crossorigin="anonymous"></script>
+    <script type="importmap-shim">
       {
         "imports": {
           "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
           "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
           "tone": "https://esm.sh/tone@14.7.77",
-          "@solana/web3.js": "https://esm.sh/@solana/web3.js@1.87.6"
+          "bs58": "https://esm.sh/bs58@5.0.0"
         }
       }
     </script>
     <style>
-      html, body, #game-container { width: 100%; height: 100%; margin: 0; padding: 0; background-color: black; overflow: hidden; }
+      html, body, #game-container { width: 100%; height: 100%; min-height: 100dvh; margin: 0; padding: 0; background-color: black; overflow: hidden; }
       /* V1.9.31 - Scoped touch-action. Previously `body { touch-action: none }`
          disabled all native tap/scroll behavior page-wide, which broke menu
          buttons and prevented scrollable content (story crawl, settings) from
@@ -92,6 +203,6 @@
 </head>
   <body>
     <div id="game-container"></div>
-    <script type="module" src="main.js"></script>
+    <script type="module-shim" src="main.js"></script>
 </body>
 </html>

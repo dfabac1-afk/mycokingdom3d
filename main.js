@@ -18,13 +18,39 @@
 
 import * as THREE from 'three';
 import * as TONE from 'tone';
-import * as SOLANA from '@solana/web3.js';
+import bs58 from 'bs58';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
-import { Player3D, Enemy3D, RotInfectedEnemy3D, LightPool3D, Boss3D, ShardcapWarden3D, DarkMycelius3D, GrandRotBoss3D, BogbellyMyconid3D, WidowcapWeaver3D, Collectible3D, NPC3D, Portal3D, Chest3D, NetTrap3D, Hazard3D, PuzzlePillar3D, SporeBomb3D, VoxelCorruptedHazard3D, InteractiveBuilding3D, RotCluster3D, CitadelGate3D } from './entities_3d.js';
+import { Player3D, Enemy3D, RotInfectedEnemy3D, LightPool3D, Boss3D, MossfangSentinel3D, ShardcapWarden3D, DarkMycelius3D, GrandRotBoss3D, BogbellyMyconid3D, WidowcapWeaver3D, Collectible3D, NPC3D, Portal3D, Chest3D, NetTrap3D, Hazard3D, PuzzlePillar3D, SporeBomb3D, VoxelCorruptedHazard3D, InteractiveBuilding3D, RotCluster3D, CitadelGate3D } from './entities_3d.js';
 import { CONFIG } from './config.js';
+
+const LIVE_BUILD = '1.9.50';
+const CLOUD_SESSION_KEY = 'myco_quest_wallet_session_v1';
+const CLOUD_BALANCE_KEY = 'myco_quest_wallet_balance_v1';
+const CLOUD_LAST_SYNC_KEY = 'myco_quest_wallet_last_sync_v1';
+const LIVE_LEADERBOARD_TTL_MS = 60 * 1000;
+const LIVE_TERRITORY_TTL_MS = 45 * 1000;
+
+function resolveMycoApiBase() {
+    const override = localStorage.getItem('myco_api_base');
+    if (override) return override.replace(/\/$/, '');
+
+    const metaBase = document.querySelector('meta[name="myco-api-base"]')?.getAttribute('content');
+    if (metaBase) return metaBase.replace(/\/$/, '');
+
+    const host = window.location.hostname;
+    if (host === 'localhost' || host === '127.0.0.1') {
+        return `${window.location.protocol}//${window.location.hostname}:3000`;
+    }
+
+    if (host === 'play.kingmyco.com' || host.endsWith('.mycokingdom3d.pages.dev') || host === 'mycokingdom3d.pages.dev') {
+        return 'https://kingdom.kingmyco.com';
+    }
+
+    return window.location.origin.replace(/\/$/, '');
+}
 
 const SILENT_AUDIO_NODE = Object.freeze({
     triggerAttackRelease() {},
@@ -45,8 +71,9 @@ class LeaderboardManager {
     load() {
         const saved = localStorage.getItem(this.storageKey);
         if (saved) return JSON.parse(saved);
-        
+
         return {
+            updatedAt: Date.now(),
             totalGlobalBurned: 0,
             weeklyGlobalBurned: 0,
             thronecapTimes: [
@@ -77,6 +104,7 @@ class LeaderboardManager {
     }
 
     save() {
+        this.data.updatedAt = Date.now();
         localStorage.setItem(this.storageKey, JSON.stringify(this.data));
     }
 
@@ -102,7 +130,7 @@ class LeaderboardManager {
         if (typeof this.data.clans[clanId] === 'number') {
             this.data.clans[clanId] = { score: this.data.clans[clanId], burned: 0, dailyBurned: 0, allTimeBurned: 0 };
         }
-        
+
         this.data.clans[clanId].burned = (this.data.clans[clanId].burned || 0) + amount;
         this.data.clans[clanId].dailyBurned = (this.data.clans[clanId].dailyBurned || 0) + amount;
         this.data.clans[clanId].allTimeBurned = (this.data.clans[clanId].allTimeBurned || 0) + amount;
@@ -121,6 +149,8 @@ class LeaderboardManager {
             player.todayBurned = (player.todayBurned || 0) + amount;
             if (mode === 'COLLECTOR') {
                 player.collectorBurned = (player.collectorBurned || 0) + amount;
+            } else if (mode === 'TERRITORY') {
+                player.territoryBurned = (player.territoryBurned || 0) + amount;
             } else {
                 player.storyBurned = (player.storyBurned || 0) + amount;
             }
@@ -135,18 +165,19 @@ class LeaderboardManager {
                 weeklyBurned: amount,
                 todayBurned: amount,
                 collectorBurned: mode === 'COLLECTOR' ? amount : 0,
-                storyBurned: mode === 'COLLECTOR' ? 0 : amount,
+                territoryBurned: mode === 'TERRITORY' ? amount : 0,
+                storyBurned: mode === 'STORY' ? amount : 0,
                 lastMode: mode,
                 lastBurnTimestamp: Date.now(),
                 clan: clanId
             };
             this.data.players.push(newPlayer);
         }
-        
+
         this.save();
-        return { 
-            isSignificant: amount >= 1000, 
-            totalClanBurned: this.data.clans[clanId].burned 
+        return {
+            isSignificant: amount >= 1000,
+            totalClanBurned: this.data.clans[clanId].burned
         };
     }
 
@@ -160,6 +191,7 @@ class LeaderboardManager {
             todayBurned: p.todayBurned || 0,
             weeklyBurned: p.weeklyBurned || 0,
             collectorBurned: p.collectorBurned || 0,
+            territoryBurned: p.territoryBurned || 0,
             storyBurned: p.storyBurned || 0,
             lastMode: p.lastMode || 'STORY'
         }));
@@ -191,7 +223,7 @@ class LeaderboardManager {
     resetWeeklyBurns() {
         const timestamp = Date.now();
         const rankings = this.getBurnRankings();
-        
+
         // Add to Hall of Fame
         if (rankings.length > 0 && (rankings[0].burned > 0)) {
             if (!this.data.hallOfFame) this.data.hallOfFame = [];
@@ -231,11 +263,11 @@ class LeaderboardManager {
         const clan = this.data.clans[clanId] || { score: 0, count: 0, totalAlignment: 0, totalMagic: 0, totalBosses: 0, totalBlue: 0, totalGold: 0 };
         if (typeof clan === 'number') {
             // Migrating old data format
-            this.data.clans[clanId] = { 
-                score: clan + score, 
-                count: 1, 
-                totalAlignment: stats.alignment || 50, 
-                totalMagic: stats.magicLearned || 0, 
+            this.data.clans[clanId] = {
+                score: clan + score,
+                count: 1,
+                totalAlignment: stats.alignment || 50,
+                totalMagic: stats.magicLearned || 0,
                 totalBosses: stats.bossesDefeated || 0,
                 totalBlue: stats.blueCollected || 0,
                 totalGold: stats.goldCollected || 0
@@ -261,13 +293,13 @@ class LeaderboardManager {
             this.data.players.push({ name: playerName, score: score, clan: clanId });
         }
         this.data.players.sort((a, b) => b.score - a.score);
-        
+
         const newRank = this.data.players.findIndex(p => p.name === playerName);
         if (newRank !== -1 && newRank < 5) {
             isTopScore = true;
         }
 
-        this.data.players = this.data.players.slice(0, 10); 
+        this.data.players = this.data.players.slice(0, 10);
         this.save();
 
         return { isTopScore, rank: newRank + 1 };
@@ -275,7 +307,7 @@ class LeaderboardManager {
 
     addThronecapTime(playerName, time, clanId, path = null) {
         if (!this.data.thronecapTimes) this.data.thronecapTimes = [];
-        
+
         let isNewRecord = false;
         let isTop10 = false;
         let rank = -1;
@@ -293,9 +325,9 @@ class LeaderboardManager {
             this.data.thronecapTimes.push({ name: playerName, time, clan: clanId, date: Date.now(), path });
             isNewRecord = true;
         }
-        
+
         this.data.thronecapTimes.sort((a, b) => a.time - b.time);
-        
+
         const newIndex = this.data.thronecapTimes.findIndex(t => t.name === playerName);
         if (newIndex !== -1 && newIndex < 10) {
             isTop10 = true;
@@ -340,9 +372,10 @@ class ProgressionManager {
     load() {
         const saved = localStorage.getItem(this.storageKey);
         let data = saved ? JSON.parse(saved) : null;
-        
+
         if (!data) {
             data = {
+                lastSavedAt: Date.now(),
                 level: 1,
                 xp: 0,
                 nextLevelXp: 1000,
@@ -364,17 +397,20 @@ class ProgressionManager {
                 ingredients: 0,
                 alignment: 50,
                 clanChosen: null, // Permanent clan choice
+                clanChoiceLocked: false,
                 unlockedRegions: ['region8', 'mushroomKingdom'],
                 currentRegionId: 'region8',
                 shardsCollected: 0,
                 inventory: ['fungal_blade'],
                 keyItems: {}, // V1.9.12 - { keyItemId: count } for portal-unlocking items
+                pendingBossRewards: {}, // V1.9.46 - { regionId: { shard: true, keyItem: 'moldjaw_fang' } }
                 // V1.9.18 - Daily Rot Cycle. King Myco's conquered regions blight overnight
                 // and must be cleansed with the wand before he can use any portal.
-                conqueredRegions: {},      // { regionId: true } — region with a defeated boss
-                regionRot: {},             // { regionId: 0..100 } — current rot percent
-                lastDailyTick: null,       // YYYY-MM-DD key of the last daily blight pass
-                lastCleanseDay: {},        // { regionId: 'YYYY-MM-DD' } — last day cleansed
+                conqueredRegions: {},      // { regionId: true } - region with a defeated boss
+                regionRot: {},             // { regionId: 0..100 } - current rot percent
+                worldDay: 1,               // V1.9.47 - in-game day counter for rot returns
+                lastDailyTick: null,       // last processed in-game day for the rot cycle
+                lastCleanseDay: {},        // { regionId: worldDay } - last in-game day cleansed
                 accessories: [], // Purchased accessory IDs
                 equippedAccessories: {
                     cape: null,
@@ -383,11 +419,15 @@ class ProgressionManager {
                 loreDiscovered: ['start'],
                 playerPosition: null, // Saved {x, y, z}
                 dailyBurnedAmount: 0,
+                totalBurned: 0,
+                weeklyBurned: 0,
                 burnHistory: [],
                 burnStreak: 0,
                 lastBurnContribution: 0,
                 lastBurnReset: Date.now(),
                 lastWeeklyRewardClaimed: 0,
+                bestScore: 0,
+                bestThronecapTime: null,
                 settings: {
                     masterVolume: 1.0,
                     deadzone: 0.2, // Default deadzone calibrated for timed melee
@@ -429,7 +469,8 @@ class ProgressionManager {
                         target: 10,
                         title: "Golden Restoration",
                         description: "Collect 10 Golden Spores to strengthen the Fungal Crown."
-                    }
+                    },
+                    rotRegions: {}
                 },
                 metChronicler: false,
                 metNetworkGhost: false
@@ -439,6 +480,7 @@ class ProgressionManager {
         // Migration/Sanitization for existing saves
         if (data.metChronicler === undefined) data.metChronicler = false;
         if (data.metNetworkGhost === undefined) data.metNetworkGhost = false;
+        if (!Number.isFinite(data.lastSavedAt)) data.lastSavedAt = Date.now();
         if (data.loreDiscovered === undefined) data.loreDiscovered = ['start'];
         if (data.playerPosition === undefined) data.playerPosition = null;
         if (data.settings === undefined) {
@@ -497,25 +539,62 @@ class ProgressionManager {
                     target: 10,
                     title: "Golden Restoration",
                     description: "Collect 10 Golden Spores to strengthen the Fungal Crown."
-                }
+                },
+                rotRegions: {}
             };
         }
+        if (!data.quests.goldenSpore) {
+            data.quests.goldenSpore = {
+                active: true,
+                progress: 0,
+                target: 10,
+                title: "Golden Restoration",
+                description: "Collect 10 Golden Spores to strengthen the Fungal Crown."
+            };
+        }
+        if (!data.quests.rotRegions || typeof data.quests.rotRegions !== 'object') data.quests.rotRegions = {};
+        if (!Number.isFinite(data.worldDay) || data.worldDay < 1) data.worldDay = 1;
+        if (!data.conqueredRegions || typeof data.conqueredRegions !== 'object') data.conqueredRegions = {};
+        if (!data.regionRot || typeof data.regionRot !== 'object') data.regionRot = {};
+        if (!data.lastCleanseDay || typeof data.lastCleanseDay !== 'object') data.lastCleanseDay = {};
+        if (!Number.isFinite(data.lastDailyTick)) data.lastDailyTick = data.lastDailyTick == null ? null : data.worldDay;
+        Object.keys(data.lastCleanseDay).forEach(id => {
+            if (!Number.isFinite(data.lastCleanseDay[id])) data.lastCleanseDay[id] = 0;
+        });
+        Object.keys(data.quests.rotRegions).forEach(id => {
+            const cur = data.quests.rotRegions[id];
+            data.quests.rotRegions[id] = {
+                active: false,
+                completed: false,
+                rewardClaimed: false,
+                clears: 0,
+                startedDay: null,
+                lastClearedDay: 0,
+                ...(cur && typeof cur === 'object' ? cur : {})
+            };
+        });
         if (!data.keyItems || typeof data.keyItems !== 'object') data.keyItems = {}; // V1.9.12 migration
+        if (!data.pendingBossRewards || typeof data.pendingBossRewards !== 'object') data.pendingBossRewards = {}; // V1.9.46 migration
         if (!data.home) data.home = { level: 1, decorations: [], storedItems: [], storedWeapons: [], forgeLevels: { weapons: 0, armor: 0 } };
         if (!data.home.forgeLevels) data.home.forgeLevels = { weapons: 0, armor: 0 };
         if (data.ingredients === undefined) data.ingredients = 0;
         if (data.dailyBurnedAmount === undefined) data.dailyBurnedAmount = 0;
+        if (data.totalBurned === undefined) data.totalBurned = 0;
+        if (data.weeklyBurned === undefined) data.weeklyBurned = 0;
         if (data.burnHistory === undefined) data.burnHistory = [];
         if (data.burnStreak === undefined) data.burnStreak = 0;
         if (data.lastBurnContribution === undefined) data.lastBurnContribution = 0;
         if (data.lastBurnReset === undefined) data.lastBurnReset = Date.now();
         if (data.lastWeeklyRewardClaimed === undefined) data.lastWeeklyRewardClaimed = 0;
+        if (data.bestScore === undefined) data.bestScore = 0;
+        if (data.bestThronecapTime === undefined) data.bestThronecapTime = null;
         // V1.9.21 - Spore Collector mode persistence.
         if (data.gameMode === undefined) data.gameMode = null; // null = not yet chosen
+        if (data.clanChoiceLocked === undefined) data.clanChoiceLocked = !!data.clanChosen;
         if (data.collectorDailyCap === undefined) data.collectorDailyCap = 1000;
         if (data.collectorDailyCollected === undefined) data.collectorDailyCollected = 0;
         if (data.collectorDailyKey === undefined) data.collectorDailyKey = null;
-        
+
         // Reset daily burn if 24 hours passed
         if (Date.now() - data.lastBurnReset > 24 * 60 * 60 * 1000) {
             data.dailyBurnedAmount = 0;
@@ -524,11 +603,12 @@ class ProgressionManager {
                 window.game.leaderboard.resetDailyBurns();
             }
         }
-        
+
         return data;
     }
 
     save() {
+        this.data.lastSavedAt = Date.now();
         localStorage.setItem(this.storageKey, JSON.stringify(this.data));
     }
 
@@ -563,11 +643,26 @@ class ProgressionManager {
     }
 
     // V1.9.21 - Spore Collector mode helpers.
+    getGameMode() {
+        if (this.data.gameMode === 'COLLECTOR') return 'COLLECTOR';
+        if (this.data.gameMode === 'TERRITORY') return 'TERRITORY';
+        return 'STORY';
+    }
+    isStoryMode() {
+        return this.getGameMode() === 'STORY';
+    }
     isCollectorMode() {
-        return this.data.gameMode === 'COLLECTOR';
+        return this.getGameMode() === 'COLLECTOR';
+    }
+    isTerritoryWarMode() {
+        return this.getGameMode() === 'TERRITORY';
     }
     setGameMode(mode) {
-        this.data.gameMode = (mode === 'COLLECTOR') ? 'COLLECTOR' : 'STORY';
+        this.data.gameMode = mode === 'COLLECTOR'
+            ? 'COLLECTOR'
+            : mode === 'TERRITORY'
+                ? 'TERRITORY'
+                : 'STORY';
         if (this.data.gameMode === 'COLLECTOR') {
             if (!this.data.collectorDailyCap) this.data.collectorDailyCap = 1000;
             if (this.data.collectorDailyCollected == null) this.data.collectorDailyCollected = 0;
@@ -592,13 +687,20 @@ class ProgressionManager {
     unlockRegion(regionId) {
         if (!this.data.unlockedRegions.includes(regionId)) {
             this.data.unlockedRegions.push(regionId);
-            
+
             // Auto-unlock lore for regions
             if (regionId === 'sporewood') this.discoverLore('sporewood_restored');
             if (regionId === 'crystalcap') this.discoverLore('crystal_resonance');
             if (regionId === 'thronecap') this.discoverLore('dark_mycelius_origin');
 
             this.save();
+            try {
+                window.game?.submitProgressionEvent?.('region_unlock', {
+                    eventKey: `region_unlock:${regionId}`,
+                    regionId,
+                    metadata: { unlockedRegions: [...this.data.unlockedRegions] }
+                });
+            } catch (_) {}
         }
     }
 
@@ -615,34 +717,41 @@ class ProgressionManager {
         if (!this.data.regionRot) this.data.regionRot = {};
         this.data.regionRot[regionId] = 0;
         if (!this.data.lastCleanseDay) this.data.lastCleanseDay = {};
-        this.data.lastCleanseDay[regionId] = this._todayKey();
+        this.data.lastCleanseDay[regionId] = this.data.worldDay || 1;
         this.save();
+        try {
+            window.game?.submitProgressionEvent?.('region_conquered', {
+                eventKey: `region_conquered:${regionId}:day:${this.data.worldDay || 1}`,
+                regionId,
+                metadata: { worldDay: this.data.worldDay || 1 }
+            });
+        } catch (_) {}
     }
     isConquered(regionId) {
         return !!(this.data.conqueredRegions && this.data.conqueredRegions[regionId]);
     }
-    // Roll the daily blight forward if needed. Adds rot to every conquered region
-    // whenever the calendar day flips. Returns true if a new day was processed.
-    processDailyRot() {
-        const today = this._todayKey();
-        if (this.data.lastDailyTick === today) return false;
+    // Roll the blight forward when in-world dawn passes. Returns true if at least
+    // one in-game day was processed.
+    processDailyRot(currentDay = this.data.worldDay) {
+        const day = Math.max(1, Math.floor(Number.isFinite(currentDay) ? currentDay : (this.data.worldDay || 1)));
+        this.data.worldDay = day;
         if (!this.data.regionRot) this.data.regionRot = {};
         if (!this.data.lastCleanseDay) this.data.lastCleanseDay = {};
         const conq = this.data.conqueredRegions || {};
-        // First boot: just seed today's key without immediately blighting.
+        // First boot: just seed the current world-day without immediately blighting.
         if (this.data.lastDailyTick == null) {
-            this.data.lastDailyTick = today;
+            this.data.lastDailyTick = day;
             this.save();
             return false;
         }
+        if (day <= this.data.lastDailyTick) return false;
+        const elapsedDays = day - this.data.lastDailyTick;
         Object.keys(conq).forEach(id => {
             const cur = this.data.regionRot[id] || 0;
-            // +35% rot per skipped day, capped at 100. Multi-day skips compound but cap.
-            this.data.regionRot[id] = Math.min(100, cur + 35);
-            // Cleanse status resets to "not cleansed today".
-            this.data.lastCleanseDay[id] = null;
+            this.data.regionRot[id] = Math.min(100, cur + (35 * elapsedDays));
+            this.data.lastCleanseDay[id] = 0;
         });
-        this.data.lastDailyTick = today;
+        this.data.lastDailyTick = day;
         this.save();
         return true;
     }
@@ -652,7 +761,7 @@ class ProgressionManager {
         // Mark cleansed for today once rot drops below the threshold.
         if (this.data.regionRot[regionId] < 5) {
             if (!this.data.lastCleanseDay) this.data.lastCleanseDay = {};
-            this.data.lastCleanseDay[regionId] = this._todayKey();
+            this.data.lastCleanseDay[regionId] = this.data.worldDay || 1;
         }
         this.save();
     }
@@ -667,6 +776,41 @@ class ProgressionManager {
     pendingRotRegions() {
         const conq = this.data.conqueredRegions || {};
         return Object.keys(conq).filter(id => (this.data.regionRot[id] || 0) >= 10);
+    }
+
+    hasInventoryItem(id) {
+        return Array.isArray(this.data.inventory) && this.data.inventory.includes(id);
+    }
+
+    addInventoryItem(id) {
+        if (!id) return false;
+        if (!Array.isArray(this.data.inventory)) this.data.inventory = [];
+        if (this.data.inventory.includes(id)) return false;
+        this.data.inventory.push(id);
+        this.save();
+        return true;
+    }
+
+    getRotQuestState(regionId) {
+        if (!this.data.quests) this.data.quests = { goldenSpore: null, rotRegions: {} };
+        if (!this.data.quests.rotRegions || typeof this.data.quests.rotRegions !== 'object') this.data.quests.rotRegions = {};
+        const current = this.data.quests.rotRegions[regionId] || {};
+        return {
+            active: false,
+            completed: false,
+            rewardClaimed: false,
+            clears: 0,
+            startedDay: null,
+            lastClearedDay: 0,
+            ...current
+        };
+    }
+
+    setRotQuestState(regionId, patch = {}) {
+        const next = { ...this.getRotQuestState(regionId), ...patch };
+        this.data.quests.rotRegions[regionId] = next;
+        this.save();
+        return next;
     }
 
     // V1.9.12 - Inventory mutation for portal key items.
@@ -689,11 +833,47 @@ class ProgressionManager {
         return true;
     }
 
+    queueBossReward(regionId, patch = {}) {
+        if (!regionId) return null;
+        if (!this.data.pendingBossRewards || typeof this.data.pendingBossRewards !== 'object') {
+            this.data.pendingBossRewards = {};
+        }
+        const current = this.data.pendingBossRewards[regionId] || {};
+        this.data.pendingBossRewards[regionId] = { ...current, ...patch };
+        this.save();
+        return this.data.pendingBossRewards[regionId];
+    }
+
+    getPendingBossReward(regionId) {
+        if (!regionId) return null;
+        return (this.data.pendingBossRewards && this.data.pendingBossRewards[regionId]) || null;
+    }
+
+    clearBossReward(regionId, rewardKey) {
+        if (!regionId || !this.data.pendingBossRewards || !this.data.pendingBossRewards[regionId]) return false;
+        if (rewardKey) {
+            delete this.data.pendingBossRewards[regionId][rewardKey];
+        }
+        const remaining = this.data.pendingBossRewards[regionId];
+        if (!remaining || Object.keys(remaining).length === 0) {
+            delete this.data.pendingBossRewards[regionId];
+        }
+        this.save();
+        return true;
+    }
+
     discoverLore(loreId) {
         if (!this.data.loreDiscovered) this.data.loreDiscovered = [];
         if (!this.data.loreDiscovered.includes(loreId)) {
             this.data.loreDiscovered.push(loreId);
             this.save();
+            try {
+                window.game?.submitProgressionEvent?.('lore_discovered', {
+                    eventKey: `lore:${loreId}`,
+                    loreId,
+                    metadata: { loreDiscovered: [...this.data.loreDiscovered] }
+                });
+            } catch (_) {}
             if (window.game) {
                 window.game.showGlobalNotification(`LORE DISCOVERED: Check your Activity Log!`, '#ffaa00');
             }
@@ -747,11 +927,28 @@ class Game3D {
         if (typeof window.__shopkeeperPick !== 'function') window.__shopkeeperPick = () => {};
         if (typeof window.__portalEnter    !== 'function') window.__portalEnter    = () => window.closeDialogue();
 
-        this.gameState = 'START_SCREEN'; 
+        this.gameState = 'START_SCREEN';
         this.leaderboard = new LeaderboardManager();
         this.progression = new ProgressionManager();
         this.selectedClan = this.progression.data.clanChosen || 'myco';
         this.walletAddress = null;
+        this.apiBase = resolveMycoApiBase();
+        this.walletSessionToken = null;
+        this.walletMycoBalance = null;
+        this.cloudProfile = null;
+        this.cloudSyncStatus = 'local';
+        this.cloudSyncMessage = 'Local save only';
+        this.cloudLastSyncedAt = null;
+        this.liveLeaderboard = null;
+        this.liveLeaderboardUpdatedAt = 0;
+        this.liveLeaderboardLoading = false;
+        this.liveTerritory = null;
+        this.liveTerritoryUpdatedAt = 0;
+        this.liveTerritoryLoading = false;
+        this.nextTerritoryRefreshAt = 0;
+        this.territoryLabels = [];
+        this.pendingCloudSyncTimer = null;
+        this.liveProgressionEvents = new Set();
         this.enemies = [];
         this.enemyProjectiles = [];
         this.collectibles = [];
@@ -770,7 +967,7 @@ class Game3D {
         this.heartParticles = null;
         this.heartHum = null;
         this.heartPanner = null;
-        
+
         // UI & Menu States
         this.isPaused = false;
         this.minimapVisible = true;
@@ -781,7 +978,7 @@ class Game3D {
         this.glitchIntensity = 0;
         this.isPuzzleSolved = false;
         this.hitStopFrames = 0;
-        
+
         // Shared Audio - created lazily after the first real user gesture so
         // browsers do not spam autoplay warnings during boot.
         this.audioUnlocked = false;
@@ -799,6 +996,9 @@ class Game3D {
         this.isMuted = false;
         this.thronecapStartTime = null;
         this.lastGlobalEventTime = Date.now();
+        this._nextWeeklyResetCheckAt = 0;
+        this._clockUiKey = '';
+        this.hudRefs = null;
         this.timeOfDay = 8; // Start at 8 AM
         this.dayDuration = 240; // 240 seconds for a full 24h cycle
         this.currentWeather = 'CLEAR'; // CLEAR, SPORE_RAIN, NETWORK_FOG
@@ -808,7 +1008,8 @@ class Game3D {
         this.currentRunPath = [];
         this.pathSampleTimer = 0;
         this.ghost = null;
-        
+        this._nextLightBudgetAt = 0;
+
         // Tooltip element
         this.tooltip = document.createElement('div');
         this.tooltip.style.cssText = `
@@ -827,7 +1028,7 @@ class Game3D {
         `;
         document.body.appendChild(this.tooltip);
 
-        // V1.9.35 — init() is async. If anything inside it throws (asset load,
+        // V1.9.35 - init() is async. If anything inside it throws (asset load,
         // WebGL context creation, Three.js setup, Solana shim, etc.) the
         // unhandled rejection would otherwise leave the user staring at a
         // black screen. Surface it instead.
@@ -851,6 +1052,120 @@ class Game3D {
 
     hideTooltip() {
         this.tooltip.style.display = 'none';
+    }
+
+    addCameraImpulse(amount = 0.18) {
+        const scaled = this.isMobile ? amount * 0.55 : amount;
+        const cap = this.isMobile ? 0.75 : 1.4;
+        this.cameraShakeEnergy = Math.min(cap, (this.cameraShakeEnergy || 0) + scaled);
+    }
+
+    pulseHud(kind = 'impact') {
+        const root = document.getElementById('hud-root');
+        if (!root) return;
+
+        if (!document.getElementById('hud-pulse-styles')) {
+            const style = document.createElement('style');
+            style.id = 'hud-pulse-styles';
+            style.textContent = `
+                @keyframes hudImpactPulse {
+                    0% { transform: scale(1); filter: brightness(1); }
+                    25% { transform: scale(1.015); filter: brightness(1.35); }
+                    100% { transform: scale(1); filter: brightness(1); }
+                }
+                @keyframes hudDamagePulse {
+                    0% { box-shadow: 0 0 0 rgba(255, 70, 70, 0); filter: brightness(1); }
+                    25% { box-shadow: 0 0 28px rgba(255, 70, 70, 0.45); filter: brightness(1.45); }
+                    100% { box-shadow: 0 0 0 rgba(255, 70, 70, 0); filter: brightness(1); }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+
+        const vitals = document.getElementById('vitals-card');
+        const actionCluster = document.getElementById('action-cluster');
+        const impactTargets = [actionCluster, vitals].filter(Boolean);
+        impactTargets.forEach(el => {
+            el.style.animation = 'none';
+            void el.offsetWidth;
+            el.style.animation = `${kind === 'damage' ? 'hudDamagePulse' : 'hudImpactPulse'} ${kind === 'damage' ? 260 : 180}ms ease-out`;
+            setTimeout(() => { if (el) el.style.animation = ''; }, kind === 'damage' ? 300 : 220);
+        });
+    }
+
+    getBossAccentHex(boss = this.boss) {
+        const color = boss?.bossAccent || boss?.shieldColor || boss?.regionConfig?.accent || this.currentRegion?.accent || 0xff0055;
+        return `#${color.toString(16).padStart(6, '0')}`;
+    }
+
+    getBossStateText(boss = this.boss) {
+        if (!boss) return '';
+        if (boss.shielded) {
+            const reason = boss.shieldReason ? ` • ${String(boss.shieldReason).replace(/-/g, ' ').toUpperCase()}` : '';
+            return `SHIELDED${reason}`;
+        }
+        if (boss.phaseTransitioning) return 'PHASE SHIFT';
+        if (boss.bossState === 'INTRO') return 'AWAKENING';
+        return boss.isFinalBoss ? 'FINAL ENCOUNTER' : 'BOSS ENGAGED';
+    }
+
+    markBossDamage(boss, amount = 0, blocked = false) {
+        if (!boss || this.boss !== boss) return;
+        this.bossDamageFlashUntil = performance.now() + (blocked ? 140 : 220);
+        this.bossDamageBlocked = blocked;
+        this.bossLastDamage = amount;
+
+        const card = document.getElementById('boss-card');
+        if (card) {
+            card.style.animation = 'none';
+            void card.offsetWidth;
+            card.style.animation = `${blocked ? 'hudDamagePulse 180ms ease-out' : 'hudImpactPulse 180ms ease-out'}`;
+            setTimeout(() => { if (card) card.style.animation = ''; }, 220);
+        }
+    }
+
+    announceBossEncounter(boss) {
+        if (!boss) return;
+
+        if (!document.getElementById('boss-encounter-styles')) {
+            const style = document.createElement('style');
+            style.id = 'boss-encounter-styles';
+            style.textContent = `
+                @keyframes bossBannerEnter {
+                    0% { opacity: 0; transform: translate(-50%, -18px) scale(0.94); letter-spacing: 4px; }
+                    16% { opacity: 1; transform: translate(-50%, 0) scale(1.02); letter-spacing: 7px; }
+                    84% { opacity: 1; transform: translate(-50%, 0) scale(1); letter-spacing: 6px; }
+                    100% { opacity: 0; transform: translate(-50%, -16px) scale(0.98); letter-spacing: 4px; }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+
+        const accent = this.getBossAccentHex(boss);
+        const banner = document.createElement('div');
+        banner.style.cssText = `
+            position: fixed;
+            top: 132px;
+            left: 50%;
+            transform: translateX(-50%);
+            min-width: min(86vw, 560px);
+            pointer-events: none;
+            z-index: 9100;
+            text-align: center;
+            background: linear-gradient(180deg, rgba(0,0,0,0.82), rgba(0,0,0,0.52));
+            border: 1px solid ${accent};
+            border-radius: 12px;
+            padding: 12px 18px;
+            box-shadow: 0 0 22px ${accent}55;
+            animation: bossBannerEnter 2200ms ease-out forwards;
+        `;
+        banner.innerHTML = `
+            <div style="color:${accent}; font-size:10px; font-weight:bold; letter-spacing:4px; text-shadow:0 0 10px ${accent};">BOSS ENCOUNTER</div>
+            <div style="color:white; font-size:${this.isMobile ? 20 : 24}px; font-weight:900; letter-spacing:6px; text-transform:uppercase; text-shadow:0 0 18px ${accent}, 2px 2px 6px black; margin-top:6px;">${boss.name}</div>
+            <div style="color:#c9d2d9; font-size:10px; letter-spacing:2px; margin-top:6px;">${(this.currentRegion?.name || 'BOSS ARENA').toUpperCase()} • PHASE 1</div>
+        `;
+        document.body.appendChild(banner);
+        setTimeout(() => { try { banner.remove(); } catch (_) {} }, 2300);
     }
 
     ensureSharedAudio() {
@@ -887,6 +1202,21 @@ class Game3D {
         } catch (_) {}
     }
 
+    safeTrigger(node, ...args) {
+        try {
+            if (!this.audioUnlocked || this.isMuted || !this.sharedAudioReady) return;
+            const toneCtx = TONE && TONE.context;
+            if (toneCtx && toneCtx.state && toneCtx.state !== 'running') return;
+            if (node && typeof node.triggerAttackRelease === 'function') {
+                node.triggerAttackRelease(...args);
+            }
+        } catch (_) {}
+    }
+
+    playUiNote(note, duration = '16n') {
+        this.safeTrigger(this.uiSynth, note, duration);
+    }
+
     attachRestorationHeartAudio() {
         if (!this.audioUnlocked || !this.heartParticles) return;
 
@@ -920,70 +1250,122 @@ class Game3D {
     }
 
     updateOverlayChrome() {
-        const showWorldHud = this.gameState === 'PLAYING';
-        if (this.clockUI) this.clockUI.style.display = showWorldHud ? 'flex' : 'none';
-        if (this.restorationHUD) this.restorationHUD.style.display = 'none';
+        const showWorldHud = this.gameState === 'PLAYING' && !this.isMobile;
+        if (this.clockUI && this._worldHudVisible !== showWorldHud) {
+            this.clockUI.style.display = showWorldHud ? 'flex' : 'none';
+            this._worldHudVisible = showWorldHud;
+        }
+        if (this.restorationHUD && this._restorationHudVisible !== false) {
+            this.restorationHUD.style.display = 'none';
+            this._restorationHudVisible = false;
+        }
     }
 
-    syncWithSolana() {
-        const payload = {
-            exportedAt: new Date().toISOString(),
-            build: '1.9.37',
-            walletAddress: this.walletAddress || null,
-            progression: this.progression?.data || null,
-            leaderboard: this.leaderboard?.data || null
+    getWorldTimeState() {
+        const hours = Math.floor(this.timeOfDay);
+        const minutes = Math.floor((this.timeOfDay % 1) * 60);
+        const timeStr = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+
+        let period = 'NIGHT';
+        if (hours >= 5 && hours < 8) period = 'SUNRISE';
+        else if (hours >= 8 && hours < 17) period = 'DAY';
+        else if (hours >= 17 && hours < 20) period = 'SUNSET';
+
+        return { hours, minutes, timeStr, period };
+    }
+
+    cacheHudRefs() {
+        this.hudRefs = {
+            hpFill: document.getElementById('hp-fill'),
+            hpText: document.getElementById('hp-text'),
+            magicFill: document.getElementById('magic-fill'),
+            magicText: document.getElementById('magic-text'),
+            xpFill: document.getElementById('xp-fill'),
+            xpLabel: document.getElementById('xp-label'),
+            levelLabel: document.getElementById('hud-level-label'),
+            cooldownBar: document.getElementById('cooldown-bar'),
+            cooldownText: document.getElementById('cooldown-percent'),
+            bossFill: document.getElementById('boss-fill'),
+            bossName: document.getElementById('boss-name'),
+            bossState: document.getElementById('boss-state'),
+            bossPhaseChip: document.getElementById('boss-phase-chip'),
+            bossHpText: document.getElementById('boss-hp-text'),
+            bossImpact: document.getElementById('boss-impact-flash')
         };
+        return this.hudRefs;
+    }
 
-        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `myco-quest-backup-${stamp}.json`;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    getHudRefs() {
+        const refs = this.hudRefs;
+        if (!refs || !refs.hpFill || !document.body.contains(refs.hpFill)) {
+            return this.cacheHudRefs();
+        }
+        return refs;
+    }
 
-        this.showGlobalNotification('ADVENTURE BACKUP DOWNLOADED', '#39FF14');
-        this.uiSynth.triggerAttackRelease('E4', '8n');
+    refreshClockUi(force = false) {
+        if (!this.clockUI) return;
+        const { timeStr, period } = this.getWorldTimeState();
+        const key = `${period}|${timeStr}`;
+        if (!force && this._clockUiKey === key) return;
+        this._clockUiKey = key;
+        this.clockUI.innerHTML = `
+            <div style="font-size: 7px; color: #9be98a; letter-spacing: 1px;">WORLD TIME</div>
+            <div style="font-size: 8px; color: #ffffff;">${period}</div>
+            <div style="font-size: 14px; color: #ffffff;">${timeStr}</div>
+        `;
+    }
+
+    checkWeeklyBurnReset(nowMs = Date.now()) {
+        if (nowMs < (this._nextWeeklyResetCheckAt || 0)) return;
+        this._nextWeeklyResetCheckAt = nowMs + 1000;
+
+        const currentCST = new Date(new Date(nowMs).toLocaleString("en-US", { timeZone: "America/Chicago" }));
+        if (currentCST.getDay() === 0 && currentCST.getHours() === 20 && currentCST.getMinutes() === 0 && currentCST.getSeconds() < 2) {
+            if (this.leaderboard.data.weeklyGlobalBurned > 0) {
+                this.leaderboard.resetWeeklyBurns();
+                this.progression.data.weeklyBurned = 0;
+                this.progression.save();
+                this.showFloatingText("WEEKLY BURN RESET!", 0xff0000, true);
+            }
+        }
     }
 
     toggleSound() {
         this.isMuted = !this.isMuted;
         if (this.sharedAudioReady) TONE.Destination.mute = this.isMuted;
         this.updateHud();
-        this.uiSynth.triggerAttackRelease("C4", "16n");
+        this.playUiNote("C4", "16n");
     }
 
     togglePause() {
         if (this.gameState !== 'PLAYING' && this.gameState !== 'PAUSED') return;
-        
+
         this.isPaused = !this.isPaused;
         this.gameState = this.isPaused ? 'PAUSED' : 'PLAYING';
-        
+
         if (this.isPaused) {
             this.showInventoryMenu();
-            this.uiSynth.triggerAttackRelease("G3", "16n");
+            this.playUiNote("G3", "16n");
         } else {
             this.startGameplay();
-            this.uiSynth.triggerAttackRelease("C4", "16n");
+            this.playUiNote("C4", "16n");
         }
     }
 
     showSettingsMenu(mode = 'KEYBOARD') {
         const settings = this.progression.data.settings;
         const clanColor = this.getClanColor(this.selectedClan);
-        
+
         const modeBtn = (id, label) => `
             <button onclick="window.game.showSettingsMenu('${id}')" style="
-                flex: 1; 
-                padding: 10px; 
-                background: ${mode === id ? clanColor : '#222'}; 
-                color: ${mode === id ? 'black' : 'white'}; 
-                border: none; 
-                font-family: inherit; 
-                font-size: 8px; 
+                flex: 1;
+                padding: 10px;
+                background: ${mode === id ? clanColor : '#222'};
+                color: ${mode === id ? 'black' : 'white'};
+                border: none;
+                font-family: inherit;
+                font-size: 8px;
                 cursor: pointer;
             ">
                 ${label}
@@ -1036,7 +1418,7 @@ class Game3D {
             <div style="pointer-events: auto; background: rgba(0,0,0,0.95); width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; font-family: 'Press Start 2P', cursive;">
                 <div style="background: #050505; border: 4px solid ${clanColor}; width: 80%; max-width: 600px; padding: 30px; box-shadow: 0 0 30px ${clanColor};">
                     <h2 style="color: ${clanColor}; font-size: 18px; margin-bottom: 30px; text-align: center;">NETWORK CONFIG</h2>
-                    
+
                     <div style="margin-bottom: 20px;">
                         <h3 style="color: #fff; font-size: 10px; margin-bottom: 15px;">MASTER RESONANCE: ${Math.round(settings.masterVolume * 100)}%</h3>
                         <input type="range" id="volume-slider" min="0" max="1" step="0.01" value="${settings.masterVolume}" style="width: 100%; cursor: pointer; accent-color: ${clanColor};">
@@ -1160,13 +1542,14 @@ class Game3D {
         const p = this.progression.data;
         const pos = this.player.group.position;
         p.playerPosition = { x: pos.x, y: pos.y, z: pos.z };
-        
+
         this.progression.save();
         this.leaderboard.save();
-        
+        this.queueCloudSync('save');
+
         this.showGlobalNotification("GAME PROGRESS SAVED", "#39FF14");
-        this.uiSynth.triggerAttackRelease("C5", "16n");
-        
+        this.playUiNote("C5", "16n");
+
         if (this.isPaused) {
             this.showInventoryMenu(); // Refresh menu
         }
@@ -1175,28 +1558,28 @@ class Game3D {
     toggleMinimap() {
         this.minimapVisible = !this.minimapVisible;
         this.updateHud();
-        this.uiSynth.triggerAttackRelease("E4", "16n");
+        this.playUiNote("E4", "16n");
     }
 
     toggleHud() {
         this.hudMinimized = !this.hudMinimized;
         this.updateHud();
-        this.uiSynth.triggerAttackRelease("C4", "16n");
+        this.playUiNote("C4", "16n");
     }
 
     getSettingsContent(mode = 'KEYBOARD') {
         const settings = this.progression.data.settings;
         const clanColor = this.getClanColor(this.selectedClan);
-        
+
         const modeBtn = (id, label) => `
             <button onclick="window.setSettingsMode('${id}')" style="
-                flex: 1; 
-                padding: 8px; 
-                background: ${mode === id ? clanColor : '#111'}; 
-                color: ${mode === id ? 'black' : 'white'}; 
-                border: 1px solid #333; 
-                font-family: inherit; 
-                font-size: 7px; 
+                flex: 1;
+                padding: 8px;
+                background: ${mode === id ? clanColor : '#111'};
+                color: ${mode === id ? 'black' : 'white'};
+                border: 1px solid #333;
+                font-family: inherit;
+                font-size: 7px;
                 cursor: pointer;
             ">
                 ${label}
@@ -1246,7 +1629,7 @@ class Game3D {
         return `
             <div style="padding: 20px;">
                 <h3 style="color: ${clanColor}; font-size: 12px; margin-bottom: 20px;">SYSTEM CALIBRATION</h3>
-                
+
                 <div style="margin-bottom: 20px;">
                     <p style="font-size: 8px; color: #888; margin-bottom: 10px;">MASTER RESONANCE: ${Math.round(settings.masterVolume * 100)}%</p>
                     <input type="range" id="volume-slider-tab" min="0" max="1" step="0.01" value="${settings.masterVolume}" style="width: 100%; cursor: pointer; accent-color: ${clanColor};">
@@ -1262,8 +1645,14 @@ class Game3D {
                 </div>
 
                 <div style="margin-top: 20px; border-top: 1px solid #333; padding-top: 15px;">
-                    <button onclick="window.game.syncWithSolana()" class="tooltip-trigger" data-tip="Download a local backup of your adventure" style="width: 100%; padding: 10px; background: #00ffff; border: none; font-family: inherit; font-size: 8px; cursor: pointer; color: #000;">
-                        EXPORT SAVE BACKUP
+                    <div style="font-size: 7px; color: #6f8d89; margin-bottom: 8px; line-height: 1.6;">
+                        ${this.walletSessionToken ? `LIVE CLOUD SAVE READY • ${this.shortWallet()} • ${this.formatMycoBalance()} MYCO` : 'CONNECT PHANTOM TO TURN ON LIVE CLOUD SAVE'}
+                    </div>
+                    <button onclick="window.game.syncWithSolana()" class="tooltip-trigger" data-tip="Push your current adventure to the live wallet-backed archive" style="width: 100%; padding: 10px; background: #00ffff; border: none; font-family: inherit; font-size: 8px; cursor: pointer; color: #000; margin-bottom: 8px;">
+                        ${this.walletSessionToken ? 'SYNC CLOUD SAVE' : 'VERIFY WALLET FOR CLOUD SAVE'}
+                    </button>
+                    <button onclick="window.game.downloadSaveBackup()" class="tooltip-trigger" data-tip="Download an offline JSON backup of your adventure" style="width: 100%; padding: 10px; background: #1f2a2b; border: 1px solid #355458; font-family: inherit; font-size: 8px; cursor: pointer; color: #d5ffff;">
+                        EXPORT OFFLINE BACKUP
                     </button>
                 </div>
             </div>
@@ -1272,7 +1661,7 @@ class Game3D {
 
     attachSettingsHandlers(mode = 'KEYBOARD') {
         if (this.activeInventoryTab !== 'SETTINGS') return;
-        
+
         const settings = this.progression.data.settings;
         const clanColor = this.getClanColor(this.selectedClan);
 
@@ -1384,16 +1773,27 @@ class Game3D {
     showInventoryMenu(settingsMode = 'KEYBOARD') {
         const p = this.progression.data;
         const clanColor = this.getClanColor(this.selectedClan);
-        
+        const player = this.player;
+        const hpPercent = player ? Math.max(0, Math.min(100, (player.hp / Math.max(1, player.maxHp || 1)) * 100)) : 0;
+        const magicMax = player?.maxMagic || 100;
+        const magicCur = (player?.magic != null) ? player.magic : magicMax;
+        const magicPercent = Math.max(0, Math.min(100, (magicCur / Math.max(1, magicMax)) * 100));
+        const alignment = (player?.alignment != null) ? player.alignment : 50;
+        const moralPercent = Math.max(0, Math.min(100, alignment));
+        const moralColor = alignment < 35 ? '#aa00ff' : (alignment > 65 ? '#39FF14' : '#cccccc');
+        const moralLabel = alignment < 35 ? 'ROT-TOUCHED' : (alignment > 65 ? 'KING\'S LIGHT' : 'NEUTRAL');
+        const { timeStr, period } = this.getWorldTimeState();
+        const pauseLayoutColumns = this.isMobile ? '1fr' : 'minmax(0, 1.35fr) minmax(240px, 0.85fr)';
+
         const renderTabButton = (id, label) => `
             <button onclick="window.setInventoryTab('${id}')" style="
-                flex: 1; 
-                padding: 10px; 
-                background: ${this.activeInventoryTab === id ? clanColor : '#222'}; 
-                color: ${this.activeInventoryTab === id ? 'black' : 'white'}; 
-                border: none; 
-                font-family: inherit; 
-                font-size: 10px; 
+                flex: 1;
+                padding: 10px;
+                background: ${this.activeInventoryTab === id ? clanColor : '#222'};
+                color: ${this.activeInventoryTab === id ? 'black' : 'white'};
+                border: none;
+                font-family: inherit;
+                font-size: 10px;
                 cursor: pointer;
                 border-top: 2px solid ${clanColor};
             ">
@@ -1402,6 +1802,9 @@ class Game3D {
         `;
 
         let content = '';
+        const territoryData = Array.isArray(this.liveTerritory?.regions) ? this.liveTerritory.regions : [];
+        const territoryByRegion = new Map(territoryData.map(entry => [entry.id, entry]));
+        const territoryStandings = Array.isArray(this.liveTerritory?.clanStandings) ? this.liveTerritory.clanStandings : [];
         if (this.activeInventoryTab === 'MAP') {
             content = `
                 <div style="padding: 20px; text-align: center;">
@@ -1410,13 +1813,46 @@ class Game3D {
                         ${CONFIG.REGIONS.map(reg => {
                             const isUnlocked = p.unlockedRegions.includes(reg.id);
                             const isCurrent = this.currentRegion.id === reg.id;
+                            const territory = territoryByRegion.get(reg.id) || null;
+                            const ownerClan = territory?.ownerClan || null;
+                            const ownerColor = ownerClan ? this.getClanColor(ownerClan) : '#555';
+                            const topPressure = Array.isArray(territory?.pressure) ? territory.pressure[0] : null;
+                            const statusLabel = reg.isSafeZone
+                                ? 'SANCTUARY'
+                                : territory?.statusLabel
+                                    ? territory.statusLabel.toUpperCase()
+                                    : (isUnlocked ? 'UNSCANNED' : 'LOCKED');
+                            const ownerLabel = reg.isSafeZone
+                                ? 'CROWN HOLD'
+                                : ownerClan
+                                    ? `${ownerClan.toUpperCase()} HOLD`
+                                    : (territory ? 'WILD TERRITORY' : 'NO SIGNAL');
+                            const pressureLabel = topPressure?.clanId
+                                ? `${topPressure.clanId.toUpperCase()} ${Math.round(Number(topPressure.score || 0))}`
+                                : 'NO WAR DATA';
                             return `
-                                <div style="background: ${isCurrent ? '#39FF14' : '#111'}; border: 1px solid ${isUnlocked ? reg.accent : '#333'}; padding: 10px; color: ${isCurrent ? 'black' : 'white'}; opacity: ${isUnlocked ? 1 : 0.5};">
+                                <div style="background: ${isCurrent ? '#39FF14' : '#111'}; border: 1px solid ${isUnlocked ? ownerColor : '#333'}; box-shadow: ${territory && !isCurrent ? `0 0 14px ${ownerColor}` : 'none'}; padding: 10px; color: ${isCurrent ? 'black' : 'white'}; opacity: ${isUnlocked ? 1 : 0.5}; min-height: 96px; display: flex; flex-direction: column; justify-content: space-between;">
                                     <p style="font-size: 8px;">${reg.name.toUpperCase()}</p>
-                                    <p style="font-size: 6px;">${isUnlocked ? (isCurrent ? '[HERE]' : '[UNLOCKED]') : '[LOCKED]'}</p>
+                                    <p style="font-size: 6px; color: ${isCurrent ? '#111' : ownerColor};">${isUnlocked ? (isCurrent ? '[HERE]' : `[${statusLabel}]`) : '[LOCKED]'}</p>
+                                    <p style="font-size: 6px; color: ${isCurrent ? '#111' : '#ddd'}; margin-top: 6px;">${ownerLabel}</p>
+                                    <p style="font-size: 6px; color: ${isCurrent ? '#111' : '#999'}; margin-top: 4px;">${pressureLabel}</p>
                                 </div>
                             `;
                         }).join('')}
+                    </div>
+                    <div style="margin-top: 16px; padding-top: 14px; border-top: 1px solid #222; text-align: left;">
+                        <div style="display:flex; justify-content:space-between; gap:10px; align-items:center; margin-bottom: 10px;">
+                            <p style="font-size: 9px; color: #00ffff; margin:0;">LIVE CLAN WAR</p>
+                            <p style="font-size: 7px; color: #777; margin:0;">${this.liveTerritoryLoading ? 'SCANNING THE MYCELIAL GRID...' : (this.liveTerritory?.updatedAt ? `UPDATED ${new Date(this.liveTerritory.updatedAt).toLocaleTimeString()}` : 'AWAITING WAR TELEMETRY')}</p>
+                        </div>
+                        ${territoryStandings.length ? territoryStandings.slice(0, 4).map((entry, index) => `
+                            <div style="display:grid; grid-template-columns: 24px 1fr auto auto; gap:8px; align-items:center; padding:6px 0; border-bottom:1px solid #141414; font-size:7px; color:#ddd;">
+                                <span style="color:#666;">#${index + 1}</span>
+                                <span style="color:${this.getClanColor(entry.clanId)};">${entry.clanId.toUpperCase()}</span>
+                                <span>${entry.controlledRegions} REG</span>
+                                <span>${entry.weeklyBurned} WB</span>
+                            </div>
+                        `).join('') : '<p style="font-size: 8px; color: #666; margin: 0;">No live territory signals yet.</p>'}
                     </div>
                 </div>
             `;
@@ -1504,7 +1940,59 @@ class Game3D {
                         <h2 style="font-size: 18px; margin: 0;">PAUSED</h2>
                         <span style="font-size: 10px;">KING MYCO'S JOURNEY</span>
                     </div>
-                    
+
+                    <div style="padding: 16px 20px 0 20px; display: grid; grid-template-columns: ${pauseLayoutColumns}; gap: 12px; align-items: stretch;">
+                        <div style="background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.12); border-radius: 10px; padding: 14px 16px;">
+                            <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:10px;">
+                                <span style="font-size:10px; color:#ffffff;">KING MYCO</span>
+                                <span style="font-size:9px; color:#cccccc;">LV ${p.level}</span>
+                            </div>
+                            <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                                <span style="width:44px; color:#ff6666; font-size:8px;">HP</span>
+                                <div style="flex:1; height:10px; background:rgba(0,0,0,0.6); border:1px solid rgba(255,85,85,0.45); border-radius:999px; overflow:hidden;">
+                                    <div style="width:${hpPercent}%; height:100%; background:linear-gradient(90deg, #ff3344, #ff7755);"></div>
+                                </div>
+                                <span style="width:64px; text-align:right; color:#ffaaaa; font-size:8px;">${Math.ceil(player?.hp || 0)}/${player?.maxHp || 0}</span>
+                            </div>
+                            <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+                                <span style="width:44px; color:#66ccff; font-size:8px;">MAGIC</span>
+                                <div style="flex:1; height:10px; background:rgba(0,0,0,0.6); border:1px solid rgba(102,204,255,0.45); border-radius:999px; overflow:hidden;">
+                                    <div style="width:${magicPercent}%; height:100%; background:linear-gradient(90deg, #2266ff, #66ccff);"></div>
+                                </div>
+                                <span style="width:64px; text-align:right; color:#aaddff; font-size:8px;">${Math.ceil(magicCur)}/${magicMax}</span>
+                            </div>
+                            <div style="display:flex; align-items:center; gap:8px;">
+                                <span style="width:44px; color:${moralColor}; font-size:8px;">MORAL</span>
+                                <div style="flex:1; height:10px; background:rgba(0,0,0,0.6); border:1px solid rgba(255,255,255,0.25); border-radius:999px; overflow:hidden; position:relative;">
+                                    <div style="position:absolute; left:50%; top:0; bottom:0; width:1px; background:rgba(255,255,255,0.35);"></div>
+                                    <div style="width:${moralPercent}%; height:100%; background:${moralColor};"></div>
+                                </div>
+                                <span style="width:64px; text-align:right; color:${moralColor}; font-size:8px;">${moralLabel}</span>
+                            </div>
+                        </div>
+
+                        <div style="background: rgba(0,0,0,0.42); border: 1px solid rgba(57,255,20,0.24); border-radius: 10px; padding: 14px 16px; display:flex; flex-direction:column; justify-content:space-between; gap:10px;">
+                            <div>
+                                <div style="display:flex; justify-content:space-between; gap:8px; margin-bottom:6px;">
+                                    <span style="font-size:8px; color:#9fdcff;">${this.getGameModeLabel()}</span>
+                                    <span style="font-size:8px; color:#7effa1;">${(this.currentRegion?.name || 'Sanctuary').toUpperCase()}</span>
+                                </div>
+                                <div style="font-size:10px; color:#ffffff; margin-bottom:4px;">WORLD TIME ${period}</div>
+                                <div style="font-size:16px; color:#ffffff;">${timeStr}</div>
+                            </div>
+                            <div style="display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:8px;">
+                                <div style="padding:8px; background:rgba(0,255,255,0.08); border:1px solid rgba(0,255,255,0.28); border-radius:8px;">
+                                    <div style="font-size:7px; color:#7edbff; margin-bottom:4px;">BLUE SPORES</div>
+                                    <div style="font-size:12px; color:#00ffff;">${p.blueSpores}</div>
+                                </div>
+                                <div style="padding:8px; background:rgba(255,220,0,0.08); border:1px solid rgba(255,220,0,0.28); border-radius:8px;">
+                                    <div style="font-size:7px; color:#fff2a8; margin-bottom:4px;">GOLD SPORES</div>
+                                    <div style="font-size:12px; color:#ffff00;">${p.goldenSpores}</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <div style="display: flex; flex-wrap: wrap;">
                         ${renderTabButton('MAP', 'MAP')}
                         ${renderTabButton('INVENTORY', 'INV')}
@@ -1514,11 +2002,11 @@ class Game3D {
                         ${renderTabButton('ACCESSORIES', 'ROYAL')}
                         ${renderTabButton('SETTINGS', 'SET')}
                     </div>
-                    
+
                     <div style="min-height: 450px; color: white;">
                         ${this.activeInventoryTab === 'SETTINGS' ? this.getSettingsContent(settingsMode) : (this.activeInventoryTab === 'ACCESSORIES' ? this.getAccessoriesContent() : content)}
                     </div>
-                    
+
                     <div style="padding: 20px; border-top: 1px solid #222; display: flex; gap: 10px; flex-wrap: wrap;">
                         <button onclick="window.game.togglePause()" style="flex: 2; padding: 15px; background: #39FF14; border: none; font-family: inherit; cursor: pointer; color: black;">RESUME</button>
                         <button onclick="window.game.saveGame()" style="flex: 1; padding: 15px; background: #00ffff; border: none; font-family: inherit; cursor: pointer; color: black;">SAVE</button>
@@ -1533,6 +2021,7 @@ class Game3D {
         window.setInventoryTab = (tab) => {
             this.activeInventoryTab = tab;
             this.showInventoryMenu();
+            if (tab === 'MAP') void this.refreshLiveTerritory('map');
             this.uiSynth.triggerAttackRelease("D4", "16n");
         };
     }
@@ -1606,54 +2095,48 @@ class Game3D {
 
     async init() {
         this.scene = new THREE.Scene();
-        this.isInterior = false; 
+        this.isInterior = false;
         this.potParticles = [];
         this.potParticleGroup = null;
         this.potPos = null;
-        
+
         // Roblox Camera variables - third-person from behind and slightly above.
         this.cameraDist = 9;
         this.cameraTargetDist = 9;
         this.cameraYaw = 0;
         this.cameraPitch = -0.35;
         this.isRightMouseDown = false;
-        
+        this.cameraPivot = new THREE.Vector3();
+        this.cameraLookTarget = new THREE.Vector3();
+        this._tmpCameraFacing = new THREE.Vector3();
+        this._tmpCameraPivot = new THREE.Vector3();
+        this._tmpCameraLookTarget = new THREE.Vector3();
+        this._tmpAudioForward = new THREE.Vector3();
+        this._tmpAudioUp = new THREE.Vector3();
+        this._tmpLightWorldPos = new THREE.Vector3();
+        this._worldHudVisible = null;
+        this._restorationHudVisible = null;
+        this.cameraShakeEnergy = 0;
+        this.cameraShakeTime = 0;
+
         this.currentRegion = CONFIG.REGIONS.find(r => r.id === this.progression.data.currentRegionId) || CONFIG.REGIONS[0];
 
-        // V1.9.18 - Roll the daily Rot Cycle forward. If the calendar day has flipped
-        // since last play, every conquered region picks up +35% blight that the wand
-        // must cleanse before King Myco can use any portal again.
-        const rotAdvanced = this.progression.processDailyRot();
-        if (rotAdvanced) {
-            // Defer the announcement until the HUD exists.
-            setTimeout(() => {
-                try { this.showFloatingText('THE ROT HAS SPREAD OVERNIGHT', 0xaa00ff, true); } catch (_) {}
-            }, 1500);
-        }
+        // V1.9.47 - Rot now advances on in-world dawn, not wall-clock midnight.
+        // Seed the current day so older saves migrate cleanly into the new loop.
+        this.progression.processDailyRot(this.progression.data.worldDay);
         // Per-region rot props tracked in scene for cleansing + visual spread.
         this.rotProps = [];
         this._rotSpreadTick = 0;
         // V1.9.20 - Active rot-purifying Light Pools the player can drop with F.
         this.lightPools = [];
         this._lightPoolLastDrop = 0;
-        // Wall-clock check every 60s to catch midnight rollover during long sessions.
-        this._dailyTickInterval = setInterval(() => {
-            if (this.progression.processDailyRot()) {
-                try { this.showFloatingText('A NEW DAY — THE ROT RETURNS', 0xaa00ff, true); } catch (_) {}
-                this.syncRegionRotToVisuals();
-                // V1.9.19 - Re-evaluate rot-infected spawns now that rot just jumped.
-                if (typeof this.spawnRotInfectedForRegion === 'function') {
-                    this.spawnRotInfectedForRegion();
-                }
-                this.updateHud();
-            }
-        }, 60000);
+        this._dailyTickInterval = null;
 
         if (this.currentRegion.id === 'thronecap') {
             this.thronecapStartTime = Date.now();
             this.spawnGhost();
         }
-        
+
         this.applyRegionEnvironment(this.currentRegion);
 
         // V1.9.27 - Mobile perf profile. iPhones are fill-rate bound: each frame
@@ -1682,8 +2165,9 @@ class Game3D {
         if (lowPerfOverride === true) this.mobilePerf = true;
         else if (lowPerfOverride === false) this.mobilePerf = false;
         else this.mobilePerf = this.isMobile;
-        const mobileFarPlane = 500;
-        const desktopFarPlane = 1000;
+        if (this.mobilePerf) this.minimapVisible = false;
+        const mobileFarPlane = 360;
+        const desktopFarPlane = 760;
 
         this.camera = new THREE.PerspectiveCamera(
             75,
@@ -1691,7 +2175,7 @@ class Game3D {
             0.1,
             this.mobilePerf ? mobileFarPlane : desktopFarPlane
         );
-        
+
         this.renderer = new THREE.WebGLRenderer({
             antialias: !this.mobilePerf, // MSAA is the #1 mobile fill-rate cost
             powerPreference: 'high-performance',
@@ -1700,9 +2184,9 @@ class Game3D {
             preserveDrawingBuffer: false
         });
         // V1.9.27 - Pixel-ratio cap is the highest-leverage knob. iPhones run
-        // at 2-3 DPR; capping at 1.0 mobile / 1.5 desktop is a 2-4× shader cost
+        // at 2-3 DPR; capping at 1.0 mobile / 1.25 desktop is a 2-4× shader cost
         // reduction without making the blocky Roblox look noticeably softer.
-        const dprCap = this.mobilePerf ? 1.0 : 1.5;
+        const dprCap = this.mobilePerf ? 0.75 : 1.25;
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, dprCap));
         this.renderer.setSize(window.innerWidth, window.innerHeight);
         // V1.9.27 - Shadows off on mobile. PCF shadow maps require a second
@@ -1755,7 +2239,7 @@ class Game3D {
         if (!this.mobilePerf) {
             this.composer = new EffectComposer(this.renderer);
             // Match the renderer's capped pixel ratio so bloom/glitch render at the same lower resolution.
-            this.composer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+            this.composer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.25));
             this.composer.setSize(window.innerWidth, window.innerHeight);
             this.composer.addPass(new RenderPass(this.scene, this.camera));
 
@@ -1809,7 +2293,7 @@ class Game3D {
                         float xs = floor(vUv.x * 10.0);
                         float ys = floor(vUv.y * 10.0);
                         vec4 normal = texture2D(tDiffuse, vUv);
-                        
+
                         if (rand(vec2(xs, ys) + time) < amount * 0.1) {
                             uv.x += (rand(vec2(ys, time)) - 0.5) * amount * 0.5;
                             uv.y += (rand(vec2(xs, time)) - 0.5) * amount * 0.5;
@@ -1938,7 +2422,13 @@ class Game3D {
         document.head.appendChild(style);
 
         this.loadWalletConnection();
+        this.loadWalletSession();
         this.setupStartScreen();
+        void this.refreshLiveLeaderboard();
+        void this.refreshLiveTerritory();
+        if (this.walletAddress && this.walletSessionToken) {
+            void this.loadCloudProfile();
+        }
 
         // V1.9.7 Daylight - Bright Roblox-style baseline; cycle drives the final values.
         this.ambientLight = new THREE.AmbientLight(0xffffff, 2.0);
@@ -2027,7 +2517,7 @@ class Game3D {
         this.clearSpawnArea(this.player.group.position, 6);
 
         // Personal hero light so King Myco stays readable in any region or time of day.
-        this.playerHeroLight = new THREE.PointLight(0xffffff, 2.6, 22, 1.2);
+        this.playerHeroLight = new THREE.PointLight(0xffffff, this.mobilePerf ? 1.35 : 2.6, this.mobilePerf ? 14 : 22, this.mobilePerf ? 1.6 : 1.2);
         this.playerHeroLight.position.set(0, 3.5, 0);
         this.player.group.add(this.playerHeroLight);
 
@@ -2044,6 +2534,7 @@ class Game3D {
         this.playerShadowDisc.position.y = 0.02;
         this.playerShadowDisc.renderOrder = 1;
         this.player.group.add(this.playerShadowDisc);
+        this.applyMobileSceneBudget();
 
         // Soft glowing halo sprite around King Myco so his silhouette pops in any lighting.
         const haloCanvas = document.createElement('canvas');
@@ -2066,7 +2557,7 @@ class Game3D {
         this.playerHalo.scale.set(4.5, 4.5, 1);
         this.playerHalo.position.set(0, 1.4, 0);
         this.player.group.add(this.playerHalo);
-        
+
         this.spawnEnemies();
         this.spawnCollectibles();
 
@@ -2094,7 +2585,7 @@ class Game3D {
         //     use) tracks its own touch.identifier through changedTouches, so
         //     multi-touch (move + jump + attack) works without finger collisions.
         //   • Recomputes center on every touchstart instead of caching the
-        //     initial bounding rect — survives URL bar collapse and rotation.
+        //     initial bounding rect - survives URL bar collapse and rotation.
         //   • Respects iOS safe-area-inset (notch / home indicator).
         //   • Wraps everything in a single container with pointer-events: none
         //     so menus/HUD remain interactive; only the active touch surfaces
@@ -2179,39 +2670,13 @@ class Game3D {
                     border-color: #aaddff;
                     box-shadow: 0 0 12px rgba(60,160,255,0.55), 0 4px 10px rgba(0,0,0,0.45);
                 }
-                .mobile-action-btn.use {
-                    background: radial-gradient(circle at 30% 30%, rgba(120,255,140,0.85), rgba(20,140,40,0.85));
+                .mobile-action-btn.interact {
+                    width: 88px; height: 88px;
+                    font-size: 11px;
+                    background: radial-gradient(circle at 30% 30%, rgba(120,255,140,0.88), rgba(20,140,40,0.88));
                     border-color: #aaffaa;
                     box-shadow: 0 0 12px rgba(57,255,20,0.55), 0 4px 10px rgba(0,0,0,0.45);
                 }
-                .mobile-action-btn.dash {
-                    width: 78px; height: 78px;
-                    font-size: 13px;
-                    background: radial-gradient(circle at 30% 30%, rgba(255,220,80,0.9), rgba(200,120,0,0.9));
-                    border-color: #ffe680;
-                    box-shadow: 0 0 14px rgba(255,200,60,0.6), 0 4px 10px rgba(0,0,0,0.45);
-                    overflow: hidden;
-                }
-                /* Cooldown sweep — a darkening overlay that we'll size via inline style each frame. */
-                .mobile-action-btn.dash .cd-overlay {
-                    position: absolute; inset: 0;
-                    border-radius: 50%;
-                    background: rgba(0,0,0,0.55);
-                    pointer-events: none;
-                    clip-path: inset(0 0 100% 0);
-                    transition: clip-path 0.08s linear;
-                }
-                .mobile-action-btn.dash .cd-label {
-                    position: relative;
-                    z-index: 1;
-                    pointer-events: none;
-                }
-                @keyframes dashFlash {
-                    0%   { box-shadow: 0 0 14px rgba(255,200,60,0.6), 0 4px 10px rgba(0,0,0,0.45); }
-                    30%  { box-shadow: 0 0 32px rgba(255,240,180,1.0), 0 4px 14px rgba(0,0,0,0.55); }
-                    100% { box-shadow: 0 0 14px rgba(255,200,60,0.6), 0 4px 10px rgba(0,0,0,0.45); }
-                }
-                .mobile-action-btn.dash.firing { animation: dashFlash 360ms ease-out; }
                 #mobile-controls-root.hidden { display: none; }
             `;
             document.head.appendChild(style);
@@ -2231,7 +2696,7 @@ class Game3D {
         document.body.appendChild(root);
         this._mobileControlsRoot = root;
 
-        // Idle ghost stick (visual affordance — no input).
+        // Idle ghost stick (visual affordance - no input).
         const ghost = document.createElement('div');
         ghost.id = 'mobile-joystick-ghost';
         ghost.className = 'mobile-ctrl-base';
@@ -2256,22 +2721,9 @@ class Game3D {
         };
         const attackBtn = makeBtn('ATTACK', 'attack');
         const jumpBtn   = makeBtn('JUMP',   'jump');
-        const useBtn    = makeBtn('USE',    'use');
+        const interactBtn = makeBtn('INTERACT', 'interact');
 
-        // V1.9.30 - Dedicated DASH button. Composed of a cooldown sweep overlay
-        // + an inner label so the overlay can darken the button without hiding
-        // the text. We hold a reference to the overlay so the rAF loop below
-        // can drive its clip-path each frame from player.dashReadyAt.
-        const dashBtn = makeBtn('', 'dash');
-        const dashOverlay = document.createElement('div');
-        dashOverlay.className = 'cd-overlay';
-        const dashLabel = document.createElement('div');
-        dashLabel.className = 'cd-label';
-        dashLabel.textContent = 'DASH';
-        dashBtn.appendChild(dashOverlay);
-        dashBtn.appendChild(dashLabel);
-
-        // Layout helper — runs on init and on resize/orientation change.
+        // Layout helper - runs on init and on resize/orientation change.
         // Uses safe-area-inset to dodge the home indicator + notch.
         const layout = () => {
             const w = window.innerWidth;
@@ -2287,16 +2739,14 @@ class Game3D {
 
             // Action buttons stacked on the right.
             // ATTACK (biggest) at the bottom-right thumb rest.
-            // DASH sits left of ATTACK so it's reachable mid-combat without
-            // shifting the grip. JUMP stacks above ATTACK. USE tucks higher-left.
+            // INTERACT sits left of ATTACK for quick object/NPC use.
+            // JUMP stacks above ATTACK.
             attackBtn.style.right = `calc(28px + ${safeR})`;
             attackBtn.style.bottom = `calc(120px + ${safeB})`;
             jumpBtn.style.right = `calc(54px + ${safeR})`;
             jumpBtn.style.bottom = `calc(232px + ${safeB})`;
-            dashBtn.style.right = `calc(140px + ${safeR})`;
-            dashBtn.style.bottom = `calc(130px + ${safeB})`;
-            useBtn.style.right = `calc(150px + ${safeR})`;
-            useBtn.style.bottom = `calc(230px + ${safeB})`;
+            interactBtn.style.right = `calc(142px + ${safeR})`;
+            interactBtn.style.bottom = `calc(136px + ${safeB})`;
         };
         layout();
         window.addEventListener('resize', layout);
@@ -2320,7 +2770,11 @@ class Game3D {
         const hideStick = () => {
             stickBase.classList.remove('active');
             knob.style.transform = 'translate(-50%, -50%)';
-            if (this.player) this.player.moveVector.set(0, 0);
+            if (this.player) {
+                this.player.moveVector.set(0, 0);
+                this.player.tankTurnInput = 0;
+                this.player.tankThrottleInput = 0;
+            }
         };
 
         const updateStick = (touchX, touchY) => {
@@ -2341,12 +2795,32 @@ class Game3D {
                 const scaled = (norm - deadzone) / (1 - deadzone);
                 const ux = Math.cos(angle) * scaled;
                 const uy = Math.sin(angle) * scaled;
-                // moveVector.x = strafe (right positive), moveVector.y = forward (positive)
-                // Screen y grows downward, so forward = -uy.
-                this.player.moveVector.set(ux, -uy);
+                let turnInput = ux;
+                let throttleInput = -uy;
+                const axisAssist = 0.18;
+                if (Math.abs(turnInput) > Math.abs(throttleInput) + axisAssist) {
+                    throttleInput *= 0.15;
+                } else if (Math.abs(throttleInput) > Math.abs(turnInput) + axisAssist) {
+                    turnInput *= 0.15;
+                }
+                this.player.moveVector.set(0, 0);
+                this.player.tankTurnInput = turnInput;
+                this.player.tankThrottleInput = throttleInput;
             } else {
                 this.player.moveVector.set(0, 0);
+                this.player.tankTurnInput = 0;
+                this.player.tankThrottleInput = 0;
             }
+        };
+
+        let interactResetTimer = null;
+        const tapInteract = () => {
+            if (!this.player) return;
+            this.player.keys.interact = true;
+            if (interactResetTimer) clearTimeout(interactResetTimer);
+            interactResetTimer = setTimeout(() => {
+                if (this.player) this.player.keys.interact = false;
+            }, 120);
         };
 
         // ---- Button state (each tracks its own touch identifier) ----
@@ -2360,10 +2834,9 @@ class Game3D {
                 }
             },
             {
-                el: useBtn, id: null,
+                el: interactBtn, id: null,
                 onPress: () => {
-                    if (!this.player) return;
-                    this.player.useActiveSlot();
+                    tapInteract();
                     this.triggerHaptic('tap');
                 }
             },
@@ -2376,26 +2849,6 @@ class Game3D {
                     this.player.useActiveSlot();
                 },
                 onInitialPress: () => this.triggerHaptic('medium')
-            },
-            // V1.9.30 - DASH button. Calls player.dash(), which returns true
-            // when the dash actually fired (vs. cooldown rejection). Haptic +
-            // visual flash only fire on a successful dash; a tap-during-cooldown
-            // gives no feedback so the player learns to read the sweep ring.
-            {
-                el: dashBtn, id: null,
-                onPress: () => {
-                    if (!this.player || typeof this.player.dash !== 'function') return;
-                    const fired = this.player.dash();
-                    if (fired) {
-                        this.triggerHaptic('dash');
-                        dashBtn.classList.remove('firing');
-                        // Force reflow so the animation re-triggers on rapid taps.
-                        void dashBtn.offsetWidth;
-                        dashBtn.classList.add('firing');
-                    } else {
-                        this.triggerHaptic('reject');
-                    }
-                }
             }
         ];
         for (const b of buttons) {
@@ -2416,7 +2869,7 @@ class Game3D {
 
         // Floating-origin trigger zone: left half of the screen, anywhere that
         // isn't on top of a button. This is what makes the stick feel iPhone-
-        // native — wherever your thumb lands, that becomes the new stick center.
+        // native - wherever your thumb lands, that becomes the new stick center.
         const isStickZone = (x, y) => {
             return x < window.innerWidth * 0.5 && !hitButton(x, y);
         };
@@ -2458,7 +2911,7 @@ class Game3D {
             for (const t of e.changedTouches) {
                 const x = t.clientX, y = t.clientY;
 
-                // Touch landed on a menu/dialogue/HTML control — leave it alone.
+                // Touch landed on a menu/dialogue/HTML control - leave it alone.
                 if (touchHitsUI(x, y)) continue;
 
                 // Check our action buttons.
@@ -2492,7 +2945,7 @@ class Game3D {
                     e.preventDefault();
                 }
                 // Buttons don't track movement except for the floating "drag off
-                // to cancel" pattern, which we deliberately don't implement —
+                // to cancel" pattern, which we deliberately don't implement -
                 // touch-end is enough.
             }
         };
@@ -2523,8 +2976,6 @@ class Game3D {
         // Auto-repeat for held ATTACK button. Drives useActiveSlot() at a
         // weapon-friendly cadence; the player's own per-attack cooldown
         // (lastMeleeTime / shoot cooldown) will gate redundant calls.
-        // V1.9.30 - Same loop also drives the DASH cooldown sweep so the
-        // overlay reflects player.dashReadyAt without a separate rAF.
         const REPEAT_MS = 180;
         const tickRepeat = () => {
             const now = performance.now();
@@ -2533,16 +2984,6 @@ class Game3D {
                     b.onPress();
                     b.lastFire = now;
                 }
-            }
-            // DASH cooldown sweep. clip-path inset(top right bottom left) — we
-            // grow the bottom inset from 100% (fully clipped, no overlay) back
-            // up to 0% (overlay covers full button) as the cooldown counts down,
-            // then drain back to 100% as it becomes ready again.
-            if (this.player && typeof this.player.dashReadyAt === 'number') {
-                const remaining = Math.max(0, this.player.dashReadyAt - now);
-                const cd = Math.max(1, this.player.dashCooldownMs || 700);
-                const pct = remaining / cd; // 1 = just fired, 0 = ready
-                dashOverlay.style.clipPath = `inset(0 0 ${(1 - pct) * 100}% 0)`;
             }
 
             // V1.9.31 - Show controls only when gameplay is active. During menus,
@@ -2570,7 +3011,7 @@ class Game3D {
     //       - Try navigator.vibrate first (covers Android + iOS Chrome on PWA).
     //       - Fall back to connected gamepad rumble if available (rare for
     //         iPhone but works when the user has a controller paired).
-    //       - Silently no-op if neither path exists — the visual button-pressed
+    //       - Silently no-op if neither path exists - the visual button-pressed
     //         scale + glow already give players sub-haptic feedback.
     // Patterns are named (not raw arrays) so other systems can ask for
     // semantically-meaningful feedback without knowing the underlying device.
@@ -2621,12 +3062,57 @@ class Game3D {
         } catch (_) { /* not all browsers expose vibrationActuator */ }
     }
 
+    applyMobileSceneBudget(force = false) {
+        if (!this.scene || !this.player) return;
+
+        const now = performance.now();
+        if (!force && now < (this._nextLightBudgetAt || 0)) return;
+        this._nextLightBudgetAt = now + (this.mobilePerf ? 400 : 250);
+
+        const playerPos = this.player.group.position;
+        const maxLights = this.mobilePerf ? 6 : 14;
+        const maxDistance = this.mobilePerf ? 14 : 34;
+        const maxDistanceSq = maxDistance * maxDistance;
+        const ranked = [];
+
+        this.scene.traverse(obj => {
+            if (!obj || !obj.isPointLight || obj === this.playerHeroLight) return;
+            if (typeof obj.userData.baseIntensity !== 'number') obj.userData.baseIntensity = obj.intensity;
+            const baseIntensity = obj.userData.baseIntensity || 0;
+            if (baseIntensity <= 0) return;
+            const lightPos = obj.getWorldPosition(this._tmpLightWorldPos);
+            const dx = lightPos.x - playerPos.x;
+            const dy = lightPos.y - playerPos.y;
+            const dz = lightPos.z - playerPos.z;
+            const distSq = (dx * dx) + (dy * dy) + (dz * dz);
+            if (distSq <= maxDistanceSq) ranked.push({ light: obj, distSq });
+        });
+
+        ranked.sort((a, b) => a.distSq - b.distSq);
+        const activeLights = new Set(ranked.slice(0, maxLights).map(entry => entry.light));
+
+        this.scene.traverse(obj => {
+            if (!obj || !obj.isPointLight || obj === this.playerHeroLight) return;
+            const baseIntensity = obj.userData.baseIntensity || 0;
+            const shouldEnable = activeLights.has(obj);
+            obj.visible = shouldEnable;
+            obj.intensity = shouldEnable ? baseIntensity : 0;
+        });
+
+        if (this.playerHeroLight) {
+            this.playerHeroLight.visible = true;
+            this.playerHeroLight.intensity = this.mobilePerf ? 1.35 : 2.2;
+            this.playerHeroLight.distance = this.mobilePerf ? 14 : 18;
+            this.playerHeroLight.decay = this.mobilePerf ? 1.6 : 1.25;
+        }
+    }
+
     applyRegionEnvironment(region) {
         // V1.9.6 Core Linkage - Lift dark regions so King Myco stays visible
         const litSky = new THREE.Color(region.skyColor).lerp(new THREE.Color(0xaabbdd), 0.65);
         const litGround = new THREE.Color(region.groundColor).lerp(new THREE.Color(0xbbbbcc), 0.55);
         this.scene.background = litSky;
-        
+
         const restorationFactor = this.progression.getRestorationProgress() / 100; // 0 to 1
 
         // Clearer fog for a Roblox look - pushed far so the world reads bright
@@ -2636,7 +3122,7 @@ class Game3D {
         let fogFar = region.isSafeZone ? 700 : (450 + restorationFactor * 250);
         if (this.mobilePerf) fogFar = Math.min(fogFar, region.isSafeZone ? 320 : 260);
         this.scene.fog = new THREE.Fog(litSky, 120, fogFar);
-        
+
         if (this.groundMat) {
             // V1.9.8 - If the grass texture is in use, keep color white so the grass reads true.
             if (this.groundMat.map) {
@@ -2649,7 +3135,7 @@ class Game3D {
             this.groundMat.roughness = 0.85;
             this.groundMat.metalness = 0.0;
         }
-        
+
         // V1.9.7 - Set a sane baseline, then let applyCycleLighting() drive the final values.
         if (this.neonSun) {
             this.neonSun.color.setHex(0xffffff);
@@ -2678,32 +3164,32 @@ class Game3D {
 
         // Simpler particles (Roblox-style Sparkles)
         if (this.particles) this.scene.remove(this.particles);
-        
-        const particleCount = 500;
+
+        const particleCount = this.mobilePerf ? 60 : 500;
         const geometry = new THREE.BufferGeometry();
         const positions = new Float32Array(particleCount * 3);
         const velocities = new Float32Array(particleCount * 3);
-        
+
         for (let i = 0; i < particleCount; i++) {
             positions[i * 3] = (Math.random() - 0.5) * 300;
             positions[i * 3 + 1] = Math.random() * 50;
             positions[i * 3 + 2] = (Math.random() - 0.5) * 300;
-            
+
             velocities[i * 3] = 0;
             velocities[i * 3 + 1] = -(0.02 + Math.random() * 0.05);
             velocities[i * 3 + 2] = 0;
         }
 
         geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        
-        const material = new THREE.PointsMaterial({ 
-            size: 0.5, 
-            color: region.accent, 
-            transparent: true, 
+
+        const material = new THREE.PointsMaterial({
+            size: 0.5,
+            color: region.accent,
+            transparent: true,
             opacity: 0.5,
             sizeAttenuation: true
         });
-        
+
         this.particles = new THREE.Points(geometry, material);
         this.particles.userData.velocities = velocities;
         this.scene.add(this.particles);
@@ -2717,13 +3203,295 @@ class Game3D {
         this.player.goldenSpores = this.progression.data.goldenSpores;
         this.player.alignment = this.progression.data.alignment;
         this.player.unlockedRegions = this.progression.data.unlockedRegions;
+        this.player.currentRegionId = this.progression.data.currentRegionId;
+        this.player.inventory = Array.isArray(this.progression.data.inventory) ? [...this.progression.data.inventory] : [];
         this.player.upgrades = this.progression.data.upgrades;
         this.player.forgeLevels = this.progression.data.home.forgeLevels || { weapons: 0, armor: 0 };
-        
+
+        const learnedMagic = this.player.inventory.filter(id => CONFIG.MAGIC.some(m => m.id === id));
+        if (!learnedMagic.length) this.player.currentMagicIdx = 0;
+        else if (this.player.currentMagicIdx >= learnedMagic.length) this.player.currentMagicIdx = learnedMagic.length - 1;
+
         // Sync accessories
         const equipped = this.progression.data.equippedAccessories || { cape: null, crown: null };
         this.player.setAccessory('CAPE', equipped.cape);
         this.player.setAccessory('CROWN', equipped.crown);
+        const territoryEffect = this.getTerritoryGameplayEffect(this.currentRegion?.id);
+        this.player.territoryModifiers = territoryEffect.playerModifiers;
+        this.currentTerritoryEffect = territoryEffect;
+        if (typeof this.player.applyLevelStats === 'function') this.player.applyLevelStats();
+        if (typeof this.player.syncWeaponVisual === 'function') this.player.syncWeaponVisual();
+    }
+
+    getCurrentGameMode() {
+        return this.progression?.getGameMode?.() || 'STORY';
+    }
+
+    getGameModeLabel(mode = this.getCurrentGameMode()) {
+        if (mode === 'COLLECTOR') return 'SPORE COLLECTOR';
+        if (mode === 'TERRITORY') return 'TERRITORY WAR';
+        return 'STORY CAMPAIGN';
+    }
+
+    getGameModeAccent(mode = this.getCurrentGameMode()) {
+        if (mode === 'COLLECTOR') return '#aa44ff';
+        if (mode === 'TERRITORY') return '#ff6b2c';
+        return '#39FF14';
+    }
+
+    getTerritoryApiPath() {
+        return this.progression?.isTerritoryWarMode?.()
+            ? '/api/game3d/territory?mode=TERRITORY'
+            : '/api/game3d/territory';
+    }
+
+    getRegionTerritoryState(regionId = this.currentRegion?.id) {
+        if (!regionId || !Array.isArray(this.liveTerritory?.regions)) return null;
+        return this.liveTerritory.regions.find(region => region?.id === regionId) || null;
+    }
+
+    getTerritoryGameplayEffect(regionId = this.currentRegion?.id) {
+        const territory = this.getRegionTerritoryState(regionId);
+        const effect = {
+            territory,
+            sameClan: false,
+            enemyControlled: false,
+            contested: false,
+            underSiege: false,
+            rewardMult: 1,
+            enemyCountMult: 1,
+            enemyStatMult: 1,
+            enemySpeedMult: 1,
+            rotSpawnMult: 1,
+            extraBossLoot: 0,
+            bonusDropChance: 0,
+            playerModifiers: {
+                speedMult: 1,
+                cooldownMult: 1,
+                goalRadiusMult: 1,
+                projectileSpeedMult: 1,
+                damageBonusFlat: 0,
+                damageBonusMult: 1,
+                wardBonusFlat: 0,
+                regenBonus: 0,
+                critBonus: 0,
+            }
+        };
+
+        if (!this.progression?.isTerritoryWarMode?.()) return effect;
+        if (!territory || territory.sanctuary) return effect;
+
+        const ownerClan = territory.ownerClan || null;
+        effect.sameClan = ownerClan === this.selectedClan;
+        effect.enemyControlled = !!(ownerClan && ownerClan !== this.selectedClan);
+        effect.contested = territory.status === 'contested';
+        effect.underSiege = territory.status === 'under_siege';
+
+        if (effect.sameClan) {
+            effect.playerModifiers.speedMult *= effect.underSiege ? 1.04 : 1.08;
+            effect.playerModifiers.damageBonusMult *= effect.underSiege ? 1.08 : 1.12;
+            effect.playerModifiers.wardBonusFlat += 1;
+            effect.playerModifiers.regenBonus += effect.underSiege ? 0.02 : 0.05;
+            effect.enemyCountMult *= effect.underSiege ? 1.12 : 0.88;
+            effect.enemyStatMult *= effect.underSiege ? 1.10 : 0.92;
+            effect.enemySpeedMult *= effect.underSiege ? 1.06 : 0.95;
+        }
+
+        if (effect.contested) {
+            effect.playerModifiers.cooldownMult *= 0.95;
+            effect.rewardMult = Math.max(effect.rewardMult, 1.10);
+            effect.enemyCountMult *= 1.12;
+            effect.enemyStatMult *= 1.08;
+            effect.enemySpeedMult *= 1.05;
+            effect.rotSpawnMult *= 1.15;
+        }
+
+        if (effect.enemyControlled) {
+            effect.rewardMult = Math.max(effect.rewardMult, effect.underSiege ? 1.35 : 1.22);
+            effect.enemyCountMult *= effect.underSiege ? 1.30 : 1.18;
+            effect.enemyStatMult *= effect.underSiege ? 1.22 : 1.12;
+            effect.enemySpeedMult *= effect.underSiege ? 1.12 : 1.06;
+            effect.rotSpawnMult *= effect.underSiege ? 1.35 : 1.15;
+            effect.extraBossLoot += effect.underSiege ? 4 : 2;
+            effect.bonusDropChance += effect.underSiege ? 0.25 : 0.12;
+        }
+
+        return effect;
+    }
+
+    applyEnemyTerritoryPressure(enemy, regionId = this.currentRegion?.id) {
+        if (!enemy || enemy.__territoryPressureApplied) return enemy;
+        const effect = this.getTerritoryGameplayEffect(regionId);
+        if (!effect || (effect.enemyStatMult === 1 && effect.enemySpeedMult === 1)) return enemy;
+
+        const hpScale = Number(effect.enemyStatMult || 1);
+        const speedScale = Number(effect.enemySpeedMult || 1);
+        const baseHp = Math.max(1, Math.round(Number(enemy.hp || enemy.maxHp || 1)));
+        enemy.maxHp = Math.max(1, Math.round(Number(enemy.maxHp || baseHp) * hpScale));
+        enemy.hp = Math.max(1, Math.round(baseHp * hpScale));
+
+        if (typeof enemy.baseSpeed === 'number') {
+            enemy.baseSpeed *= speedScale;
+            enemy.speed = enemy.baseSpeed;
+        } else if (typeof enemy.speed === 'number') {
+            enemy.speed *= speedScale;
+            enemy.baseSpeed = enemy.speed;
+        }
+
+        if (typeof enemy.shootCooldown === 'number') {
+            enemy.shootCooldown = Math.max(500, Math.round(enemy.shootCooldown / Math.max(0.75, speedScale)));
+        }
+
+        enemy.__territoryPressureApplied = true;
+        return enemy;
+    }
+
+    getRegionEnemyBudget(region = this.currentRegion) {
+        if (!region || region.isSafeZone || this.progression.isCollectorMode()) return 0;
+        const base = region.id === 'region8'
+            ? (this.mobilePerf ? 3 : 5)
+            : (this.mobilePerf ? 6 : 15);
+        const territoryEffect = this.getTerritoryGameplayEffect(region.id);
+        if (!this.progression.isConquered(region.id)) return Math.max(2, Math.round(base * territoryEffect.enemyCountMult));
+        const rot = this.progression.getRegionRot(region.id);
+        const multiplier = rot < 5 ? 0.5 : (rot < 30 ? 0.8 : 1);
+        return Math.max(2, Math.round(base * multiplier * territoryEffect.enemyCountMult));
+    }
+
+    syncRegionThreatLevel() {
+        if (!this.currentRegion || this.currentRegion.isSafeZone) return;
+        const targetCount = this.getRegionEnemyBudget(this.currentRegion);
+        const normalEnemies = this.enemies.filter(e => !e.isBoss && !e.isRotInfected);
+        if (normalEnemies.length < targetCount) {
+            const needed = targetCount - normalEnemies.length;
+            const px = this.player?.group?.position?.x || 0;
+            const pz = this.player?.group?.position?.z || 0;
+            for (let i = 0; i < needed; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const dist = 28 + Math.random() * 36;
+                const x = px + Math.cos(angle) * dist;
+                const z = pz + Math.sin(angle) * dist;
+                const enemy = new Enemy3D(this.scene, new THREE.Vector3(x, 0, z), this.currentRegion);
+                this.applyEnemyTerritoryPressure(enemy, this.currentRegion?.id);
+                this.enemies.push(enemy);
+            }
+            return;
+        }
+        if (normalEnemies.length <= targetCount) return;
+        const px = this.player?.group?.position?.x || 0;
+        const pz = this.player?.group?.position?.z || 0;
+        const toCull = new Set(
+            normalEnemies
+                .map(enemy => ({
+                    enemy,
+                    distSq: enemy.mesh ? enemy.mesh.position.distanceToSquared(new THREE.Vector3(px, 0, pz)) : 0
+                }))
+                .sort((a, b) => b.distSq - a.distSq)
+                .slice(0, normalEnemies.length - targetCount)
+                .map(entry => entry.enemy)
+        );
+        if (!toCull.size) return;
+        this.enemies = this.enemies.filter(enemy => {
+            if (!toCull.has(enemy)) return true;
+            try { enemy.destroy(); } catch (_) {}
+            return false;
+        });
+    }
+
+    grantMagicReward(magicId, sourceLabel = '') {
+        if (!magicId) return false;
+        const magicCfg = CONFIG.MAGIC.find(m => m.id === magicId);
+        if (!magicCfg) return false;
+        const added = this.progression.addInventoryItem(magicId);
+        if (!added) return false;
+        this.syncPlayerStats();
+        const learnedMagic = (this.player.inventory || []).filter(id => CONFIG.MAGIC.some(m => m.id === id));
+        const idx = learnedMagic.indexOf(magicId);
+        if (idx >= 0) this.player.currentMagicIdx = idx;
+        this.showFloatingText(`LEARNED ${magicCfg.name.toUpperCase()}!`, magicCfg.id === 'Crownflare' ? 0xffaa00 : 0x80ffaa, true);
+        this.showGlobalNotification(
+            sourceLabel ? `${sourceLabel} rewarded ${magicCfg.name}.` : `${magicCfg.name} learned.`,
+            magicCfg.id === 'Crownflare' ? '#ff8844' : '#80ffaa'
+        );
+        this.playUiNote('G5', '4n');
+        this.updateHud();
+        return true;
+    }
+
+    getRegionRotQuest(regionId = this.currentRegion?.id) {
+        if (!regionId || !CONFIG.ROT_QUESTS[regionId]) return null;
+        const cfg = CONFIG.ROT_QUESTS[regionId];
+        const state = this.progression.getRotQuestState(regionId);
+        return {
+            regionId,
+            ...cfg,
+            ...state,
+            rot: this.progression.getRegionRot(regionId),
+            rewardMagic: cfg.rewardMagicId ? CONFIG.MAGIC.find(m => m.id === cfg.rewardMagicId) : null
+        };
+    }
+
+    refreshRotQuestState(regionId = this.currentRegion?.id, { announce = false } = {}) {
+        if (!regionId || !CONFIG.ROT_QUESTS[regionId] || !this.progression.isConquered(regionId)) return null;
+        const cfg = CONFIG.ROT_QUESTS[regionId];
+        const worldDay = this.progression.data.worldDay || 1;
+        const rot = this.progression.getRegionRot(regionId);
+        let state = this.progression.getRotQuestState(regionId);
+        const regionName = CONFIG.REGIONS.find(r => r.id === regionId)?.name || regionId;
+        const isCurrentRegion = this.currentRegion?.id === regionId;
+
+        if (rot >= 10) {
+            if (!state.active || state.startedDay !== worldDay) {
+                state = this.progression.setRotQuestState(regionId, { active: true, startedDay: worldDay });
+                if (this.hasVerifiedWalletSession()) {
+                    void this.submitProgressionEvent('rot_quest_started', {
+                        eventKey: `rot_quest_started:${regionId}:day:${worldDay}`,
+                        regionId,
+                        questId: `rot:${regionId}`,
+                        metadata: { worldDay, title: cfg.title }
+                    });
+                }
+                if (announce && isCurrentRegion) {
+                    this.showFloatingText(`ROT QUEST - ${cfg.title.toUpperCase()}`, cfg.accent || 0xaa00ff, true);
+                    this.showGlobalNotification(`${regionName} needs cleansing again.`, `#${(cfg.accent || 0xaa00ff).toString(16).padStart(6, '0')}`);
+                }
+            }
+        } else if (rot < 5 && state.active) {
+            const firstMastery = !state.completed;
+            state = this.progression.setRotQuestState(regionId, {
+                active: false,
+                completed: true,
+                clears: (state.clears || 0) + 1,
+                lastClearedDay: worldDay
+            });
+            let rewardClaimed = !!state.rewardClaimed;
+            if (cfg.rewardMagicId && !rewardClaimed) {
+                rewardClaimed = this.progression.hasInventoryItem(cfg.rewardMagicId) || this.grantMagicReward(cfg.rewardMagicId, cfg.title);
+            }
+            if (rewardClaimed !== !!state.rewardClaimed) {
+                state = this.progression.setRotQuestState(regionId, { rewardClaimed });
+            }
+            if (this.hasVerifiedWalletSession()) {
+                void this.submitProgressionEvent('rot_quest_completed', {
+                    eventKey: `rot_quest_completed:${regionId}:day:${worldDay}`,
+                    regionId,
+                    questId: `rot:${regionId}`,
+                    metadata: { worldDay, title: cfg.title, firstMastery, rewardClaimed }
+                });
+            }
+            if (announce && isCurrentRegion) {
+                this.showFloatingText(`${regionName.toUpperCase()} PURIFIED`, cfg.accent || 0x39FF14, true);
+                this.showGlobalNotification(firstMastery ? `${cfg.title} complete.` : `${regionName} is clean for today.`, '#39FF14');
+            }
+            this.syncRegionThreatLevel();
+        }
+
+        if (isCurrentRegion) {
+            this.syncRegionThreatLevel();
+            this.spawnRotInfectedForRegion();
+        }
+
+        return this.getRegionRotQuest(regionId);
     }
 
     spawnNocturnalMushrooms() {
@@ -2738,7 +3506,7 @@ class Game3D {
             const group = new THREE.Group();
             const x = (Math.random() - 0.5) * 400;
             const z = (Math.random() - 0.5) * 400;
-            
+
             // Stem
             const stemGeo = new THREE.CylinderGeometry(0.1, 0.2, 1, 6);
             const stemMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
@@ -2748,9 +3516,9 @@ class Game3D {
 
             // Glowing Cap
             const capGeo = new THREE.SphereGeometry(0.6, 8, 8, 0, Math.PI * 2, 0, Math.PI / 2);
-            const capMat = new THREE.MeshStandardMaterial({ 
-                color: 0x00ffff, 
-                emissive: 0x00ffff, 
+            const capMat = new THREE.MeshStandardMaterial({
+                color: 0x00ffff,
+                emissive: 0x00ffff,
                 emissiveIntensity: 0,
                 transparent: true,
                 opacity: 0
@@ -2766,14 +3534,14 @@ class Game3D {
 
             group.position.set(x, 0, z);
             group.scale.set(0.1, 0.1, 0.1); // Start tiny
-            
+
             group.userData = {
                 cap: cap,
                 light: light,
                 baseScale: 0.5 + Math.random() * 1.5,
                 color: new THREE.Color().setHSL(0.5 + Math.random() * 0.2, 1, 0.5) // Shades of cyan/blue/purple
             };
-            
+
             cap.material.color.copy(group.userData.color);
             cap.material.emissive.copy(group.userData.color);
             light.color.copy(group.userData.color);
@@ -2791,6 +3559,7 @@ class Game3D {
         if (this.areaLabels) {
             this.areaLabels.forEach(l => this.scene.remove(l));
         }
+        this.clearTerritoryLabels();
         this.npcs = [];
         this.buildings = [];
         this.portals = [];
@@ -2808,7 +3577,7 @@ class Game3D {
             const shop = new InteractiveBuilding3D(this.scene, center.clone().add(new THREE.Vector3(15, 0, 0)), 'SHOP', this.currentRegion.id);
             const save = new InteractiveBuilding3D(this.scene, center.clone().add(new THREE.Vector3(-15, 0, 0)), 'SAVE', this.currentRegion.id);
             const storage = new InteractiveBuilding3D(this.scene, center.clone().add(new THREE.Vector3(0, 0, 15)), 'STORAGE', this.currentRegion.id);
-            
+
             this.buildings.push(shop, save, storage);
             this.collidables.push(shop.mesh, save.mesh, storage.mesh);
 
@@ -2897,6 +3666,8 @@ class Game3D {
 
         // V1.9.14 - Boss Dungeon door + Sage NPC for non-hub regions.
         this.buildBossDungeon();
+        this.spawnPendingBossRewardsForCurrentRegion();
+        if (this.liveTerritory) this.applyTerritoryWorldState(null, this.liveTerritory);
     }
 
     // V1.9.13 - Expanded hub world. Four themed zones spread around the King's
@@ -3041,7 +3812,7 @@ class Game3D {
                     }
                 }
             } else if (zone.builder === 'meadow') {
-                // Vibrant flowering giant mushrooms — the welcoming zone.
+                // Vibrant flowering giant mushrooms - the welcoming zone.
                 const palette = [0xff66aa, 0xffe066, 0x77ddff, 0x39ff14, 0xff8844];
                 for (let i = 0; i < 18; i++) {
                     const tx = (Math.random() - 0.5) * 38;
@@ -3131,7 +3902,7 @@ class Game3D {
     // V1.9.14 - Build the boss dungeon entrance for the current non-hub region.
     // The dungeon is a sealed stone gateway + barrier dome around the boss arena.
     // Interacting with the door opens the requirements modal. When all requirements
-    // are met, the player can OPEN GATE — the barrier drops, the boss spawns inside.
+    // are met, the player can OPEN GATE - the barrier drops, the boss spawns inside.
     buildBossDungeon() {
         // Always tear down any previous instance so leveling between regions is clean.
         if (this.bossDungeon) {
@@ -3166,7 +3937,7 @@ class Game3D {
         lintel.position.set(doorPos.x, 8.5, doorPos.z);
         group.add(lintel);
 
-        // Glowing rune bar across the lintel — the visible "seal".
+        // Glowing rune bar across the lintel - the visible "seal".
         const runeBar = new THREE.Mesh(new THREE.BoxGeometry(7, 0.35, 0.35), runeMat);
         runeBar.position.set(doorPos.x, 8.5, doorPos.z - 0.95);
         group.add(runeBar);
@@ -3230,11 +4001,23 @@ class Game3D {
             this.npcs.push(sage);
         }
 
+        const alreadyCleared = this.progression.isConquered(region.id);
+
         this.bossDungeon = {
             group, regionId: region.id, cfg: dCfg, accent,
             doorPos, arenaPos, barrier, barrierLight, runeBar, ring,
-            sage, opened: false, bossSpawned: false
+            sage, opened: alreadyCleared, bossSpawned: alreadyCleared
         };
+
+        if (alreadyCleared) {
+            try {
+                barrier.visible = false;
+                barrier.material.opacity = 0;
+                runeBar.material.emissiveIntensity = 0.15;
+                barrierLight.intensity = 0.35;
+                ring.material.opacity = 0.25;
+            } catch (_) {}
+        }
     }
 
     // V1.9.14 - Open the dungeon gate. Validates requirements, consumes spores,
@@ -3244,7 +4027,7 @@ class Game3D {
         if (!d || d.opened) return;
         const check = this._evaluateDungeonRequirements(d.cfg);
         if (!check.allMet) {
-            this.showFloatingText("THE SEAL HOLDS — REQUIREMENTS UNMET", 0xff4444, true);
+            this.showFloatingText("THE SEAL HOLDS - REQUIREMENTS UNMET", 0xff4444, true);
             try { this.uiSynth.triggerAttackRelease("A2", "8n"); } catch (_) {}
             return;
         }
@@ -3357,17 +4140,17 @@ class Game3D {
 
         const sageBlock = cfg.sage ? `
             <div style="margin-top: 16px; padding: 12px; background: rgba(20,20,30,0.85); border-left: 3px solid ${accentHex};">
-                <div style="font-size: 10px; color: ${accentHex}; margin-bottom: 6px; letter-spacing: 1px;">— ${cfg.sage.name.toUpperCase()}'S COUNSEL —</div>
+                <div style="font-size: 10px; color: ${accentHex}; margin-bottom: 6px; letter-spacing: 1px;">- ${cfg.sage.name.toUpperCase()}'S COUNSEL -</div>
                 <div style="font-size: 10px; color: #e8e8d8; line-height: 1.55; margin-bottom: 6px;">${cfg.sage.clue}</div>
                 <div style="font-size: 9px; color: #aac; font-style: italic;">${cfg.sage.tactic}</div>
             </div>
         ` : '';
 
         const buttonRow = d.opened
-            ? `<button disabled style="flex:1; padding: 12px; background: #1a1a1a; color: #888; border: 1px solid #444; font-size: 11px;">GATE OPEN — ENTER THE ARENA</button>`
+            ? `<button disabled style="flex:1; padding: 12px; background: #1a1a1a; color: #888; border: 1px solid #444; font-size: 11px;">GATE OPEN - ENTER THE ARENA</button>`
             : (allMet
                 ? `<button onclick="window.__dungeonOpen()" style="flex:1; padding: 12px; background: ${accentHex}; color: black; border: none; font-weight: bold; font-size: 12px; cursor: pointer;">BREAK THE SEAL</button>`
-                : `<button disabled style="flex:1; padding: 12px; background: #222; color: #666; border: 1px dashed #444; font-size: 12px;">SEALED — REQUIREMENTS UNMET</button>`);
+                : `<button disabled style="flex:1; padding: 12px; background: #222; color: #666; border: 1px dashed #444; font-size: 12px;">SEALED - REQUIREMENTS UNMET</button>`);
 
         this.uiOverlay.innerHTML = `
             <div style="pointer-events: auto; background: rgba(0,0,0,0.95); padding: 28px; border: 2px solid ${accentHex}; width: 90%; max-width: 600px; text-align: left; box-shadow: 0 0 30px ${accentHex}77;">
@@ -3379,7 +4162,7 @@ class Game3D {
                 </div>
                 <p style="font-size: 11px; color: #aaa; font-style: italic; margin-bottom: 18px;">The ${cfg.bossName} waits in the ${this.currentRegion.name}.</p>
 
-                <div style="font-size: 11px; color: ${accentHex}; margin-bottom: 8px;">— REQUIREMENTS —</div>
+                <div style="font-size: 11px; color: ${accentHex}; margin-bottom: 8px;">- REQUIREMENTS -</div>
                 <div style="margin-bottom: 8px;">${reqRows}</div>
 
                 ${sageBlock}
@@ -3399,7 +4182,7 @@ class Game3D {
 
     spawnRestorationLandmarks() {
         if (this.currentRegion.id !== 'sporewood') return;
-        
+
         if (this.landmarksGroup) {
             this.scene.remove(this.landmarksGroup);
         }
@@ -3455,7 +4238,7 @@ class Game3D {
             const heart = this.createNetworkHeart();
             heart.position.set(0, 0, -40);
             this.landmarksGroup.add(heart);
-            
+
             // Final Polish: Divine Glow in Sporewood
             this.ambientLight.color.setHex(0xccffcc);
             this.ambientLight.intensity = 3.0;
@@ -3638,7 +4421,7 @@ class Game3D {
             pPos[i * 3] = Math.cos(angle) * dist;
             pPos[i * 3 + 1] = 5 + Math.random() * 15; // Taller
             pPos[i * 3 + 2] = Math.sin(angle) * dist;
-            
+
             pVels[i * 3] = (Math.random() - 0.5) * 0.08; // Faster
             pVels[i * 3 + 1] = 0.08 + Math.random() * 0.15; // Faster upward
             pVels[i * 3 + 2] = (Math.random() - 0.5) * 0.08;
@@ -3646,12 +4429,12 @@ class Game3D {
         }
 
         pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
-        const pMat = new THREE.PointsMaterial({ 
-            color: 0x39FF14, 
+        const pMat = new THREE.PointsMaterial({
+            color: 0x39FF14,
             size: 0.4, // Slightly larger
-            transparent: true, 
-            opacity: 0.8, 
-            blending: THREE.AdditiveBlending 
+            transparent: true,
+            opacity: 0.8,
+            blending: THREE.AdditiveBlending
         });
         const particles = new THREE.Points(pGeo, pMat);
         particles.userData = { velocities: pVels, life: pLife };
@@ -3669,7 +4452,7 @@ class Game3D {
         const context = canvas.getContext('2d');
         canvas.width = 512;
         canvas.height = 128;
-        
+
         context.fillStyle = 'rgba(0,0,0,0.5)';
         context.fillRect(0, 0, canvas.width, canvas.height);
         context.font = 'bold 32px "Press Start 2P", cursive';
@@ -3692,11 +4475,12 @@ class Game3D {
         // V1.9.21 - Spore Collector mode: peaceful sandbox, no hostiles anywhere.
         if (this.progression && this.progression.isCollectorMode()) return;
 
-        const count = this.currentRegion.id === 'region8' ? 5 : 15;
+        const count = this.getRegionEnemyBudget(this.currentRegion);
         for (let i = 0; i < count; i++) {
             const x = (Math.random() - 0.5) * 200;
             const z = (Math.random() - 0.5) * 200;
             const enemy = new Enemy3D(this.scene, new THREE.Vector3(x, 0, z), this.currentRegion);
+            this.applyEnemyTerritoryPressure(enemy, this.currentRegion?.id);
             this.enemies.push(enemy);
         }
 
@@ -3726,7 +4510,10 @@ class Game3D {
         });
         const rot = this.progression.getRegionRot(this.currentRegion.id);
         if (rot < 30) return;
-        const target = Math.min(6, Math.floor(rot / 20));
+        const territoryEffect = this.getTerritoryGameplayEffect(this.currentRegion.id);
+        const target = this.mobilePerf
+            ? Math.min(4, Math.max(1, Math.round((Math.floor(rot / 25) || 1) * territoryEffect.rotSpawnMult)))
+            : Math.min(8, Math.max(1, Math.round((Math.floor(rot / 20) || 1) * territoryEffect.rotSpawnMult)));
         for (let i = 0; i < target; i++) {
             // Spawn around the player but at a safe distance so they have to be earned.
             const angle = Math.random() * Math.PI * 2;
@@ -3736,10 +4523,11 @@ class Game3D {
             const x = px + Math.cos(angle) * dist;
             const z = pz + Math.sin(angle) * dist;
             const enemy = new RotInfectedEnemy3D(this.scene, new THREE.Vector3(x, 0, z), this.currentRegion);
+            this.applyEnemyTerritoryPressure(enemy, this.currentRegion?.id);
             this.enemies.push(enemy);
         }
         if (target > 0) {
-            this.showFloatingText(`THE ROT WALKS — ${target} ROTLING${target > 1 ? 'S' : ''}`, 0xaa00ff, true);
+            this.showFloatingText(`THE ROT WALKS - ${target} ROTLING${target > 1 ? 'S' : ''}`, 0xaa00ff, true);
         }
     }
 
@@ -3747,9 +4535,12 @@ class Game3D {
     spawnBossForRegion(spawnPos) {
         if (this.boss) return; // already alive
         if (this.currentRegion.id === 'region8' || this.currentRegion.bossName === 'None') return;
+        if (this.progression.isConquered(this.currentRegion.id)) return;
         let boss;
         const pos = spawnPos || new THREE.Vector3(0, 0, 50);
-        if (this.currentRegion.id === 'crystalcap') {
+        if (this.currentRegion.id === 'sporewood') {
+            boss = new MossfangSentinel3D(this.scene, pos, this.currentRegion);
+        } else if (this.currentRegion.id === 'crystalcap') {
             boss = new ShardcapWarden3D(this.scene, pos, this.currentRegion);
         } else if (this.currentRegion.id === 'thronecap') {
             boss = new DarkMycelius3D(this.scene, pos, this.currentRegion);
@@ -3760,9 +4551,14 @@ class Game3D {
         } else {
             boss = new Boss3D(this.scene, pos, this.currentRegion);
         }
+        this.applyEnemyTerritoryPressure(boss, this.currentRegion?.id);
         this.enemies.push(boss);
         this.boss = boss;
-        this.showFloatingText(`${(boss.name || this.currentRegion.bossName || 'BOSS').toUpperCase()} AWAKENED!`, this.currentRegion.accent || 0xff0055, true);
+        const accent = boss?.bossAccent || this.currentRegion.accent || 0xff0055;
+        this.showFloatingText(`${(boss.name || this.currentRegion.bossName || 'BOSS').toUpperCase()} AWAKENED!`, accent, true);
+        this.showBossSpawnEffect(pos, accent);
+        this.announceBossEncounter(boss);
+        this.updateHud();
     }
 
     spawnShardcapWarden() {
@@ -3770,9 +4566,13 @@ class Game3D {
         const crystalRegion = CONFIG.REGIONS.find(r => r.id === 'crystalcap');
         const pos = this.player.group.position.clone().add(new THREE.Vector3(0, 0, 30));
         const warden = new ShardcapWarden3D(this.scene, pos, crystalRegion);
+        this.applyEnemyTerritoryPressure(warden, crystalRegion?.id || 'crystalcap');
         this.enemies.push(warden);
         this.boss = warden;
         this.showFloatingText("SHARDCAP WARDEN AWAKENED!", 0x00ffff, true);
+        this.showBossSpawnEffect(pos, 0x00ffff);
+        this.announceBossEncounter(warden);
+        this.updateHud();
     }
 
     spawnCollectibles() {
@@ -3790,7 +4590,7 @@ class Game3D {
             const rand = Math.random();
             // TUNING: Increased Golden Spore drop rate from 5% to 8%
             const type = rand > 0.92 ? 'GOLDEN_SPORE' : (rand > 0.8 ? 'INGREDIENT' : 'LOOT');
-            
+
             // Multiplier logic: 15% chance for a multiplier spore (was 10%)
             let amount = type === 'LOOT' ? 5 : 1;
             if (Math.random() > 0.85) {
@@ -3810,6 +4610,8 @@ class Game3D {
             this.chests.push(chest);
             this.collidables.push(chest.mesh);
         }
+
+        this.spawnPendingBossRewardsForCurrentRegion();
     }
 
     createTowerInterior() {
@@ -3818,7 +4620,7 @@ class Game3D {
         this.placedChests = []; // Track chests for interaction
         this.placedWeaponRacks = []; // Track racks for interaction
         this.placedForges = []; // Track forges for interaction
-        
+
         // Circular room
         const roomGeo = new THREE.CylinderGeometry(10, 10, 10, 16, 1, true);
         const roomMat = new THREE.MeshStandardMaterial({ color: 0x221105, side: THREE.BackSide });
@@ -3852,7 +4654,7 @@ class Game3D {
             const angle = (index / homeData.decorations.length) * Math.PI * 2;
             const x = Math.cos(angle) * 7;
             const z = Math.sin(angle) * 7;
-            
+
             this.placeDecorationMesh(decoId, new THREE.Vector3(x, 0, z));
         });
 
@@ -3870,7 +4672,7 @@ class Game3D {
         const potMat = new THREE.MeshStandardMaterial({ color: 0x111111, side: THREE.DoubleSide });
         const pot = new THREE.Mesh(potGeo, potMat);
         stationGroup.add(pot);
-        
+
         const liquidGeo = new THREE.CircleGeometry(1.4, 8);
         const liquidMat = new THREE.MeshStandardMaterial({ color: 0x39FF14, emissive: 0x39FF14 });
         const liquid = new THREE.Mesh(liquidGeo, liquidMat);
@@ -3932,13 +4734,13 @@ class Game3D {
             const bedBaseMat = new THREE.MeshStandardMaterial({ color: 0x332211 });
             const bedBase = new THREE.Mesh(bedBaseGeo, bedBaseMat);
             group.add(bedBase);
-            
+
             const pillowGeo = new THREE.BoxGeometry(0.8, 0.4, 2);
             const pillowMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
             const pillow = new THREE.Mesh(pillowGeo, pillowMat);
             pillow.position.set(-1.4, 0.5, 0);
             group.add(pillow);
-            
+
             const blanketGeo = new THREE.BoxGeometry(2.5, 0.2, 2.55);
             const blanketMat = new THREE.MeshStandardMaterial({ color: 0x880000 });
             const blanket = new THREE.Mesh(blanketGeo, blanketMat);
@@ -3952,13 +4754,13 @@ class Game3D {
             const chest = new THREE.Mesh(chestGeo, chestMat);
             chest.position.y = 0.5;
             group.add(chest);
-            
+
             const lidGeo = new THREE.BoxGeometry(1.6, 0.2, 1.1);
             const lidMat = new THREE.MeshStandardMaterial({ color: 0x331a00 });
             const lid = new THREE.Mesh(lidGeo, lidMat);
             lid.position.y = 1;
             group.add(lid);
-            
+
             const lockGeo = new THREE.BoxGeometry(0.2, 0.3, 0.1);
             const lockMat = new THREE.MeshStandardMaterial({ color: 0x39FF14, emissive: 0x39FF14 });
             const lock = new THREE.Mesh(lockGeo, lockMat);
@@ -3972,7 +4774,7 @@ class Game3D {
             const frame = new THREE.Mesh(frameGeo, frameMat);
             frame.position.y = 1.5;
             group.add(frame);
-            
+
             const shelfGeo = new THREE.BoxGeometry(3.5, 0.2, 0.6);
             const shelfMat = new THREE.MeshStandardMaterial({ color: 0x221100 });
             const shelf = new THREE.Mesh(shelfGeo, shelfMat);
@@ -3984,7 +4786,7 @@ class Game3D {
             storedWeapons.slice(0, 3).forEach((weaponId, i) => {
                 const weaponGroup = new THREE.Group();
                 weaponGroup.position.set((i - 1) * 1, 1.5, 0.3);
-                
+
                 // Visual representation based on weapon ID
                 if (weaponId === 'fungal_blade') {
                     const bGeo = new THREE.BoxGeometry(0.2, 2, 0.05);
@@ -4003,7 +4805,7 @@ class Game3D {
                     head.position.y = 0.8;
                     weaponGroup.add(head);
                 }
-                
+
                 group.add(weaponGroup);
             });
 
@@ -4014,7 +4816,7 @@ class Game3D {
             const anvilBase = new THREE.Mesh(anvilBaseGeo, anvilMat);
             anvilBase.position.y = 0.4;
             group.add(anvilBase);
-            
+
             const hornGeo = new THREE.ConeGeometry(0.4, 0.8, 8);
             const horn = new THREE.Mesh(hornGeo, anvilMat);
             horn.rotation.z = -Math.PI / 2;
@@ -4411,12 +5213,12 @@ class Game3D {
             if (region.id === 'crystalcap') {
                 // Large geometric crystals
                 const geo = new THREE.OctahedronGeometry(1, 0);
-                const mat = new THREE.MeshStandardMaterial({ 
-                    color: region.accent, 
-                    emissive: region.accent, 
+                const mat = new THREE.MeshStandardMaterial({
+                    color: region.accent,
+                    emissive: region.accent,
                     emissiveIntensity: 1.5,
                     transparent: true,
-                    opacity: 0.7 
+                    opacity: 0.7
                 });
                 const crystal = new THREE.Mesh(geo, mat);
                 crystal.rotation.set(Math.random(), Math.random(), Math.random());
@@ -4450,7 +5252,7 @@ class Game3D {
                     const stem = new THREE.Mesh(stemGeo, stemMat);
                     stem.position.y = 2.5;
                     group.add(stem);
-                    
+
                     const webGeo = new THREE.TorusKnotGeometry(1, 0.1, 64, 8);
                     const webMat = new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.3 });
                     const web = new THREE.Mesh(webGeo, webMat);
@@ -4481,14 +5283,14 @@ class Game3D {
                     this.collidables.push(pillar.pillar);
                     continue;
                 }
-                
+
                 // Floating debris
                 const geo = new THREE.BoxGeometry(1, 1, 1);
                 const mat = new THREE.MeshStandardMaterial({ color: 0x111111, wireframe: true });
                 const pillar = new THREE.Mesh(geo, mat);
                 pillar.position.y = 2 + Math.random() * 5;
                 group.add(pillar);
-                
+
                 const light = new THREE.PointLight(0xaa00ff, 1, 10);
                 light.position.y = 3;
                 group.add(light);
@@ -4538,6 +5340,18 @@ class Game3D {
                 light.position.y = 3;
                 group.add(light);
 
+                const rotPatchMat = new THREE.MeshBasicMaterial({
+                    color: 0xaa00ff,
+                    transparent: true,
+                    opacity: 0,
+                    depthWrite: false
+                });
+                const rotPatch = new THREE.Mesh(new THREE.CircleGeometry(2.2, 18), rotPatchMat);
+                rotPatch.rotation.x = -Math.PI / 2;
+                rotPatch.position.y = 0.05;
+                rotPatch.scale.set(0.6, 0.6, 0.6);
+                group.add(rotPatch);
+
                 // V1.9.18 - Register this mushroom as a rottable prop so the daily Rot
                 // Cycle can visually blight conquered regions and the wand can cleanse.
                 this.rotProps.push({
@@ -4550,6 +5364,8 @@ class Game3D {
                     cleanStem: new THREE.Color(0xf5ead2),
                     cleanSpot: new THREE.Color(0xffffff),
                     cleanEmissive: 0.35,
+                    rotPatch,
+                    rotPatchMat,
                     rot: 0,        // 0..1 visual rot for this individual mushroom
                     targetRot: 0,  // animated toward
                     puffCloud: null
@@ -4647,21 +5463,21 @@ class Game3D {
 
     simulateGlobalActivity() {
         const now = Date.now();
-        
+
         // Bubbling pot particles logic
-        if (this.currentRegion.id === 'mushroomKingdom' || this.isInterior) {
+        if ((this.currentRegion.id === 'mushroomKingdom' || this.isInterior) && ((this._frame || 0) % (this.mobilePerf ? 3 : 2) === 0)) {
             this.updatePotParticles();
         }
 
         // Every 30-60 seconds, simulate an event if we aren't busy
         if (now - this.lastGlobalEventTime > (30000 + Math.random() * 30000)) {
             this.lastGlobalEventTime = now;
-            
+
             const players = ['SporeRunner', 'FungalKnight', 'SolanaSage', 'MycoMaster', 'RootRipper', 'CapCommander'];
             const clans = ['myco', 'rougarou', 'tegbot', 'shiba', 'brood'];
             const player = players[Math.floor(Math.random() * players.length)];
             const clan = clans[Math.floor(Math.random() * clans.length)];
-            
+
             const eventType = Math.random();
             if (eventType > 0.7) {
                 const time = (140 + Math.random() * 60).toFixed(2);
@@ -4688,13 +5504,13 @@ class Game3D {
         if (Math.random() > 0.6) {
             const isSpark = Math.random() > 0.7;
             const geo = isSpark ? new THREE.BoxGeometry(0.05, 0.05, 0.05) : new THREE.SphereGeometry(0.12, 6, 6);
-            const mat = new THREE.MeshBasicMaterial({ 
-                color: isSpark ? 0xffffff : 0x39FF14, 
+            const mat = new THREE.MeshBasicMaterial({
+                color: isSpark ? 0xffffff : 0x39FF14,
                 transparent: true,
                 opacity: 0.8
             });
             const p = new THREE.Mesh(geo, mat);
-            
+
             const angle = Math.random() * Math.PI * 2;
             const dist = Math.random() * 0.7;
             p.position.set(
@@ -4702,18 +5518,18 @@ class Game3D {
                 this.potPos.y,
                 this.potPos.z + Math.sin(angle) * dist
             );
-            
+
             p.userData = {
                 velocity: new THREE.Vector3(
-                    (Math.random() - 0.5) * 0.03, 
-                    isSpark ? 0.1 + Math.random() * 0.1 : 0.04 + Math.random() * 0.04, 
+                    (Math.random() - 0.5) * 0.03,
+                    isSpark ? 0.1 + Math.random() * 0.1 : 0.04 + Math.random() * 0.04,
                     (Math.random() - 0.5) * 0.03
                 ),
                 life: 1.0,
                 decay: isSpark ? 0.02 + Math.random() * 0.03 : 0.01 + Math.random() * 0.015,
                 isSpark: isSpark
             };
-            
+
             this.potParticleGroup.add(p);
             this.potParticles.push(p);
         }
@@ -4722,7 +5538,7 @@ class Game3D {
         for (let i = this.potParticles.length - 1; i >= 0; i--) {
             const p = this.potParticles[i];
             p.position.add(p.userData.velocity);
-            
+
             if (!p.userData.isSpark) {
                 // Bubbles wobble slightly
                 p.position.x += Math.sin(Date.now() * 0.01 + i) * 0.005;
@@ -4732,7 +5548,7 @@ class Game3D {
             p.userData.life -= p.userData.decay;
             p.material.opacity = p.userData.life * 0.8;
             p.scale.setScalar(p.userData.life);
-            
+
             if (p.userData.life <= 0) {
                 this.potParticleGroup.remove(p);
                 this.potParticles.splice(i, 1);
@@ -4742,27 +5558,25 @@ class Game3D {
 
     updateDayCycle() {
         const delta = 1/60; // 60 fps assumed
+        const prevTimeOfDay = this.timeOfDay;
         this.timeOfDay = (this.timeOfDay + (24 / this.dayDuration) * delta) % 24;
+
+        if (this.timeOfDay < prevTimeOfDay) {
+            this.progression.data.worldDay = (this.progression.data.worldDay || 1) + 1;
+            if (this.progression.processDailyRot(this.progression.data.worldDay)) {
+                try { this.showFloatingText('A NEW DAY - THE ROT RETURNS', 0xaa00ff, true); } catch (_) {}
+                this.syncRegionRotToVisuals();
+                this.refreshRotQuestState(this.currentRegion?.id, { announce: true });
+                if (typeof this.spawnRotInfectedForRegion === 'function') this.spawnRotInfectedForRegion();
+                this.syncRegionThreatLevel();
+                this.updateHud();
+            }
+        }
 
         // Update Weather
         this.updateWeather(delta);
 
-        // Update Clock UI
-        const hours = Math.floor(this.timeOfDay);
-        const minutes = Math.floor((this.timeOfDay % 1) * 60);
-        const timeStr = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
-        
-        let period = "NIGHT";
-        if (hours >= 5 && hours < 8) period = "SUNRISE";
-        else if (hours >= 8 && hours < 17) period = "DAY";
-        else if (hours >= 17 && hours < 20) period = "SUNSET";
-        else if (hours >= 20 || hours < 5) period = "NIGHT";
-
-        this.clockUI.innerHTML = `
-            <div style="font-size: 7px; color: #9be98a; letter-spacing: 1px;">WORLD TIME</div>
-            <div style="font-size: 8px; color: #ffffff;">${period}</div>
-            <div style="font-size: 14px; color: #ffffff;">${timeStr}</div>
-        `;
+        this.refreshClockUi();
 
         // Don't apply cycle lighting if interior
         if (this.isInterior) return;
@@ -4958,7 +5772,9 @@ class Game3D {
         if (this.playerHeroLight) {
             const isNight = finalMoon > 0.5;
             this.playerHeroLight.color.setHex(isNight ? 0xbbd6ff : 0xfff2cc);
-            this.playerHeroLight.intensity = isNight ? 3.2 : 2.4;
+            this.playerHeroLight.intensity = this.mobilePerf
+                ? (isNight ? 1.55 : 1.15)
+                : (isNight ? 3.2 : 2.4);
         }
 
         // Soften the contact shadow at night so it doesn't read like a hole.
@@ -4994,7 +5810,7 @@ class Game3D {
 
     showCriticalImpact(position) {
         // Visual impact effect
-        const particleCount = 12;
+        const particleCount = this.mobilePerf ? 4 : 12;
         const group = new THREE.Group();
         group.position.copy(position);
         this.scene.add(group);
@@ -5020,7 +5836,7 @@ class Game3D {
                 p.position.add(p.userData.velocity);
                 p.scale.multiplyScalar(0.95);
             });
-            if (frames < 30) {
+            if (frames < (this.mobilePerf ? 16 : 30)) {
                 requestAnimationFrame(animateParticles);
             } else {
                 this.scene.remove(group);
@@ -5029,7 +5845,7 @@ class Game3D {
         animateParticles();
 
         // Sound effect
-        this.impactSynth.triggerAttackRelease("16n");
+        try { this.impactSynth.triggerAttackRelease("16n"); } catch (_) {}
     }
 
     showBurnEffect(amount) {
@@ -5042,18 +5858,18 @@ class Game3D {
 
         for (let i = 0; i < particleCount; i++) {
             const geo = new THREE.BoxGeometry(0.4, 0.4, 0.4);
-            const mat = new THREE.MeshStandardMaterial({ 
-                color: color, 
-                emissive: color, 
+            const mat = new THREE.MeshStandardMaterial({
+                color: color,
+                emissive: color,
                 emissiveIntensity: 4,
-                transparent: true 
+                transparent: true
             });
             const p = new THREE.Mesh(geo, mat);
-            
+
             const angle = Math.random() * Math.PI * 2;
             const dist = Math.random() * 0.5;
             p.position.set(Math.cos(angle) * dist, 0.5, Math.sin(angle) * dist);
-            
+
             p.userData.velocity = new THREE.Vector3(
                 Math.cos(angle) * (0.05 + Math.random() * 0.1),
                 0.15 + Math.random() * 0.3,
@@ -5064,9 +5880,9 @@ class Game3D {
 
         // Add a central pillar of light
         const pillarGeo = new THREE.CylinderGeometry(0.5, 1.5, 10, 8, 1, true);
-        const pillarMat = new THREE.MeshBasicMaterial({ 
-            color: 0xff0000, 
-            transparent: true, 
+        const pillarMat = new THREE.MeshBasicMaterial({
+            color: 0xff0000,
+            transparent: true,
             opacity: 0.5,
             side: THREE.DoubleSide
         });
@@ -5090,7 +5906,7 @@ class Game3D {
                     p.material.opacity = 1 - (frames / 60);
                 }
             });
-            
+
             pillar.material.opacity = (1 - (frames / 60)) * 0.5;
             pillar.scale.x *= 1.02;
             pillar.scale.z *= 1.02;
@@ -5111,18 +5927,18 @@ class Game3D {
         while(this.scene.children.length > 0) {
             this.scene.remove(this.scene.children[0]);
         }
-        
+
         this.collidables = [];
         this.platforms = [];
         this.createTowerInterior();
-        
+
         // Reset player position inside
         this.player.group.position.set(0, 0, 0);
         this.scene.add(this.player.group);
         this.scene.add(this.ambientLight);
         this.scene.background = new THREE.Color(0x050208);
         this.scene.fog = null;
-        
+
         this.showFloatingText("INTERIOR", 0x39FF14);
     }
 
@@ -5181,8 +5997,8 @@ class Game3D {
                 </div>
                 <div style="max-height: 400px; overflow-y: auto;">
                     ${CONFIG.RECIPES.map(recipe => {
-                        const canCraft = p.blueSpores >= (recipe.costBlue || 0) && 
-                                         p.goldenSpores >= (recipe.costGold || 0) && 
+                        const canCraft = p.blueSpores >= (recipe.costBlue || 0) &&
+                                         p.goldenSpores >= (recipe.costGold || 0) &&
                                          (p.ingredients || 0) >= (recipe.costIngredients || 0);
                         return `
                             <div style="background: #111; padding: 15px; border: 1px solid #333; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
@@ -5204,14 +6020,14 @@ class Game3D {
 
         window.craftRecipe = (id) => {
             const recipe = CONFIG.RECIPES.find(r => r.id === id);
-            if (p.blueSpores >= (recipe.costBlue || 0) && 
-                p.goldenSpores >= (recipe.costGold || 0) && 
+            if (p.blueSpores >= (recipe.costBlue || 0) &&
+                p.goldenSpores >= (recipe.costGold || 0) &&
                 (p.ingredients || 0) >= (recipe.costIngredients || 0)) {
-                
+
                 p.blueSpores -= (recipe.costBlue || 0);
                 p.goldenSpores -= (recipe.costGold || 0);
                 p.ingredients -= (recipe.costIngredients || 0);
-                
+
                 // Effect logic
                 if (recipe.type === 'HP') {
                     this.player.hp = Math.min(this.player.maxHp, this.player.hp + 2);
@@ -5249,7 +6065,7 @@ class Game3D {
         p.lastShootTime = 0; // Restore magic (using cooldown as proxy)
         this.updateHud();
         this.showFloatingText("REPLENISHED!", 0xffff00, true);
-        
+
         // Visual feedback - screen fade
         const overlay = document.createElement('div');
         overlay.style.position = 'absolute';
@@ -5262,7 +6078,7 @@ class Game3D {
         overlay.style.transition = 'opacity 0.5s';
         overlay.style.pointerEvents = 'none';
         document.body.appendChild(overlay);
-        
+
         requestAnimationFrame(() => {
             overlay.style.opacity = '0.7';
             setTimeout(() => {
@@ -5278,12 +6094,12 @@ class Game3D {
         if (this.gameState === 'STORAGE') return;
         this.gameState = 'STORAGE';
         const p = this.progression.data;
-        
+
         const renderItemList = (items, isStorage) => {
             if (items.length === 0) return '<p style="font-size: 8px; color: #666; padding: 10px;">Empty</p>';
             return items.map((itemId, index) => {
-                const item = CONFIG.SUPPLIES.find(i => i.id === itemId) || 
-                             CONFIG.ARMOR.find(i => i.id === itemId) || 
+                const item = CONFIG.SUPPLIES.find(i => i.id === itemId) ||
+                             CONFIG.ARMOR.find(i => i.id === itemId) ||
                              CONFIG.MAGIC.find(i => i.id === itemId);
                 const name = item ? item.name : itemId;
                 return `
@@ -5342,12 +6158,12 @@ class Game3D {
         if (this.gameState === 'WEAPON_RACK') return;
         this.gameState = 'WEAPON_RACK';
         const p = this.progression.data;
-        
+
         const renderWeaponList = (items, isStorage) => {
             // Filter inventory for melee weapons
             const weapons = items.filter(id => CONFIG.WEAPONS.find(w => w.id === id));
             if (weapons.length === 0) return '<p style="font-size: 8px; color: #666; padding: 10px;">No Melee Weapons</p>';
-            
+
             return weapons.map((itemId) => {
                 const item = CONFIG.WEAPONS.find(w => w.id === itemId);
                 const realIndex = items.indexOf(itemId);
@@ -5399,7 +6215,7 @@ class Game3D {
             this.showWeaponRackMenu();
             const synth = new TONE.Synth({ volume: -15 }).toDestination();
             synth.triggerAttackRelease("G3", "16n");
-            
+
             // Re-render interior to update visual weapons
             if (this.isInterior) {
                 this.enterTowerInterior();
@@ -5418,15 +6234,15 @@ class Game3D {
         this.gameState = 'FORGE';
         const p = this.progression.data;
         const forgeLevels = p.home.forgeLevels || { weapons: 0, armor: 0 };
-        
+
         const renderUpgradeTier = (category) => {
             const currentLevel = forgeLevels[category];
             const nextTier = CONFIG.FORGE_UPGRADES[category][currentLevel];
-            
+
             if (!nextTier) return '<p style="font-size: 10px; color: #39FF14; padding: 10px;">MAX LEVEL REACHED</p>';
 
-            const canAfford = p.blueSpores >= (nextTier.costBlue || 0) && 
-                             p.goldenSpores >= (nextTier.costGold || 0) && 
+            const canAfford = p.blueSpores >= (nextTier.costBlue || 0) &&
+                             p.goldenSpores >= (nextTier.costGold || 0) &&
                              p.ingredients >= (nextTier.costIngredients || 0);
 
             return `
@@ -5468,21 +6284,21 @@ class Game3D {
         window.upgradeForge = (category) => {
             const currentLevel = forgeLevels[category];
             const nextTier = CONFIG.FORGE_UPGRADES[category][currentLevel];
-            
-            if (nextTier && p.blueSpores >= (nextTier.costBlue || 0) && 
-                p.goldenSpores >= (nextTier.costGold || 0) && 
+
+            if (nextTier && p.blueSpores >= (nextTier.costBlue || 0) &&
+                p.goldenSpores >= (nextTier.costGold || 0) &&
                 p.ingredients >= (nextTier.costIngredients || 0)) {
-                
+
                 p.blueSpores -= (nextTier.costBlue || 0);
                 p.goldenSpores -= (nextTier.costGold || 0);
                 p.ingredients -= (nextTier.costIngredients || 0);
-                
+
                 p.home.forgeLevels[category]++;
                 this.progression.save();
                 this.player.applyLevelStats(); // Re-apply stats to player
                 this.updateHud();
                 this.showForgeMenu();
-                
+
                 const synth = new TONE.MembraneSynth({ volume: -5 }).toDestination();
                 synth.triggerAttackRelease("G1", "4n");
                 this.showFloatingText(`${category.toUpperCase()} UPGRADED!`, 0xff4400, true);
@@ -5498,29 +6314,29 @@ class Game3D {
     showBurnPitMenu() {
         if (this.gameState === 'BURN_PIT') return;
         this.gameState = 'BURN_PIT';
-        
+
         const updateBurnUI = () => {
             const p = this.progression.data;
             const clanData = this.leaderboard.data.clans[this.selectedClan] || { burned: 0, dailyBurned: 0 };
-            
+
             // Countdown to Sunday 8pm CST
             const getCountdown = () => {
                 const now = new Date();
                 const sunday = new Date();
                 sunday.setDate(now.getDate() + (7 - now.getDay()) % 7);
                 sunday.setHours(20, 0, 0, 0); // 8pm
-                
+
                 // If it's already past 8pm Sunday, go to next Sunday
                 if (now > sunday) {
                     sunday.setDate(sunday.getDate() + 7);
                 }
-                
+
                 const diff = sunday - now;
                 const days = Math.floor(diff / (1000 * 60 * 60 * 24));
                 const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
                 const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
                 const secs = Math.floor((diff % (1000 * 60)) / 1000);
-                
+
                 return `${days}d ${hours}h ${mins}m ${secs}s`;
             };
 
@@ -5531,7 +6347,7 @@ class Game3D {
                 <div style="pointer-events: auto; background: rgba(10,0,0,0.95); padding: 30px; border: 2px solid #ff0000; width: 90%; max-width: 800px; text-align: center; box-shadow: 0 0 30px #ff0000;">
                     <h2 style="color: #ff0000; margin-bottom: 10px; font-size: 24px; text-shadow: 0 0 10px #f00;">THE GREAT SPORE BURN</h2>
                     <p style="color: #ffaa00; font-size: 10px; margin-bottom: 20px;">Burn Spores to restore the Myco Kingdom network heart.<br>Every Sunday at 8PM CST, Spores are converted to $KINGMYCO.</p>
-                    
+
                     <div style="background: rgba(255,0,0,0.1); padding: 15px; border-radius: 5px; margin-bottom: 25px;">
                         <p style="color: #fff; font-size: 12px; margin-bottom: 5px;">NEXT CONVERSION IN:</p>
                         <p id="burn-countdown" style="color: #ff0000; font-size: 18px; font-weight: bold;">${getCountdown()}</p>
@@ -5551,13 +6367,13 @@ class Game3D {
                             <h3 style="color: #ffaa00; font-size: 12px; margin-top: 20px; margin-bottom: 10px;">YOUR BURN LOG</h3>
                             <div style="max-height: 100px; overflow-y: auto; text-align: left; font-size: 7px; background: rgba(0,0,0,0.3); padding: 5px;">
                                 <table style="width: 100%; border-collapse: collapse;">
-                                    ${(p.burnHistory || []).length > 0 ? 
+                                    ${(p.burnHistory || []).length > 0 ?
                                         p.burnHistory.map(h => `
                                             <tr style="border-bottom: 1px solid #222;">
                                                 <td style="color: #888; padding: 2px 0;">${h.date}</td>
                                                 <td align="right" style="color: #00ffff;">+${h.amount}</td>
                                             </tr>
-                                        `).join('') : 
+                                        `).join('') :
                                         '<tr><td style="color: #444; padding: 5px;">No personal burns recorded...</td></tr>'
                                     }
                                 </table>
@@ -5571,14 +6387,14 @@ class Game3D {
                                         <td>CHAMPION</td>
                                         <td align="right">BURN</td>
                                     </tr>
-                                    ${(this.leaderboard.data.hallOfFame || []).length > 0 ? 
+                                    ${(this.leaderboard.data.hallOfFame || []).length > 0 ?
                                         this.leaderboard.data.hallOfFame.map(entry => `
                                             <tr style="border-bottom: 1px solid #111;">
                                                 <td style="color: #666;">${entry.weekEnding}</td>
                                                 <td style="color: ${this.getClanColor(entry.winner)}">${entry.winner.toUpperCase()}</td>
                                                 <td align="right" style="color: #ffaa00;">${entry.winnerBurn}</td>
                                             </tr>
-                                        `).join('') : 
+                                        `).join('') :
                                         '<tr><td colspan="3" style="color: #444; padding: 5px;">No legends recorded yet...</td></tr>'
                                     }
                                 </table>
@@ -5646,15 +6462,15 @@ class Game3D {
                 // Execute Burn
                 p.blueSpores -= amount;
                 p.dailyBurnedAmount += amount;
-                
+
                 // Streak & Daily Reward Logic
                 const now = new Date();
                 const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
                 const lastContrib = p.lastBurnContribution ? new Date(p.lastBurnContribution) : null;
                 const lastContribStart = lastContrib ? new Date(lastContrib.getFullYear(), lastContrib.getMonth(), lastContrib.getDate()).getTime() : 0;
-                
+
                 const oneDayMs = 24 * 60 * 60 * 1000;
-                
+
                 if (todayStart > lastContribStart) {
                     if (todayStart === lastContribStart + oneDayMs) {
                         p.burnStreak = (p.burnStreak || 0) + 1;
@@ -5686,15 +6502,20 @@ class Game3D {
                 });
                 if (p.burnHistory.length > 15) p.burnHistory.pop(); // Keep last 15 entries
 
+                this.progression.data.totalBurned = (this.progression.data.totalBurned || 0) + amount;
+                this.progression.data.weeklyBurned = (this.progression.data.weeklyBurned || 0) + amount;
                 this.progression.save();
-                
-                const playerName = this.walletAddress ? `Hero_${this.walletAddress.slice(-4)}` : "KingMyco";
-                const mode = this.progression.isCollectorMode() ? 'COLLECTOR' : 'STORY';
+
+                const playerName = this.getPlayerName();
+                const mode = this.getCurrentGameMode();
                 const result = this.leaderboard.burnSpores(this.selectedClan, amount, playerName, mode);
+                if (this.hasVerifiedWalletSession()) {
+                    void this.submitLiveBurn(amount, mode, { source: 'burn-pit', clanId: this.selectedClan });
+                }
                 if (result.isSignificant) {
                     this.showGlobalNotification(`${playerName} performed a GREAT BURN of ${amount} spores for ${this.selectedClan.toUpperCase()}!`, this.getClanColor(this.selectedClan));
                 }
-                
+
                 this.showBurnEffect(amount);
                 this.showFloatingText(`BURNED ${amount} SPORES!`, 0xff0000, true);
                 this.updateHud();
@@ -5751,7 +6572,7 @@ class Game3D {
                     <div style="color: #888; font-size: 12px; margin-bottom: 5px;">Spores to Burn</div>
                     <div style="color: #ff4444; font-size: 24px; font-weight: bold; margin-bottom: 10px;">-${amount} Spores</div>
                     <div style="color: #39FF14; font-size: 12px; margin-bottom: 20px;">Burn Value: ${(amount * 0.10).toFixed(2)} $KINGMYCO</div>
-                    
+
                     <div style="background: #222; border-radius: 8px; padding: 12px; text-align: left; margin-bottom: 20px;">
                         <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
                             <span style="color: #888; font-size: 11px;">Destination</span>
@@ -5790,7 +6611,7 @@ class Game3D {
             approveBtn.innerText = "Broadcasting...";
             approveBtn.disabled = true;
             cancelBtn.disabled = true;
-            
+
             setTimeout(() => {
                 approveBtn.innerText = "Finalizing...";
                 setTimeout(() => {
@@ -5820,7 +6641,10 @@ class Game3D {
 
     setupStartScreen() {
         const isConnected = !!this.walletAddress;
+        const walletState = this.getWalletUxState();
+        if (this.audioUnlocked) this.playEpicMusic('START');
         const hasSave = !!this.progression.data.clanChosen;
+        const cloudStatus = this.getCloudStatusCopy();
 
         // V1.9.33 - Mobile-aware Start Screen sizing. The old fixed 48px title + 50px
         // padding produced a card taller than the iPhone Safari viewport, which the
@@ -5839,7 +6663,8 @@ class Game3D {
         const topPad  = isMobile ? 'calc(10px + env(safe-area-inset-top))' : '40px';
         const botPad  = isMobile ? 'calc(22px + env(safe-area-inset-bottom))' : '40px';
         const tapBtn  = 'min-height: 44px; touch-action: manipulation; -webkit-tap-highlight-color: transparent;';
-        const modeLabel = this.progression.data.gameMode === 'COLLECTOR' ? 'SPORE COLLECTOR' : 'STORY CAMPAIGN';
+        const modeLabel = this.getGameModeLabel();
+        const modeAccent = this.getGameModeAccent();
         const subtitleHtml = isMobile
             ? 'EXPLORE • HARVEST<br>RECLAIM THE CROWN'
             : 'EXPLORE • HARVEST • RECLAIM THE CROWN';
@@ -5847,11 +6672,23 @@ class Game3D {
             ? `${modeLabel} • LEVEL ${this.progression.data.level}`
             : 'ACTION RPG • WALLET OPTIONAL';
         const walletLabel = isConnected
-            ? `WALLET LINKED: ${this.walletAddress.slice(0, 4)}...${this.walletAddress.slice(-4)}`
-            : 'LINK PHANTOM (OPTIONAL)';
+            ? (this.walletSessionToken
+                ? `WALLET VERIFIED: ${this.shortWallet()} • ${this.formatMycoBalance()} MYCO`
+                : `WALLET LINKED: ${this.shortWallet()}`)
+            : walletState.isIOS
+                ? 'OPEN IN PHANTOM (OPTIONAL)'
+                : walletState.isMobile
+                    ? 'OPEN WALLET BROWSER (OPTIONAL)'
+                    : 'LINK PHANTOM (OPTIONAL)';
         const walletHint = isConnected
-            ? 'Identity synced for this device. Disconnect any time.'
-            : 'Wallet is optional. You can play the full game without connecting.';
+            ? (this.walletSessionToken
+                ? 'Cloud save, live balance, and cross-device progress are active for this wallet.'
+                : 'Wallet linked locally. Sign once to activate live cloud save and shared leaderboards.')
+            : walletState.isIOS
+                ? "Wallet is optional. On iPhone and iPad, use Phantom's browser to connect. Safari play still works without a wallet."
+                : walletState.isMobile
+                    ? 'Wallet is optional. Open this page in Phantom to connect on mobile, or just play now.'
+                    : 'Wallet is optional. You can play the full game without connecting.';
         const graphicsHelper = this.progression.data.settings.lowPerfMode === true
             ? (isMobile ? 'BATTERY SAVER · longer play' : 'BATTERY SAVER · longer sessions')
             : this.progression.data.settings.lowPerfMode === false
@@ -5870,9 +6707,9 @@ class Game3D {
                             ${hasSave ? 'CONTINUE ADVENTURE' : 'START ADVENTURE'}
                         </button>
                         ${hasSave ? `<button id="new-game-button" style="padding: 12px; font-size: ${btnFs}px; background: #ff4400; border: none; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">NEW JOURNEY</button>` : ''}
-                        ${hasSave ? `<button id="change-mode-button" style="padding: 10px; font-size: ${smFs}px; background: #6a0dad; border: none; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">${this.progression.data.gameMode === 'COLLECTOR' ? 'GAME MODE: SPORE COLLECTOR' : 'GAME MODE: STORY CAMPAIGN'}</button>` : ''}
+                        ${hasSave ? `<button id="change-mode-button" style="padding: 10px; font-size: ${smFs}px; background: ${modeAccent}; border: none; color: ${this.getCurrentGameMode() === 'STORY' ? 'black' : 'white'}; font-family: inherit; cursor: pointer; ${tapBtn}">GAME MODE: ${modeLabel}</button>` : ''}
                         <div style="display: flex; gap: 10px;">
-                            <button id="leaderboard-button" style="flex: 1; padding: 12px; font-size: ${smFs}px; background: rgba(0,255,255,0.12); border: 1px solid #00ffff; color: #b8ffff; font-family: inherit; cursor: pointer; ${tapBtn}">LEADERBOARD</button>
+                            <button id="leaderboard-button" style="flex: 1; padding: 12px; font-size: ${smFs}px; background: rgba(0,255,255,0.12); border: 1px solid #00ffff; color: #b8ffff; font-family: inherit; cursor: pointer; ${tapBtn}">LIVE LEADERBOARD</button>
                             <button id="hall-of-fame-button" style="flex: 1; padding: 12px; font-size: ${smFs}px; background: rgba(255,170,0,0.12); border: 1px solid #ffaa00; color: #ffd280; font-family: inherit; cursor: pointer; ${tapBtn}">HALL OF FAME</button>
                         </div>
                         <button id="settings-button" style="padding: 12px; font-size: ${btnFs}px; background: #2f3436; border: 1px solid #6f7a74; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">SETTINGS</button>
@@ -5881,10 +6718,14 @@ class Game3D {
                     <div style="width: 100%; height: 1px; background: #333; margin-bottom: ${isMobile ? 16 : 25}px;"></div>
 
                     <div style="display: flex; flex-direction: column; gap: 10px; align-items: center; width: 100%;">
-                        <button id="wallet-button" style="width: 100%; padding: 12px 16px; font-size: ${smFs}px; background: ${isConnected ? '#333' : 'rgba(106,13,173,0.16)'}; border: 1px solid #6a0dad; color: white; font-family: inherit; cursor: pointer; border-radius: 5px; ${tapBtn}">
+                        <button id="wallet-button" style="width: 100%; padding: 12px 16px; font-size: ${smFs}px; background: ${this.walletSessionToken ? 'rgba(0,255,255,0.14)' : isConnected ? '#333' : 'rgba(106,13,173,0.16)'}; border: 1px solid ${this.walletSessionToken ? '#00ffff' : '#6a0dad'}; color: white; font-family: inherit; cursor: pointer; border-radius: 5px; ${tapBtn}">
                             ${walletLabel}
                         </button>
                         <div style="font-size: ${isMobile ? 9 : 8}px; color: #a0aba6; line-height: 1.55; max-width: ${isMobile ? '100%' : '340px'};">${walletHint}</div>
+                        <div style="width: 100%; padding: 10px 12px; background: rgba(0,0,0,0.28); border: 1px solid rgba(0,255,255,0.2); border-radius: 6px; text-align: left; box-sizing: border-box;">
+                            <div style="font-size: 8px; color: #00ffff; letter-spacing: 1px; margin-bottom: 4px;">${cloudStatus.title}</div>
+                            <div style="font-size: 8px; color: #8fa6a2; line-height: 1.5;">${cloudStatus.body}</div>
+                        </div>
                         ${isConnected ? `<button id="disconnect-wallet" style="font-size: 8px; color: #666; background: none; border: none; cursor: pointer; text-decoration: underline; ${tapBtn}">Disconnect</button>` : ''}
                     </div>
 
@@ -5901,11 +6742,21 @@ class Game3D {
                     </div>
 
                     <div style="margin-top: ${isMobile ? 16 : 24}px; font-size: ${isMobile ? 9 : 8}px; color: #7e8b85; letter-spacing: 1px; opacity: 0.95;">
-                        LIVE BUILD v1.9.38
+                        LIVE BUILD v${this.getGameBuild()}
                     </div>
                 </div>
             </div>
         `;
+
+        const startWrap = document.getElementById('start-screen-wrap');
+        if (startWrap) {
+            startWrap.addEventListener('pointerdown', async () => {
+                try {
+                    await this.unlockAudio();
+                    if (this.gameState === 'START_SCREEN') this.playEpicMusic('START');
+                } catch (_) {}
+            }, { once: true });
+        }
 
         document.getElementById('start-button').addEventListener('click', async () => {
             await this.unlockAudio();
@@ -5916,7 +6767,7 @@ class Game3D {
                 this.setupModeSelection();
             }
         });
-        
+
         if (hasSave) {
             document.getElementById('new-game-button').addEventListener('click', () => {
                 this.showNewGameConfirmation();
@@ -5930,6 +6781,8 @@ class Game3D {
         document.getElementById('settings-button').addEventListener('click', () => this.showSettingsMenu());
         document.getElementById('wallet-button').addEventListener('click', () => {
             if (!isConnected) this.connectWallet();
+            else if (!this.walletSessionToken || this.cloudSyncStatus === 'error') this.verifyWalletSession();
+            else this.syncWithSolana('manual');
         });
         if (isConnected) {
             document.getElementById('disconnect-wallet').addEventListener('click', () => this.disconnectWallet());
@@ -5938,7 +6791,7 @@ class Game3D {
         // V1.9.36 - Low Perf Mode toggle. Cycles AUTO -> ON -> OFF -> AUTO.
         // Renderer-flag decisions (DPR cap, antialias, shadows, EffectComposer,
         // far-plane, fog) are made once during Game3D.init(), so we have to
-        // reload to apply. We persist first, then reload — the next boot reads
+        // reload to apply. We persist first, then reload - the next boot reads
         // the new value before constructing the renderer.
         const perfBtn = document.getElementById('low-perf-toggle');
         if (perfBtn) {
@@ -5964,7 +6817,7 @@ class Game3D {
         }
     }
 
-    // V1.9.21 - Game mode selection: Story (full RPG) vs Spore Collector (sandbox).
+    // V1.9.21 / V1.9.48 - Game mode selection: Story, Territory War, or Spore Collector.
     setupModeSelection(fromStart = false) {
         this.gameState = 'MODE_SELECT';
         const current = this.progression.data.gameMode;
@@ -5973,7 +6826,7 @@ class Game3D {
                 <h2 class="neon-text" style="margin-bottom: 8px; font-size: 28px; color: #39FF14;">CHOOSE YOUR PATH</h2>
                 <p style="color: #aaa; font-size: 11px; margin-bottom: 28px; letter-spacing: 1px;">How will King Myco walk the Mycoverse today?</p>
 
-                <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 24px; width: 100%; max-width: 900px;">
+                <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 24px; width: 100%; max-width: 1140px;">
 
                     <div class="mode-card" id="mode-story"
                          style="width: 360px; background: #0a0a0a; border: 2px solid ${current === 'STORY' ? '#39FF14' : '#333'}; border-radius: 12px; padding: 24px; cursor: pointer; transition: all 0.25s;"
@@ -5993,6 +6846,24 @@ class Game3D {
                         </button>
                     </div>
 
+                    <div class="mode-card" id="mode-territory"
+                         style="width: 360px; background: #0a0a0a; border: 2px solid ${current === 'TERRITORY' ? '#ff6b2c' : '#333'}; border-radius: 12px; padding: 24px; cursor: pointer; transition: all 0.25s;"
+                         onmouseover="this.style.borderColor='#ff6b2c'; this.style.boxShadow='0 0 22px #ff6b2c'; this.style.transform='translateY(-6px)'"
+                         onmouseout="this.style.borderColor='${current === 'TERRITORY' ? '#ff6b2c' : '#333'}'; this.style.boxShadow='none'; this.style.transform='translateY(0)'">
+                        <div style="font-size: 32px; margin-bottom: 8px;">🔥</div>
+                        <h3 style="color: #ff8a3d; font-size: 16px; margin: 0 0 6px 0; letter-spacing: 1px;">TERRITORY WAR</h3>
+                        <p style="color: #888; font-size: 9px; letter-spacing: 1px; margin: 0 0 14px 0;">LIVE CLAN CONTROL</p>
+                        <ul style="color: #ddd; font-size: 11px; line-height: 1.6; padding-left: 18px; margin: 0 0 18px 0;">
+                            <li>Regions flip live based on clan pressure</li>
+                            <li>Burns, boss clears, and cleanses push the front</li>
+                            <li>Owned land buffs allies, hostile land fights back</li>
+                            <li>Portal banners and control percentages update live</li>
+                        </ul>
+                        <button id="pick-territory" style="width: 100%; padding: 12px; background: #ff6b2c; border: none; color: white; font-family: inherit; font-weight: bold; cursor: pointer;">
+                            ${current === 'TERRITORY' ? 'ENTER THE WAR' : 'JOIN THE WAR'}
+                        </button>
+                    </div>
+
                     <div class="mode-card" id="mode-collector"
                          style="width: 360px; background: #0a0a0a; border: 2px solid ${current === 'COLLECTOR' ? '#6a0dad' : '#333'}; border-radius: 12px; padding: 24px; cursor: pointer; transition: all 0.25s;"
                          onmouseover="this.style.borderColor='#aa44ff'; this.style.boxShadow='0 0 22px #aa44ff'; this.style.transform='translateY(-6px)'"
@@ -6001,7 +6872,7 @@ class Game3D {
                         <h3 style="color: #aa44ff; font-size: 16px; margin: 0 0 6px 0; letter-spacing: 1px;">SPORE COLLECTOR</h3>
                         <p style="color: #888; font-size: 9px; letter-spacing: 1px; margin: 0 0 14px 0;">SANDBOX · NO COMBAT</p>
                         <ul style="color: #ddd; font-size: 11px; line-height: 1.6; padding-left: 18px; margin: 0 0 18px 0;">
-                            <li>All regions open — every portal unlocked</li>
+                            <li>All regions open - every portal unlocked</li>
                             <li>Collect up to <span style="color:#fff2a8;">1000 spores / day</span></li>
                             <li>Burn spores at the Burn Pit</li>
                             <li>No enemies · no bosses · no quests</li>
@@ -6034,6 +6905,7 @@ class Game3D {
                 // so it can be re-chosen if they switch to Story later.
                 if (!this.progression.data.clanChosen) {
                     this.progression.data.clanChosen = 'myco';
+                    this.progression.data.clanChoiceLocked = false;
                     this.selectedClan = 'myco';
                     this.progression.save();
                     if (this.player && typeof this.player.setClan === 'function') this.player.setClan('myco');
@@ -6041,19 +6913,27 @@ class Game3D {
                 this.showCollectorIntro();
                 return;
             }
-            // STORY mode: existing path.
-            if (this.progression.data.clanChosen) {
+
+            const hasLockedClan = !!this.progression.data.clanChosen && this.progression.data.clanChoiceLocked !== false;
+            if (hasLockedClan) {
                 this.selectedClan = this.progression.data.clanChosen;
                 if (this.player && typeof this.player.setClan === 'function') this.player.setClan(this.selectedClan);
                 this.startGameplay();
-            } else {
+                return;
+            }
+
+            if (mode === 'STORY') {
                 this.startEpicStory();
+            } else {
+                this.setupClanSelection();
             }
         };
 
         document.getElementById('pick-story').addEventListener('click', (e) => { e.stopPropagation(); advance('STORY'); });
+        document.getElementById('pick-territory').addEventListener('click', (e) => { e.stopPropagation(); advance('TERRITORY'); });
         document.getElementById('pick-collector').addEventListener('click', (e) => { e.stopPropagation(); advance('COLLECTOR'); });
         document.getElementById('mode-story').addEventListener('click', () => advance('STORY'));
+        document.getElementById('mode-territory').addEventListener('click', () => advance('TERRITORY'));
         document.getElementById('mode-collector').addEventListener('click', () => advance('COLLECTOR'));
         document.getElementById('mode-back').addEventListener('click', () => this.setupStartScreen());
     }
@@ -6161,7 +7041,7 @@ class Game3D {
 
     // V1.9.24 - Visual burn animation for the dashboard. Anchors FX at the source button's
     // screen coordinates, so the animation survives the post-burn `updateHud()` DOM rebuild.
-    // Safe when the pill isn't open (Burn Pit modal etc.) — null checks guard each step.
+    // Safe when the pill isn't open (Burn Pit modal etc.) - null checks guard each step.
     playDashboardBurnAnimation(amount, sourceBtn = null) {
         this._ensureBurnAnimationStyles();
         const fxLayer = this._getBurnFxLayer();
@@ -6170,7 +7050,7 @@ class Game3D {
 
         // 1) Whole-dashboard glow + meter pulse (will be removed on the next updateHud,
         // but the glow runs in the first ~250ms which lands before the click handler's
-        // updateHud completes — close enough to feel responsive).
+        // updateHud completes - close enough to feel responsive).
         if (dashboard) {
             dashboard.style.animation = 'none';
             void dashboard.offsetWidth;
@@ -6183,7 +7063,7 @@ class Game3D {
             }
         }
 
-        // 2) Subtle HUD shake — felt in both modes, scaled by burn size.
+        // 2) Subtle HUD shake - felt in both modes, scaled by burn size.
         if (hud) {
             const shakeMs = amount >= 500 ? 450 : (amount >= 100 ? 300 : 200);
             hud.style.animation = 'none';
@@ -6203,7 +7083,7 @@ class Game3D {
         const cy = rect.top  + rect.height / 2;
         const bottomY = rect.top  + rect.height - 4;
 
-        // Button punch flash (lives on the actual button — short enough to land before rebuild).
+        // Button punch flash (lives on the actual button - short enough to land before rebuild).
         if (btn) {
             if (getComputedStyle(btn).position === 'static') btn.style.position = 'relative';
             btn.style.animation = 'none';
@@ -6220,7 +7100,7 @@ class Game3D {
         fxLayer.appendChild(flame);
         setTimeout(() => flame.remove(), 850);
 
-        // Ember particles — count scales with burn size, capped for perf.
+        // Ember particles - count scales with burn size, capped for perf.
         const emberCount = Math.min(28, 8 + Math.floor(amount / 20));
         for (let i = 0; i < emberCount; i++) {
             const ember = document.createElement('div');
@@ -6246,7 +7126,7 @@ class Game3D {
         // Floating "-N 🔥" number above the button.
         const float = document.createElement('div');
         float.className = 'collector-burn-float';
-        float.textContent = `−${amount} 🔥`;
+        float.textContent = `-${amount} 🔥`;
         float.style.left = `${cx}px`;
         float.style.top  = `${rect.top - 14}px`;
         fxLayer.appendChild(float);
@@ -6255,7 +7135,7 @@ class Game3D {
 
     // V1.9.22 - Quick-burn entry point exposed by the Collector dashboard pill.
     // Mirrors the Burn Pit menu logic (daily cap, streak, leaderboard, FX) but
-    // doesn't open the full burn modal — designed for one-tap sandbox burns.
+    // doesn't open the full burn modal - designed for one-tap sandbox burns.
     quickBurnFromDashboard(amount, sourceBtn = null) {
         const p = this.progression.data;
         const burnLimit = 1000;
@@ -6282,7 +7162,7 @@ class Game3D {
         // the ember/flame/float children persist through the subsequent re-render.
         try { this.playDashboardBurnAnimation(amount, sourceBtn); } catch (_) {}
 
-        // Execute the burn directly (no on-chain simulation modal — quick-burn UX).
+        // Execute the burn directly (no on-chain simulation modal - quick-burn UX).
         p.blueSpores -= amount;
         p.dailyBurnedAmount = (p.dailyBurnedAmount || 0) + amount;
 
@@ -6323,12 +7203,17 @@ class Game3D {
         });
         if (p.burnHistory.length > 15) p.burnHistory.pop();
 
+        this.progression.data.totalBurned = (this.progression.data.totalBurned || 0) + amount;
+        this.progression.data.weeklyBurned = (this.progression.data.weeklyBurned || 0) + amount;
         this.progression.save();
 
         // Leaderboard contribution (uses chosen clan; collectors default to 'myco').
-        const playerName = this.walletAddress ? `Hero_${this.walletAddress.slice(-4)}` : "KingMyco";
+        const playerName = this.getPlayerName();
         try {
             const result = this.leaderboard.burnSpores(this.selectedClan, amount, playerName, 'COLLECTOR');
+            if (this.hasVerifiedWalletSession()) {
+                void this.submitLiveBurn(amount, 'COLLECTOR', { source: 'collector-dashboard', clanId: this.selectedClan });
+            }
             if (result && result.isSignificant) {
                 this.showGlobalNotification(`${playerName} burned ${amount} spores for ${this.selectedClan.toUpperCase()}!`, this.getClanColor(this.selectedClan));
             }
@@ -6378,9 +7263,12 @@ class Game3D {
                 const rankColor = i === 0 ? '#ffd83d' : (i === 1 ? '#c8c8d0' : (i === 2 ? '#d8884a' : '#666'));
                 const rankIcon = i === 0 ? '🥇' : (i === 1 ? '🥈' : (i === 2 ? '🥉' : `#${i+1}`));
                 const isCollector = r.lastMode === 'COLLECTOR' || (r.collectorBurned || 0) > 0;
+                const isTerritory = r.lastMode === 'TERRITORY' || (r.territoryBurned || 0) > 0;
                 const badge = isCollector
                     ? `<span style="display:inline-block; margin-left: 6px; padding: 1px 6px; background: #6a0dad; color: #fff; font-size: 8px; font-weight: bold; border-radius: 8px; letter-spacing: 1px;">🍄 COLLECTOR</span>`
-                    : `<span style="display:inline-block; margin-left: 6px; padding: 1px 6px; background: #115; color: #aaf; font-size: 8px; font-weight: bold; border-radius: 8px; letter-spacing: 1px;">⚔️ STORY</span>`;
+                    : isTerritory
+                        ? `<span style="display:inline-block; margin-left: 6px; padding: 1px 6px; background: #7a2200; color: #ffd2bf; font-size: 8px; font-weight: bold; border-radius: 8px; letter-spacing: 1px;">🔥 WAR</span>`
+                        : `<span style="display:inline-block; margin-left: 6px; padding: 1px 6px; background: #115; color: #aaf; font-size: 8px; font-weight: bold; border-radius: 8px; letter-spacing: 1px;">⚔️ STORY</span>`;
                 return `
                     <div style="
                         display: grid; grid-template-columns: 36px 1fr 90px;
@@ -6393,7 +7281,7 @@ class Game3D {
                         <div style="font-size: 14px; color: ${rankColor}; font-weight: bold; text-align: center;">${rankIcon}</div>
                         <div style="min-width: 0;">
                             <div style="font-size: 11px; color: ${isYou ? '#fff' : '#eee'}; font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                                ${r.name.length > 18 ? r.name.slice(0, 17) + '…' : r.name}
+                                ${r.name.length > 18 ? r.name.slice(0, 17) + '...' : r.name}
                                 ${isYou ? `<span style="color:#aa44ff; font-size: 9px; margin-left: 4px;">YOU</span>` : ''}
                                 ${badge}
                             </div>
@@ -6498,16 +7386,7 @@ class Game3D {
             // Restore prior gameplay state and rebuild the HUD without re-running startGameplay
             // (which would re-register hotkeys and re-spawn collectibles).
             this.gameState = prevState === 'DIALOGUE' ? 'PLAYING' : (prevState || 'PLAYING');
-            // Re-render the in-game HUD layer (the same markup startGameplay installs).
-            const controlHint = this.progression.isCollectorMode()
-                ? `WASD: MOVE | SPACE: JUMP | E: COLLECT / INTERACT | B: BURN PIT`
-                : `WASD: MOVE | SPACE: JUMP (x2) | X: MAGIC | Q: ROYAL SPORE | R: MYCELIAL NET | E: INTERACT | U: UPGRADES | B: BURN PIT`;
-            this.uiOverlay.innerHTML = `
-                <div id="hud" style="position: absolute; top: 20px; left: 20px; pointer-events: none; background: rgba(0,0,0,0.5); padding: 15px; border-radius: 10px; width: 220px;"></div>
-                <div style="position: absolute; bottom: 70px; left: 50%; transform: translateX(-50%); pointer-events: none; font-size: 10px; color: #888; text-shadow: 1px 1px 2px black; white-space: nowrap;">
-                    ${controlHint}
-                </div>
-            `;
+            this.renderGameplayHudChrome();
             this.updateHud();
         });
     }
@@ -6519,7 +7398,7 @@ class Game3D {
                 <div style="font-size: 44px; margin-bottom: 10px;">🍄</div>
                 <h2 style="color: #aa44ff; font-size: 22px; margin-bottom: 18px;">SPORE COLLECTOR MODE</h2>
                 <p style="color: #eee; font-size: 12px; line-height: 1.8; margin-bottom: 18px;">
-                    Welcome, harvester. This is a peaceful walk through the Mycoverse —
+                    Welcome, harvester. This is a peaceful walk through the Mycoverse -
                     <strong style="color: #fff2a8;">all portals are open</strong>, and every region
                     is yours to wander.
                 </p>
@@ -6527,7 +7406,7 @@ class Game3D {
                     <li>Collect up to <strong style="color: #fff2a8;">1000 spores per day</strong></li>
                     <li>Burn spores at the <strong>Burn Pit</strong> in the Sanctuary</li>
                     <li><strong style="color:#888;">No enemies, no quests, no upgrades</strong></li>
-                    <li>NPCs just wave hello — shops and the inn are closed</li>
+                    <li>NPCs just wave hello - shops and the inn are closed</li>
                     <li>Switch back to Story Mode any time from the Start Screen</li>
                 </ul>
                 <button id="collector-begin" style="padding: 14px 30px; background: #aa44ff; border: none; color: white; font-family: inherit; font-weight: bold; cursor: pointer; font-size: 13px;">START COLLECTING</button>
@@ -6542,7 +7421,7 @@ class Game3D {
     showLoadConfirmation() {
         const p = this.progression.data;
         const region = CONFIG.REGIONS.find(r => r.id === p.currentRegionId) || { name: 'Unknown Grove' };
-        
+
         this.uiOverlay.innerHTML = `
             <div style="pointer-events: auto; display: flex; flex-direction: column; align-items: center; background: rgba(0,0,0,0.95); padding: 40px; border: 4px solid #00ffff; border-radius: 10px; box-shadow: 0 0 30px #00ffff; text-align: center; max-width: 500px;">
                 <h2 style="color: #00ffff; font-size: 20px; margin-bottom: 20px;">RESTORE ECHO?</h2>
@@ -6592,23 +7471,640 @@ class Game3D {
         });
     }
 
-    async connectWallet() {
-        const getProvider = () => {
-            if ('solana' in window) {
-                const provider = window.solana;
-                if (provider.isPhantom) return provider;
+    getGameBuild() {
+        return LIVE_BUILD;
+    }
+
+    getPlayerName() {
+        return this.walletAddress ? `Hero_${this.walletAddress.slice(-4)}` : 'KingMyco';
+    }
+
+    shortWallet(address = this.walletAddress) {
+        return address ? `${address.slice(0, 4)}...${address.slice(-4)}` : 'NO WALLET';
+    }
+
+    formatMycoBalance(balance = this.walletMycoBalance) {
+        if (!Number.isFinite(balance)) return '--';
+        const value = Number(balance);
+        if (value >= 1000000) return `${(value / 1000000).toFixed(2)}M`;
+        if (value >= 1000) return `${(value / 1000).toFixed(1)}K`;
+        return `${Math.round(value)}`;
+    }
+
+    setCloudSyncState(status, message) {
+        this.cloudSyncStatus = status;
+        this.cloudSyncMessage = message;
+        if (status === 'live' || status === 'synced') {
+            this.cloudLastSyncedAt = Date.now();
+            localStorage.setItem(CLOUD_LAST_SYNC_KEY, String(this.cloudLastSyncedAt));
+        }
+        if (this.gameState === 'START_SCREEN') this.setupStartScreen();
+    }
+
+    getCloudStatusCopy() {
+        const syncedLabel = this.cloudLastSyncedAt
+            ? `LAST SYNC ${new Date(this.cloudLastSyncedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+            : 'READY TO SYNC';
+
+        switch (this.cloudSyncStatus) {
+            case 'verifying':
+                return { title: 'WEB3 HANDSHAKE', body: 'Signing wallet proof and waking live cloud save.' };
+            case 'syncing':
+                return { title: 'CLOUD SAVE LIVE', body: 'Pushing your latest kingdom state to the live archive.' };
+            case 'synced':
+            case 'live':
+                return { title: `VERIFIED • ${this.formatMycoBalance()} MYCO`, body: syncedLabel };
+            case 'error':
+                return { title: 'SYNC DEGRADED', body: this.cloudSyncMessage || 'Wallet linked, but the live archive needs another try.' };
+            default:
+                return { title: 'LOCAL SAVE ONLY', body: 'Connect Phantom to unlock cloud save, live balance, and shared leaderboards.' };
+        }
+    }
+
+    saveWalletSession(token, balance) {
+        this.walletSessionToken = token || null;
+        this.walletMycoBalance = Number.isFinite(balance) ? Number(balance) : null;
+        if (this.walletSessionToken) localStorage.setItem(CLOUD_SESSION_KEY, this.walletSessionToken);
+        else localStorage.removeItem(CLOUD_SESSION_KEY);
+        if (this.walletMycoBalance != null) localStorage.setItem(CLOUD_BALANCE_KEY, String(this.walletMycoBalance));
+        else localStorage.removeItem(CLOUD_BALANCE_KEY);
+    }
+
+    loadWalletSession() {
+        const token = localStorage.getItem(CLOUD_SESSION_KEY);
+        const balance = Number(localStorage.getItem(CLOUD_BALANCE_KEY));
+        const lastSync = Number(localStorage.getItem(CLOUD_LAST_SYNC_KEY));
+        this.walletSessionToken = token || null;
+        this.walletMycoBalance = Number.isFinite(balance) ? balance : null;
+        this.cloudLastSyncedAt = Number.isFinite(lastSync) ? lastSync : null;
+        if (this.walletSessionToken) {
+            this.cloudSyncStatus = 'live';
+            this.cloudSyncMessage = 'Verified wallet session restored';
+        }
+    }
+
+    clearWalletSession() {
+        clearTimeout(this.pendingCloudSyncTimer);
+        this.walletSessionToken = null;
+        this.walletMycoBalance = null;
+        this.cloudProfile = null;
+        this.cloudLastSyncedAt = null;
+        localStorage.removeItem(CLOUD_SESSION_KEY);
+        localStorage.removeItem(CLOUD_BALANCE_KEY);
+        localStorage.removeItem(CLOUD_LAST_SYNC_KEY);
+    }
+
+    hasVerifiedWalletSession() {
+        return !!(this.walletAddress && this.walletSessionToken);
+    }
+
+    getCloudPayload() {
+        return {
+            playerName: this.getPlayerName(),
+            build: this.getGameBuild(),
+            progression: this.progression?.data || {},
+            leaderboard: this.leaderboard?.data || {},
+            mycoBalance: Number.isFinite(this.walletMycoBalance) ? Number(this.walletMycoBalance) : undefined
+        };
+    }
+
+    async apiRequest(path, options = {}) {
+        const headers = { ...(options.headers || {}) };
+        if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+        if (options.auth && this.walletSessionToken) headers.Authorization = `Bearer ${this.walletSessionToken}`;
+
+        const response = await fetch(`${this.apiBase}${path}`, {
+            method: options.method || 'GET',
+            mode: 'cors',
+            cache: 'no-store',
+            headers,
+            body: options.body
+        });
+
+        const raw = await response.text();
+        let data = {};
+        try {
+            data = raw ? JSON.parse(raw) : {};
+        } catch (_) {
+            data = {};
+        }
+
+        if (!response.ok) {
+            const message = data?.error || `${response.status} ${response.statusText}`;
+            const error = new Error(message);
+            error.status = response.status;
+            throw error;
+        }
+
+        return data;
+    }
+
+    queueCloudSync(reason = 'auto', delayMs = 900) {
+        if (!this.hasVerifiedWalletSession()) return;
+        clearTimeout(this.pendingCloudSyncTimer);
+        this.setCloudSyncState('syncing', `Queued ${reason} sync`);
+        this.pendingCloudSyncTimer = setTimeout(() => {
+            this.syncWithSolana(reason, { quiet: true });
+        }, delayMs);
+    }
+
+    async applyCloudProfile(profile, options = {}) {
+        if (!profile || !profile.progression) return false;
+
+        this.cloudProfile = profile;
+        if (Number.isFinite(profile.myco_balance)) this.walletMycoBalance = Number(profile.myco_balance);
+        if (profile.player_name && this.walletAddress) this.saveWalletConnection();
+
+        let patchedLocal = false;
+        if (Number.isFinite(profile.total_burned)) {
+            this.progression.data.totalBurned = Number(profile.total_burned);
+            patchedLocal = true;
+        }
+        if (Number.isFinite(profile.weekly_burned)) {
+            this.progression.data.weeklyBurned = Number(profile.weekly_burned);
+            patchedLocal = true;
+        }
+        if (Number.isFinite(profile.today_burned)) {
+            this.progression.data.dailyBurnedAmount = Number(profile.today_burned);
+            patchedLocal = true;
+        }
+        if (Number.isFinite(profile.best_score)) {
+            this.progression.data.bestScore = Math.max(this.progression.data.bestScore || 0, Number(profile.best_score));
+            patchedLocal = true;
+        }
+        if (Number.isFinite(profile.best_thronecap_time_seconds) && Number(profile.best_thronecap_time_seconds) > 0) {
+            const currentBest = Number(this.progression.data.bestThronecapTime || 0);
+            const serverBest = Number(profile.best_thronecap_time_seconds);
+            this.progression.data.bestThronecapTime = !currentBest || serverBest < currentBest ? serverBest : currentBest;
+            patchedLocal = true;
+        }
+        if (profile.clan_id && !this.progression.data.clanChosen) {
+            this.progression.data.clanChosen = profile.clan_id;
+            patchedLocal = true;
+        }
+        if (patchedLocal) {
+            this.progression.save();
+        }
+
+        const localStamp = Number(this.progression?.data?.lastSavedAt || 0);
+        const cloudStamp = Date.parse(profile.local_updated_at || profile.updated_at || '') || 0;
+        const shouldImport = options.force === true
+            || !this.progression.data.clanChosen
+            || (options.preferCloud === true)
+            || cloudStamp > (localStamp + 5000);
+
+        if (!shouldImport) return false;
+
+        this.progression.data = JSON.parse(JSON.stringify(profile.progression || {}));
+        this.leaderboard.data = JSON.parse(JSON.stringify(profile.leaderboard || this.leaderboard.data || {}));
+        if (this.progression.data.clanChoiceLocked === undefined) {
+            this.progression.data.clanChoiceLocked = !!this.progression.data.clanChosen;
+        }
+        localStorage.setItem(this.progression.storageKey, JSON.stringify(this.progression.data));
+        localStorage.setItem(this.leaderboard.storageKey, JSON.stringify(this.leaderboard.data));
+        this.selectedClan = this.progression.data.clanChosen || this.selectedClan || 'myco';
+
+        if (this.gameState === 'START_SCREEN') this.setupStartScreen();
+        if (!options.silent) this.showGlobalNotification('CLOUD ADVENTURE RESTORED', '#00ffff');
+        return true;
+    }
+
+    async verifyWalletSession(options = {}) {
+        if (!this.walletAddress) return false;
+        const provider = this.getPhantomProvider();
+        if (!provider || typeof provider.signMessage !== 'function') {
+            this.setCloudSyncState('error', 'This wallet cannot sign messages.');
+            if (!options.quiet) this.showFloatingText('SIGNATURE REQUIRED', 0xff6600, true);
+            return false;
+        }
+
+        try {
+            this.setCloudSyncState('verifying', 'Awaiting wallet signature');
+            const nonce = await this.apiRequest('/api/game3d/auth/nonce', {
+                method: 'POST',
+                body: JSON.stringify({ walletAddress: this.walletAddress })
+            });
+
+            const signed = await provider.signMessage(new TextEncoder().encode(nonce.message));
+            const verify = await this.apiRequest('/api/game3d/auth/verify', {
+                method: 'POST',
+                body: JSON.stringify({
+                    publicKey: this.walletAddress,
+                    signedMessage: nonce.message,
+                    signature: bs58.encode(signed),
+                    challenge: nonce.challenge,
+                    ...this.getCloudPayload()
+                })
+            });
+
+            this.saveWalletSession(verify.sessionToken, verify.balance);
+            this.setCloudSyncState('live', 'Wallet verified');
+            if (verify.profile) {
+                await this.applyCloudProfile(verify.profile, { preferCloud: !this.progression.data.clanChosen });
             }
-            return null;
+            if (!options.quiet) this.showFloatingText('WALLET VERIFIED', 0x39FF14, true);
+            void this.refreshLiveLeaderboard();
+            return true;
+        } catch (error) {
+            console.error('wallet verification failed', error);
+            this.setCloudSyncState('error', error?.message || 'Wallet verification failed');
+            if (!options.quiet) this.showFloatingText('WEB3 VERIFY FAILED', 0xff0000, true);
+            return false;
+        }
+    }
+
+    async loadCloudProfile(options = {}) {
+        if (!this.hasVerifiedWalletSession()) return false;
+
+        try {
+            const result = await this.apiRequest('/api/game3d/profile', { auth: true });
+            if (result?.profile) {
+                await this.applyCloudProfile(result.profile, { preferCloud: options.preferCloud === true });
+            }
+            this.setCloudSyncState('live', 'Cloud profile loaded');
+            return true;
+        } catch (error) {
+            if (error?.status === 401) {
+                this.clearWalletSession();
+                this.setCloudSyncState('local', 'Wallet session expired');
+                if (this.gameState === 'START_SCREEN') this.setupStartScreen();
+                return false;
+            }
+            console.error('cloud profile load failed', error);
+            this.setCloudSyncState('error', error?.message || 'Cloud profile load failed');
+            return false;
+        }
+    }
+
+    async refreshLiveLeaderboard(rerenderView = null) {
+        if (this.liveLeaderboardLoading) return this.liveLeaderboard;
+        if (this.liveLeaderboard && (Date.now() - this.liveLeaderboardUpdatedAt) < LIVE_LEADERBOARD_TTL_MS) {
+            return this.liveLeaderboard;
+        }
+
+        this.liveLeaderboardLoading = true;
+        try {
+            const data = await this.apiRequest('/api/game3d/leaderboard');
+            this.liveLeaderboard = data;
+            this.liveLeaderboardUpdatedAt = Date.now();
+            if (rerenderView === 'leaderboard' && document.getElementById('back-button')) this.showLeaderboard(false);
+            if (rerenderView === 'thronecap' && document.getElementById('citadel-back-button')) this.showThronecapLeaderboard(false);
+            return data;
+        } catch (error) {
+            console.error('live leaderboard refresh failed', error);
+            return this.liveLeaderboard;
+        } finally {
+            this.liveLeaderboardLoading = false;
+        }
+    }
+
+    async refreshLiveTerritory(rerenderView = null, { force = false } = {}) {
+        if (this.liveTerritoryLoading) return this.liveTerritory;
+        if (!force && this.liveTerritory && (Date.now() - this.liveTerritoryUpdatedAt) < LIVE_TERRITORY_TTL_MS) {
+            return this.liveTerritory;
+        }
+
+        this.liveTerritoryLoading = true;
+        try {
+            const previous = this.liveTerritory;
+            const data = await this.apiRequest(this.getTerritoryApiPath());
+            this.liveTerritory = data;
+            this.liveTerritoryUpdatedAt = Date.now();
+            this.applyTerritoryWorldState(previous, data);
+            if (rerenderView === 'map' && this.isPaused && this.activeInventoryTab === 'MAP') this.showInventoryMenu();
+            return data;
+        } catch (error) {
+            console.error('live territory refresh failed', error);
+            return this.liveTerritory;
+        } finally {
+            this.liveTerritoryLoading = false;
+        }
+    }
+
+    clearTerritoryLabels() {
+        if (!Array.isArray(this.territoryLabels)) this.territoryLabels = [];
+        this.territoryLabels.forEach(label => {
+            try { this.scene.remove(label); } catch (_) {}
+        });
+        this.territoryLabels = [];
+    }
+
+    getClanColorHex(clanId) {
+        const color = this.getClanColor(clanId || 'myco');
+        const parsed = Number.parseInt(String(color).replace('#', ''), 16);
+        return Number.isFinite(parsed) ? parsed : 0xffffff;
+    }
+
+    applyTerritoryWorldState(previous = null, next = this.liveTerritory) {
+        const regions = Array.isArray(next?.regions) ? next.regions : [];
+        const previousRegions = new Map((Array.isArray(previous?.regions) ? previous.regions : []).map(region => [region.id, region]));
+        const territoryByRegion = new Map(regions.map(region => [region.id, region]));
+
+        if (Array.isArray(this.portals)) {
+            this.portals.forEach(portal => {
+                const territory = territoryByRegion.get(portal.regionId) || null;
+                const clanId = territory?.ownerClan || territory?.leadingClan || (territory?.sanctuary ? 'myco' : null);
+                const colorHex = clanId ? this.getClanColorHex(clanId) : null;
+                let territoryText = null;
+                if (territory?.sanctuary) territoryText = 'SANCTUARY';
+                else if (territory?.ownerClan) territoryText = territory.status === 'under_siege'
+                    ? `${territory.ownerClan.toUpperCase()} UNDER SIEGE`
+                    : `${territory.ownerClan.toUpperCase()} HOLD ${Math.round(Number(territory.controlPercent || 0))}%`;
+                else if (territory?.statusLabel) territoryText = territory.statusLabel.toUpperCase();
+
+                if (typeof portal.applyTerritoryState === 'function') {
+                    portal.applyTerritoryState({
+                        color: colorHex,
+                        borderColor: clanId ? this.getClanColor(clanId) : '#39FF14',
+                        text: territoryText,
+                    });
+                }
+            });
+        }
+
+        this.clearTerritoryLabels();
+        const currentTerritory = territoryByRegion.get(this.currentRegion?.id) || null;
+        if (currentTerritory && this.currentRegion) {
+            const focusClan = currentTerritory.ownerClan || currentTerritory.leadingClan || (currentTerritory.sanctuary ? 'myco' : null);
+            const bannerColor = focusClan ? this.getClanColorHex(focusClan) : (this.currentRegion.accent || 0x39FF14);
+            const bannerText = currentTerritory.sanctuary
+                ? `${this.currentRegion.name} SANCTUARY`
+                : currentTerritory.ownerClan
+                    ? (currentTerritory.status === 'under_siege'
+                        ? `${this.currentRegion.name} ${currentTerritory.ownerClan.toUpperCase()} UNDER SIEGE`
+                        : `${this.currentRegion.name} ${currentTerritory.ownerClan.toUpperCase()} ${Math.round(Number(currentTerritory.controlPercent || 0))}% HOLD`)
+                    : `${this.currentRegion.name} ${String(currentTerritory.statusLabel || 'WILD').toUpperCase()}`;
+            const banner = this.createFloatingLabel(bannerText, bannerColor);
+            banner.position.set(0, this.currentRegion.id === 'region8' ? 17 : 14, this.currentRegion.id === 'region8' ? -52 : -24);
+            this.territoryLabels.push(banner);
+        }
+
+        if (this.player) {
+            const territoryEffect = this.getTerritoryGameplayEffect(this.currentRegion?.id);
+            this.player.territoryModifiers = territoryEffect.playerModifiers;
+            this.currentTerritoryEffect = territoryEffect;
+            if (typeof this.player.applyLevelStats === 'function') this.player.applyLevelStats();
+            if (this.currentRegion && !this.currentRegion.isSafeZone) this.syncRegionThreatLevel();
+        }
+
+        if (previous) {
+            regions.forEach(region => {
+                const prior = previousRegions.get(region.id);
+                if (!prior) return;
+                if ((prior.ownerClan || null) !== (region.ownerClan || null) && region.ownerClan) {
+                    this.showGlobalNotification(`${region.name} claimed by ${region.ownerClan.toUpperCase()}`, this.getClanColor(region.ownerClan));
+                } else if ((prior.status || '') !== (region.status || '') && region.status === 'under_siege') {
+                    const alertClan = region.ownerClan || region.leadingClan || 'myco';
+                    this.showGlobalNotification(`${region.name} is under siege`, this.getClanColor(alertClan));
+                }
+            });
+        }
+    }
+
+    async submitLiveBurn(amount, mode = 'STORY', metadata = {}) {
+        if (!this.hasVerifiedWalletSession()) return false;
+
+        const mergedMetadata = {
+            gameMode: mode || this.getCurrentGameMode(),
+            currentRegionId: metadata.currentRegionId || metadata.regionId || this.currentRegion?.id || null,
+            ...metadata
         };
 
-        const provider = getProvider();
-        
+        try {
+            this.setCloudSyncState('syncing', `Recording ${mode.toLowerCase()} burn`);
+            const result = await this.apiRequest('/api/game3d/burn', {
+                method: 'POST',
+                auth: true,
+                body: JSON.stringify({
+                    amount,
+                    mode,
+                    metadata: mergedMetadata,
+                    ...this.getCloudPayload()
+                })
+            });
+            if (result?.profile) {
+                await this.applyCloudProfile(result.profile, { silent: true });
+            }
+            this.setCloudSyncState('synced', 'Live burn recorded');
+            void this.refreshLiveLeaderboard();
+            void this.refreshLiveTerritory();
+            return result;
+        } catch (error) {
+            console.error('live burn submit failed', error);
+            if (error?.status === 401) this.clearWalletSession();
+            this.setCloudSyncState('error', error?.message || 'Live burn failed');
+            return false;
+        }
+    }
+
+    async submitRunRecord(runType, payload = {}) {
+        if (!this.hasVerifiedWalletSession()) return false;
+
+        const mergedPayload = {
+            ...payload,
+            metadata: {
+                gameMode: this.getCurrentGameMode(),
+                currentRegionId: this.currentRegion?.id || null,
+                ...(payload.metadata || {})
+            }
+        };
+
+        try {
+            this.setCloudSyncState('syncing', `Recording ${runType} run`);
+            const result = await this.apiRequest('/api/game3d/run', {
+                method: 'POST',
+                auth: true,
+                body: JSON.stringify({
+                    runType,
+                    ...mergedPayload,
+                    ...this.getCloudPayload()
+                })
+            });
+            if (result?.profile) {
+                await this.applyCloudProfile(result.profile, { silent: true });
+            }
+            this.setCloudSyncState('synced', 'Live run recorded');
+            void this.refreshLiveLeaderboard();
+            return result;
+        } catch (error) {
+            console.error('live run submit failed', error);
+            if (error?.status === 401) this.clearWalletSession();
+            this.setCloudSyncState('error', error?.message || 'Live run submit failed');
+            return false;
+        }
+    }
+
+    async submitProgressionEvent(eventType, payload = {}) {
+        if (!this.hasVerifiedWalletSession()) return false;
+
+        const dedupeKey = payload.eventKey || `${eventType}:${payload.regionId || payload.questId || payload.loreId || ''}:${this.progression?.data?.worldDay || ''}`;
+        if (dedupeKey && this.liveProgressionEvents.has(dedupeKey)) return false;
+        if (dedupeKey) this.liveProgressionEvents.add(dedupeKey);
+
+        try {
+            const result = await this.apiRequest('/api/game3d/progression', {
+                method: 'POST',
+                auth: true,
+                body: JSON.stringify({
+                    eventType,
+                    ...payload,
+                    metadata: {
+                        gameMode: this.getCurrentGameMode(),
+                        currentRegionId: payload.regionId || this.currentRegion?.id || null,
+                        ...(payload.metadata || {})
+                    },
+                    ...this.getCloudPayload()
+                })
+            });
+            if (result?.profile) {
+                await this.applyCloudProfile(result.profile, { silent: true });
+            }
+            void this.refreshLiveTerritory('map', { force: true });
+            return result;
+        } catch (error) {
+            console.error('progression event submit failed', error);
+            if (dedupeKey) this.liveProgressionEvents.delete(dedupeKey);
+            if (error?.status === 401) this.clearWalletSession();
+            return false;
+        }
+    }
+
+    downloadSaveBackup() {
+        const payload = {
+            exportedAt: new Date().toISOString(),
+            build: this.getGameBuild(),
+            walletAddress: this.walletAddress || null,
+            progression: this.progression?.data || null,
+            leaderboard: this.leaderboard?.data || null
+        };
+
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `myco-quest-backup-${stamp}.json`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+        this.showGlobalNotification('LOCAL BACKUP DOWNLOADED', '#39FF14');
+        this.playUiNote('E4', '8n');
+    }
+
+    async syncWithSolana(reason = 'manual', options = {}) {
+        if (!this.walletAddress) {
+            this.showFloatingText('CONNECT WALLET TO SYNC', 0xffaa00, true);
+            this.showWalletConnectionHelp();
+            return false;
+        }
+
+        if (!this.walletSessionToken) {
+            const verified = await this.verifyWalletSession({ quiet: options.quiet });
+            if (!verified) return false;
+        }
+
+        clearTimeout(this.pendingCloudSyncTimer);
+        try {
+            this.setCloudSyncState('syncing', `Running ${reason} sync`);
+            const result = await this.apiRequest('/api/game3d/profile', {
+                method: 'POST',
+                auth: true,
+                body: JSON.stringify(this.getCloudPayload())
+            });
+            if (result?.profile) await this.applyCloudProfile(result.profile, { silent: true });
+            this.setCloudSyncState('synced', `Synced ${reason}`);
+            if (!options.quiet) {
+                this.showGlobalNotification('LIVE CLOUD SAVE SYNCED', '#00ffff');
+                this.playUiNote('C5', '16n');
+            }
+            void this.refreshLiveLeaderboard();
+            return true;
+        } catch (error) {
+            console.error('cloud sync failed', error);
+            if (error?.status === 401) this.clearWalletSession();
+            this.setCloudSyncState('error', error?.message || 'Cloud sync failed');
+            if (!options.quiet) this.showFloatingText('SYNC FAILED', 0xff0000, true);
+            return false;
+        }
+    }
+
+    isIOSDevice() {
+        const ua = navigator.userAgent || '';
+        return /iPad|iPhone|iPod/.test(ua) || (ua.includes('Mac') && navigator.maxTouchPoints > 1);
+    }
+
+    getPhantomProvider() {
+        if ('solana' in window) {
+            const provider = window.solana;
+            if (provider && provider.isPhantom) return provider;
+        }
+        return null;
+    }
+
+    getWalletUxState() {
+        const ua = navigator.userAgent || '';
+        const isIOS = this.isIOSDevice();
+        const isMobile = !!this.isMobile || /Android|webOS|BlackBerry|IEMobile|Opera Mini/i.test(ua) || isIOS;
+        const inPhantomBrowser = ua.toLowerCase().includes('phantom');
+        return {
+            isIOS,
+            isMobile,
+            inPhantomBrowser,
+            provider: this.getPhantomProvider()
+        };
+    }
+
+    buildPhantomBrowseUrl(targetUrl = window.location.href) {
+        return `https://phantom.app/ul/browse/${encodeURIComponent(targetUrl)}?ref=${encodeURIComponent(window.location.origin)}`;
+    }
+
+    async copyCurrentLink() {
+        const href = window.location.href;
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(href);
+                return true;
+            }
+        } catch (_) {}
+
+        try {
+            const input = document.createElement('input');
+            input.value = href;
+            input.setAttribute('readonly', 'readonly');
+            input.style.position = 'fixed';
+            input.style.left = '-9999px';
+            document.body.appendChild(input);
+            input.select();
+            input.setSelectionRange(0, input.value.length);
+            const copied = document.execCommand('copy');
+            input.remove();
+            return !!copied;
+        } catch (_) {
+            return false;
+        }
+    }
+
+    async openInPhantomBrowser() {
+        const browseUrl = this.buildPhantomBrowseUrl();
+        try {
+            window.location.href = browseUrl;
+        } catch (_) {
+            window.open(browseUrl, '_blank', 'noopener');
+        }
+    }
+
+    async connectWallet() {
+        const provider = this.getPhantomProvider();
+
         if (provider) {
             try {
                 const resp = await provider.connect();
                 this.walletAddress = resp.publicKey.toString();
                 this.saveWalletConnection();
-                this.setupStartScreen(); 
+                await this.verifyWalletSession({ quiet: true });
+                this.setupStartScreen();
                 this.showFloatingText("WALLET CONNECTED!", 0x39FF14);
             } catch (err) {
                 console.error("User rejected connection", err);
@@ -6637,45 +8133,75 @@ class Game3D {
 
     disconnectWallet() {
         this.walletAddress = null;
+        this.clearWalletSession();
         localStorage.removeItem('myco_quest_wallet');
+        this.setCloudSyncState('local', 'Wallet disconnected');
         this.setupStartScreen();
         this.showFloatingText("WALLET DISCONNECTED", 0x888888);
     }
 
     showWalletConnectionHelp() {
+        const walletState = this.getWalletUxState();
+        const primaryLabel = walletState.isMobile ? 'OPEN IN PHANTOM' : 'GET PHANTOM';
+        const primaryCopy = walletState.isIOS
+            ? "On iPhone and iPad, wallet connections work inside Phantom's in-app browser. Safari can still play the game without a wallet."
+            : walletState.isMobile
+                ? "On mobile, wallet connections work best inside Phantom's in-app browser. You can keep playing without a wallet."
+                : 'Install Phantom in this browser to connect your account. You can keep playing without a wallet for now.';
+
         const overlay = document.createElement('div');
         overlay.style.position = 'absolute';
         overlay.style.top = '0';
         overlay.style.left = '0';
         overlay.style.width = '100%';
         overlay.style.height = '100%';
-        overlay.style.backgroundColor = 'rgba(0,0,0,0.85)';
+        overlay.style.backgroundColor = 'rgba(0,0,0,0.88)';
         overlay.style.display = 'flex';
         overlay.style.justifyContent = 'center';
         overlay.style.alignItems = 'center';
         overlay.style.zIndex = '10000';
         overlay.style.pointerEvents = 'auto';
+        overlay.style.padding = '20px';
+        overlay.style.boxSizing = 'border-box';
         document.body.appendChild(overlay);
 
         overlay.innerHTML = `
-            <div style="background: #1a1a1a; width: 340px; border-radius: 12px; font-family: sans-serif; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid #333;">
-                <div style="background: #2a2a2a; padding: 20px; text-align: center; border-bottom: 1px solid #333;">
+            <div style="background: #101312; width: min(100%, 360px); border-radius: 14px; font-family: sans-serif; overflow: hidden; box-shadow: 0 18px 42px rgba(0,0,0,0.55); border: 1px solid rgba(57,255,20,0.18);">
+                <div style="background: linear-gradient(180deg, #1c1f1d, #121514); padding: 20px; text-align: center; border-bottom: 1px solid rgba(255,255,255,0.08);">
                     <img src="https://phantom.app/img/logo.png" style="width: 64px; height: 64px; margin-bottom: 15px; border-radius: 15px;">
                     <div style="color: white; font-size: 18px; font-weight: bold;">Wallet Not Detected</div>
-                    <div style="color: #888; font-size: 13px; margin-top: 5px;">Myco Kingdom</div>
+                    <div style="color: #8ea39a; font-size: 13px; margin-top: 5px;">Myco Kingdom</div>
                 </div>
                 <div style="padding: 20px;">
-                    <p style="color: #ccc; font-size: 13px; text-align: center; margin-bottom: 20px; line-height: 1.6;">
-                        Install or open a Solana wallet such as Phantom in this browser to connect your account. You can keep playing without a wallet for now.
+                    <p style="color: #d0d8d4; font-size: 13px; text-align: center; margin: 0 0 18px 0; line-height: 1.65;">
+                        ${primaryCopy}
                     </p>
-                    <div style="display: flex; gap: 10px;">
-                        <button id="wallet-help-close" style="flex: 1; padding: 12px; border-radius: 8px; border: 1px solid #444; background: transparent; color: white; font-weight: bold; cursor: pointer;">Not Now</button>
-                        <button id="wallet-help-continue" style="flex: 1; padding: 12px; border-radius: 8px; border: none; background: #6a0dad; color: white; font-weight: bold; cursor: pointer;">Keep Playing</button>
+                    <div style="display: flex; flex-direction: column; gap: 10px;">
+                        <button id="wallet-help-primary" style="min-height: 46px; padding: 12px; border-radius: 10px; border: none; background: #6a0dad; color: white; font-weight: bold; cursor: pointer;">${primaryLabel}</button>
+                        ${walletState.isMobile ? '<button id="wallet-help-copy" style="min-height: 46px; padding: 12px; border-radius: 10px; border: 1px solid #3b4a43; background: transparent; color: white; font-weight: bold; cursor: pointer;">COPY GAME LINK</button>' : ''}
+                        <div style="display: flex; gap: 10px;">
+                            <button id="wallet-help-close" style="flex: 1; min-height: 44px; padding: 12px; border-radius: 10px; border: 1px solid #3b4a43; background: transparent; color: white; font-weight: bold; cursor: pointer;">Not Now</button>
+                            <button id="wallet-help-continue" style="flex: 1; min-height: 44px; padding: 12px; border-radius: 10px; border: none; background: #39FF14; color: #081007; font-weight: bold; cursor: pointer;">Keep Playing</button>
+                        </div>
                     </div>
                 </div>
             </div>
         `;
 
+        overlay.querySelector('#wallet-help-primary').onclick = () => {
+            if (walletState.isMobile) {
+                this.openInPhantomBrowser();
+            } else {
+                window.open('https://phantom.app/download', '_blank', 'noopener');
+            }
+        };
+        const copyBtn = overlay.querySelector('#wallet-help-copy');
+        if (copyBtn) {
+            copyBtn.onclick = async () => {
+                const copied = await this.copyCurrentLink();
+                this.showFloatingText(copied ? "LINK COPIED" : "COPY FAILED", copied ? 0x39FF14 : 0xff0000);
+            };
+        }
         overlay.querySelector('#wallet-help-close').onclick = () => overlay.remove();
         overlay.querySelector('#wallet-help-continue').onclick = () => {
             overlay.remove();
@@ -6683,15 +8209,18 @@ class Game3D {
         };
     }
 
-    showLeaderboard() {
-        const clanRankings = this.leaderboard.getClanRankings();
-        const playerRankings = this.leaderboard.data.players;
-        const burnerRankings = this.leaderboard.getPlayerBurnRankings();
+    showLeaderboard(refresh = true) {
+        const live = this.liveLeaderboard;
+        const clanRankings = live?.clans?.length ? live.clans : this.leaderboard.getClanRankings();
+        const playerRankings = live?.topPlayers?.length ? live.topPlayers : this.leaderboard.data.players;
+        const burnerRankings = live?.topBurners?.length ? live.topBurners : this.leaderboard.getPlayerBurnRankings();
+        const leaderboardLabel = live?.updatedAt ? `LIVE NETWORK • ${new Date(live.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'LOCAL CACHE';
 
         this.uiOverlay.innerHTML = `
             <div style="pointer-events: auto; background: rgba(0,0,0,0.95); padding: 40px; border: 2px solid #00ffff; border-radius: 10px; width: 90%; max-width: 900px; text-align: center; box-shadow: 0 0 30px #00ffff; max-height: 90vh; overflow-y: auto;">
                 <h2 style="color: #00ffff; margin-bottom: 20px; letter-spacing: 2px;">HALL OF HEROES</h2>
-                
+                <p style="color: #7fe6ea; font-size: 9px; margin: -6px 0 20px 0; letter-spacing: 1px;">${leaderboardLabel}</p>
+
                 <div style="margin-bottom: 30px;">
                     <p style="color: #39FF14; margin-bottom: 15px; font-size: 14px;">CLAN STANDINGS & STATS</p>
                     <table style="width: 100%; border-collapse: collapse; font-size: 8px;">
@@ -6726,10 +8255,10 @@ class Game3D {
                     <div>
                         <p style="color: #39FF14; margin-bottom: 15px; font-size: 12px;">TOP HEROES (SCORE)</p>
                         <div style="display: flex; flex-direction: column; gap: 8px;">
-                            ${[...playerRankings].sort((a,b) => b.score - a.score).slice(0, 5).map((p, i) => `
+                            ${[...playerRankings].sort((a,b) => (b.score || 0) - (a.score || 0)).slice(0, 5).map((p, i) => `
                                 <div style="display: flex; justify-content: space-between; font-size: 10px; padding: 5px; background: rgba(255,255,255,0.05);">
-                                    <span>${i + 1}. ${p.name.slice(0, 12)} (${p.clan.toUpperCase()})</span>
-                                    <span>${p.score} SP</span>
+                                    <span>${i + 1}. ${String(p.name || 'Wanderer').slice(0, 12)} (${String(p.clan || 'myco').toUpperCase()})</span>
+                                    <span>${p.score || 0} SP</span>
                                 </div>
                             `).join('')}
                         </div>
@@ -6739,14 +8268,14 @@ class Game3D {
                         <div style="display: flex; flex-direction: column; gap: 8px;">
                             ${burnerRankings.map((p, i) => `
                                 <div style="display: flex; justify-content: space-between; font-size: 10px; padding: 5px; background: rgba(255,0,0,0.1);">
-                                    <span>${i + 1}. ${p.name.slice(0, 12)} (${p.clan.toUpperCase()})</span>
+                                    <span>${i + 1}. ${String(p.name || 'Wanderer').slice(0, 12)} (${String(p.clan || 'myco').toUpperCase()})</span>
                                     <span>${p.burned || 0} 🔥</span>
                                 </div>
                             `).join('')}
                         </div>
                     </div>
                 </div>
-                
+
                 <div style="display: flex; justify-content: center; gap: 20px;">
                     <button id="view-hall-button" style="padding: 10px 20px; background: #ffaa00; border: none; color: black; font-size: 12px; cursor: pointer;">VIEW HALL OF FAME</button>
                     <button id="back-button" style="padding: 10px 20px; background: #00ffff; border: none; color: black; font-size: 12px; cursor: pointer;">BACK</button>
@@ -6755,16 +8284,17 @@ class Game3D {
         `;
         document.getElementById('back-button').addEventListener('click', () => this.setupStartScreen());
         document.getElementById('view-hall-button').addEventListener('click', () => this.showHallOfFame());
+        if (refresh) void this.refreshLiveLeaderboard('leaderboard');
     }
 
     showHallOfFame() {
         const hallOfFame = this.leaderboard.data.hallOfFame || [];
-        
+
         this.uiOverlay.innerHTML = `
             <div style="pointer-events: auto; background: rgba(0,0,0,0.98); padding: 50px; border: 4px solid #ffaa00; border-radius: 20px; width: 90%; max-width: 1000px; text-align: center; box-shadow: 0 0 50px rgba(255, 170, 0, 0.4); max-height: 90vh; overflow-y: auto; font-family: 'Press Start 2P', cursive;">
                 <h2 style="color: #ffaa00; margin-bottom: 10px; font-size: 28px; text-shadow: 0 0 10px #ffaa00;">HALL OF ETERNAL GLORY</h2>
                 <p style="color: #888; font-size: 10px; margin-bottom: 40px; letter-spacing: 2px;">COMMEMORATING THE CHAMPIONS OF THE GREAT BURN</p>
-                
+
                 <div style="margin-bottom: 40px;">
                     <table style="width: 100%; border-collapse: collapse;">
                         <thead>
@@ -6780,8 +8310,8 @@ class Game3D {
                                 const winnerColor = this.getClanColor(entry.winner);
                                 const runnerColor = this.getClanColor(entry.runnerUp);
                                 return `
-                                    <tr style="border-bottom: 1px solid #222; transition: background 0.3s; cursor: default;" 
-                                        onmouseover="this.style.background='rgba(255,170,0,0.05)'" 
+                                    <tr style="border-bottom: 1px solid #222; transition: background 0.3s; cursor: default;"
+                                        onmouseover="this.style.background='rgba(255,170,0,0.05)'"
                                         onmouseout="this.style.background='transparent'">
                                         <td style="padding: 20px 15px; text-align: left; font-size: 10px; color: #aaa;">${entry.weekEnding}</td>
                                         <td style="padding: 20px 15px; text-align: left; font-size: 12px; color: ${winnerColor}; font-weight: bold;">
@@ -6813,7 +8343,7 @@ class Game3D {
                         Resets occur every Sunday at 8 PM CST.
                     </p>
                 </div>
-                
+
                 <div style="display: flex; justify-content: center; gap: 20px;">
                     <button id="hall-back-button" style="padding: 15px 40px; background: #ffaa00; border: none; color: black; font-size: 12px; cursor: pointer; font-family: inherit;">BACK TO MENU</button>
                     <button id="hall-leaderboard-button" style="padding: 15px 40px; background: #00ffff; border: none; color: black; font-size: 12px; cursor: pointer; font-family: inherit;">LIVE STANDINGS</button>
@@ -6821,20 +8351,20 @@ class Game3D {
                 </div>
             </div>
         `;
-        
+
         document.getElementById('hall-back-button').addEventListener('click', () => this.setupStartScreen());
         document.getElementById('hall-leaderboard-button').addEventListener('click', () => this.showLeaderboard());
         document.getElementById('hall-citadel-button').addEventListener('click', () => this.showThronecapLeaderboard());
     }
 
-    showThronecapLeaderboard() {
-        const rankings = this.leaderboard.getThronecapRankings();
-        
+    showThronecapLeaderboard(refresh = true) {
+        const rankings = this.liveLeaderboard?.thronecapTimes?.length ? this.liveLeaderboard.thronecapTimes : this.leaderboard.getThronecapRankings();
+
         this.uiOverlay.innerHTML = `
             <div style="pointer-events: auto; display: flex; flex-direction: column; align-items: center; width: 100%; height: 100%; background: rgba(5,0,10,0.95); padding: 60px; overflow-y: auto;">
                 <h2 class="neon-text" style="color: #ff0055; font-size: 42px; margin-bottom: 10px;">CITADEL SPEEDRUNS</h2>
                 <p style="color: #ff0055; font-size: 12px; margin-bottom: 40px; letter-spacing: 2px;">THE FASTEST RESTORERS IN THE MYCOVERSE</p>
-                
+
                 <div style="width: 100%; max-width: 900px; background: rgba(0,0,0,0.4); border: 2px solid #ff0055; border-radius: 20px; padding: 40px; margin-bottom: 40px; box-shadow: 0 0 50px rgba(255,0,85,0.2);">
                     <table style="width: 100%; border-collapse: collapse; font-family: inherit;">
                         <thead>
@@ -6850,8 +8380,8 @@ class Game3D {
                             ${rankings.length > 0 ? rankings.map((entry, index) => {
                                 const clanColor = this.getClanColor(entry.clan);
                                 return `
-                                    <tr style="border-bottom: 1px solid #222; transition: background 0.3s;" 
-                                        onmouseover="this.style.background='rgba(255,0,85,0.05)'" 
+                                    <tr style="border-bottom: 1px solid #222; transition: background 0.3s;"
+                                        onmouseover="this.style.background='rgba(255,0,85,0.05)'"
                                         onmouseout="this.style.background='transparent'">
                                         <td style="padding: 20px; text-align: left; font-size: 12px; color: #fff;">
                                             ${index === 0 ? '🏆 ' : (index === 1 ? '🥈 ' : (index === 2 ? '🥉 ' : `${index + 1}. `))}
@@ -6881,16 +8411,17 @@ class Game3D {
                         </tbody>
                     </table>
                 </div>
-                
+
                 <div style="display: flex; justify-content: center; gap: 20px;">
                     <button id="citadel-back-button" style="padding: 15px 40px; background: #ff0055; border: none; color: white; font-size: 12px; cursor: pointer; font-family: inherit;">BACK TO HALL</button>
                     <button id="citadel-menu-button" style="padding: 15px 40px; background: #333; border: none; color: white; font-size: 12px; cursor: pointer; font-family: inherit;">MAIN MENU</button>
                 </div>
             </div>
         `;
-        
+
         document.getElementById('citadel-back-button').addEventListener('click', () => this.showHallOfFame());
         document.getElementById('citadel-menu-button').addEventListener('click', () => this.setupStartScreen());
+        if (refresh) void this.refreshLiveLeaderboard('thronecap');
     }
 
     shareCertificate(index) {
@@ -6900,7 +8431,7 @@ class Game3D {
 
         const clanColor = this.getClanColor(entry.clan);
         const rankText = index === 0 ? 'GRAND RESTORER' : (index < 3 ? 'ELITE RESTORER' : 'CITADEL VETERAN');
-        
+
         const certOverlay = document.createElement('div');
         certOverlay.style.position = 'fixed';
         certOverlay.style.top = '0';
@@ -6915,19 +8446,19 @@ class Game3D {
         certOverlay.style.alignItems = 'center';
         certOverlay.style.pointerEvents = 'auto';
         certOverlay.style.fontFamily = "'Press Start 2P', cursive";
-        
+
         certOverlay.innerHTML = `
             <div id="capture-area" style="background: #050505; border: 10px double ${clanColor}; padding: 60px; width: 800px; text-align: center; position: relative; box-shadow: 0 0 50px ${clanColor};">
                 <div style="border: 2px solid ${clanColor}; padding: 40px;">
                     <h1 style="color: ${clanColor}; font-size: 32px; margin-bottom: 20px;">CERTIFICATE OF RESTORATION</h1>
                     <p style="color: #fff; font-size: 10px; margin-bottom: 40px; letter-spacing: 2px;">BY DECREE OF THE FUNGAL COURT</p>
-                    
+
                     <p style="color: #888; font-size: 12px; margin-bottom: 10px;">THIS CERTIFIES THAT</p>
                     <h2 style="color: #fff; font-size: 24px; margin-bottom: 30px; text-decoration: underline;">${entry.name.toUpperCase()}</h2>
-                    
+
                     <p style="color: #888; font-size: 12px; margin-bottom: 10px;">HAS SUCCESSFULLY RESTORED THE NETWORK HEART IN</p>
                     <h3 style="color: #39FF14; font-size: 36px; margin-bottom: 40px;">${entry.time.toFixed(2)} SECONDS</h3>
-                    
+
                     <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-top: 60px;">
                         <div style="text-align: left;">
                             <p style="color: ${clanColor}; font-size: 10px; margin-bottom: 5px;">RANK: ${rankText}</p>
@@ -6939,22 +8470,22 @@ class Game3D {
                         </div>
                     </div>
                 </div>
-                
+
                 <!-- Corner Decorations -->
                 <div style="position: absolute; top: 20px; left: 20px; width: 40px; height: 40px; border-top: 4px solid ${clanColor}; border-left: 4px solid ${clanColor};"></div>
                 <div style="position: absolute; top: 20px; right: 20px; width: 40px; height: 40px; border-top: 4px solid ${clanColor}; border-right: 4px solid ${clanColor};"></div>
                 <div style="position: absolute; bottom: 20px; left: 20px; width: 40px; height: 40px; border-bottom: 4px solid ${clanColor}; border-left: 4px solid ${clanColor};"></div>
                 <div style="position: absolute; bottom: 20px; right: 20px; width: 40px; height: 40px; border-bottom: 4px solid ${clanColor}; border-right: 4px solid ${clanColor};"></div>
             </div>
-            
+
             <div style="margin-top: 40px; display: flex; gap: 20px;">
                 <button id="copy-cert" style="padding: 15px 30px; background: #39FF14; border: none; color: black; font-family: inherit; font-size: 12px; cursor: pointer;">COPY TEXT FOR SHARE</button>
                 <button id="close-cert" style="padding: 15px 30px; background: #ff0055; border: none; color: white; font-family: inherit; font-size: 12px; cursor: pointer;">CLOSE</button>
             </div>
         `;
-        
+
         document.body.appendChild(certOverlay);
-        
+
         document.getElementById('close-cert').onclick = () => certOverlay.remove();
         document.getElementById('copy-cert').onclick = () => {
             const shareText = `🍄 I restored the Network Heart in Myco Quest! 🍄\n\nRank: ${rankText}\nTime: ${entry.time.toFixed(2)}s\nClan: ${entry.clan.toUpperCase()}\n\nPlay now: ${window.location.href}`;
@@ -6980,7 +8511,7 @@ class Game3D {
                     ${CONFIG.ACCESSORIES.map(acc => {
                         const isOwned = owned.includes(acc.id);
                         const isEquipped = equipped.cape === acc.id || equipped.crown === acc.id;
-                        
+
                         return `
                             <div style="background: #111; border: 2px solid ${isOwned ? acc.color : '#333'}; padding: 15px; display: flex; flex-direction: column; gap: 10px;">
                                 <div style="display: flex; justify-content: space-between; align-items: start;">
@@ -6990,26 +8521,26 @@ class Game3D {
                                 <p style="font-size: 7px; color: #888; flex-grow: 1;">${acc.desc}</p>
                                 ${isOwned ? `
                                     <button onclick="window.game.equipAccessory('${acc.id}')" style="
-                                        width: 100%; 
-                                        padding: 8px; 
-                                        background: ${isEquipped ? acc.color : '#222'}; 
-                                        color: ${isEquipped ? 'black' : 'white'}; 
-                                        border: 1px solid ${acc.color}; 
-                                        font-family: inherit; 
-                                        font-size: 8px; 
+                                        width: 100%;
+                                        padding: 8px;
+                                        background: ${isEquipped ? acc.color : '#222'};
+                                        color: ${isEquipped ? 'black' : 'white'};
+                                        border: 1px solid ${acc.color};
+                                        font-family: inherit;
+                                        font-size: 8px;
                                         cursor: pointer;
                                     ">
                                         ${isEquipped ? 'EQUIPPED' : 'EQUIP'}
                                     </button>
                                 ` : `
                                     <button onclick="window.game.purchaseAccessory('${acc.id}')" style="
-                                        width: 100%; 
-                                        padding: 8px; 
-                                        background: ${p.goldenSpores >= acc.costGold ? '#ffff00' : '#333'}; 
-                                        color: black; 
-                                        border: none; 
-                                        font-family: inherit; 
-                                        font-size: 8px; 
+                                        width: 100%;
+                                        padding: 8px;
+                                        background: ${p.goldenSpores >= acc.costGold ? '#ffff00' : '#333'};
+                                        color: black;
+                                        border: none;
+                                        font-family: inherit;
+                                        font-size: 8px;
                                         cursor: pointer;
                                     ">
                                         BUY (${acc.costGold} GOLD)
@@ -7048,7 +8579,7 @@ class Game3D {
         if (!acc || !p.accessories.includes(id)) return;
 
         const type = acc.type === 'CAPE' ? 'cape' : 'crown';
-        
+
         // Toggle off if already equipped
         if (p.equippedAccessories[type] === id) {
             p.equippedAccessories[type] = null;
@@ -7063,7 +8594,7 @@ class Game3D {
     }
 
     getClanColor(clanId) {
-        const colors = { 'myco': '#ff0000', 'rougarou': '#aaaaaa', 'tegbot': '#00ffff', 'shiba': '#ffff00', 'brood': '#ffaa00' };
+        const colors = { 'myco': '#ff0000', 'rougarou': '#aaaaaa', 'tegbot': '#00ffff', 'shiba': '#ffff00', 'brood': '#ffaa00', 'mycelius': '#aa66ff' };
         return colors[clanId] || '#ffffff';
     }
 
@@ -7078,7 +8609,7 @@ class Game3D {
                 <p style="line-height: 2.5; font-size: 16px; margin-bottom: 100px; padding: 0 20px;">
                     In an era where the Network Heart hummed in perfect harmony,<br>
                     the Mycoverse flourished under the light of pure data.<br><br>
-                    But the Rot came—a corruptive darkness from the deep void,<br>
+                    But the Rot came-a corruptive darkness from the deep void,<br>
                     shattering the sacred crown of King Myco.<br><br>
                     The shards were scattered across the floating islands,<br>
                     and the neon pulse of our world began to fade.<br><br>
@@ -7097,9 +8628,9 @@ class Game3D {
 
     setupClanSelection() {
         clearTimeout(this.storyTimeout);
-        
+
         // If a clan is already chosen, skip selection
-        if (this.progression.data.clanChosen) {
+        if (this.progression.data.clanChosen && this.progression.data.clanChoiceLocked !== false) {
             this.selectedClan = this.progression.data.clanChosen;
             this.player.setClan(this.selectedClan);
             this.startGameplay();
@@ -7108,8 +8639,8 @@ class Game3D {
 
         this.gameState = 'CLAN_SELECT';
 
-        // V1.9.32 — Mobile-aware clan selection (touch-native, no inline handlers).
-        // V1.9.34 — Mobile gets a swipeable CAROUSEL instead of a wrapping grid.
+        // V1.9.32 - Mobile-aware clan selection (touch-native, no inline handlers).
+        // V1.9.34 - Mobile gets a swipeable CAROUSEL instead of a wrapping grid.
         // Why: even at 150×280 the 5 cards tiled into 2 rows that crowded the
         // viewport and forced thumb-strain to reach the bottom row. A one-card
         // carousel with horizontal swipe + dots is the standard mobile pattern
@@ -7197,7 +8728,7 @@ class Game3D {
                 </div>
             `;
         } else {
-            // Desktop grid — unchanged behavior, all cards visible.
+            // Desktop grid - unchanged behavior, all cards visible.
             const cardsHTML = clanEntries.map(([id, cfg]) => buildCard(id, cfg, {
                 cardW: '220px',
                 cardH: 380,
@@ -7337,7 +8868,7 @@ class Game3D {
             // scroll of the overlay still works if the user is really scrolling.
             const DEADZONE = 8;        // px before we consider it a horizontal drag
             const COMMIT_PX = 60;      // distance past which we page on lift
-            const COMMIT_VEL = 0.4;    // px/ms — flick speed that pages regardless of distance
+            const COMMIT_VEL = 0.4;    // px/ms - flick speed that pages regardless of distance
             let touchId = null;
             let startX = 0, startY = 0;
             let lastX = 0, lastT = 0;
@@ -7377,7 +8908,7 @@ class Game3D {
                     // Decide: is this a horizontal swipe or a vertical scroll?
                     if (Math.abs(dx) < DEADZONE && Math.abs(dy) < DEADZONE) return;
                     if (Math.abs(dy) > Math.abs(dx)) {
-                        // Vertical intent — let the page scroll, abandon swipe.
+                        // Vertical intent - let the page scroll, abandon swipe.
                         touchId = null;
                         return;
                     }
@@ -7385,7 +8916,7 @@ class Game3D {
                     dragMoved = true;
                 }
 
-                // Active horizontal swipe — block native scroll for this gesture
+                // Active horizontal swipe - block native scroll for this gesture
                 // and follow the finger. We rubber-band at the ends so the
                 // boundary feels physical instead of dead.
                 e.preventDefault();
@@ -7410,7 +8941,7 @@ class Game3D {
                 if (!t) return;
                 touchId = null;
                 if (!claimed) {
-                    // Pure tap — let the card's click handler fire (dragMoved
+                    // Pure tap - let the card's click handler fire (dragMoved
                     // stays false so the pledge modal opens).
                     return;
                 }
@@ -7457,7 +8988,7 @@ class Game3D {
                 }
             };
             window.addEventListener('keydown', onKey);
-            // Tear down the listener when we leave the screen — easiest hook
+            // Tear down the listener when we leave the screen - easiest hook
             // is the back button + confirmClanSelection (which both navigate
             // away). We stash a remover on the root so the next innerHTML
             // overwrite implicitly drops it.
@@ -7476,7 +9007,7 @@ class Game3D {
             // viewport has its real measured width).
             requestAnimationFrame(measure);
         } else {
-            // Desktop has no carousel — make sure any prior cleanup is gone.
+            // Desktop has no carousel - make sure any prior cleanup is gone.
             if (this._clanCarouselCleanup) {
                 this._clanCarouselCleanup();
                 this._clanCarouselCleanup = null;
@@ -7497,7 +9028,7 @@ class Game3D {
         }
     }
 
-    // V1.9.32 — Pledge modal extracted from inline window.* so the touch path
+    // V1.9.32 - Pledge modal extracted from inline window.* so the touch path
     // is the same as the card path: real listeners, mobile sizing, haptics.
     confirmClanSelection(clan) {
         const clanName = clan.toUpperCase();
@@ -7539,10 +9070,11 @@ class Game3D {
             if (this.triggerHaptic) this.triggerHaptic('medium');
             this.selectedClan = clan;
             this.progression.data.clanChosen = clan;
+            this.progression.data.clanChoiceLocked = true;
             this.progression.save();
             this.player.setClan(clan);
             modal.remove();
-            // V1.9.34 — Tear down the carousel's keydown + resize listeners
+            // V1.9.34 - Tear down the carousel's keydown + resize listeners
             // before gameplay takes over the keyboard.
             if (this._clanCarouselCleanup) {
                 this._clanCarouselCleanup();
@@ -7555,7 +9087,7 @@ class Game3D {
             try {
                 const synth = new TONE.PolySynth().toDestination();
                 synth.triggerAttackRelease(["C4", "E4", "G4", "B4", "C5"], "1n");
-            } catch (_) { /* audio may not be ready yet — silent */ }
+            } catch (_) { /* audio may not be ready yet - silent */ }
         });
     }
 
@@ -7584,6 +9116,7 @@ class Game3D {
             p.rot = p.targetRot;
             this.applyRotVisualToProp(p);
         });
+        this.refreshRotQuestState(rid);
     }
 
     // Lerp the mushroom's color between its clean accent and a rot purple-black
@@ -7601,6 +9134,12 @@ class Game3D {
         p.capMat.emissiveIntensity = p.cleanEmissive + r * 1.2;
         if (p.stemMat) p.stemMat.color.copy(p.cleanStem).lerp(rotStem, r);
         if (p.spotMat) p.spotMat.color.copy(p.cleanSpot).lerp(rotColor, r * 0.8);
+        if (p.rotPatch && p.rotPatchMat) {
+            p.rotPatch.visible = r > 0.04;
+            p.rotPatchMat.opacity = Math.min(0.58, r * 0.72);
+            const patchScale = 0.6 + (r * 1.85);
+            p.rotPatch.scale.set(patchScale, patchScale, patchScale);
+        }
         // Cap droops (Z-rot) and shrinks slightly when very rotted.
         if (p.group) {
             const droop = r * 0.45;
@@ -7642,7 +9181,7 @@ class Game3D {
                 this.applyRotVisualToProp(p);
             }
         });
-        // Neighbor spread tick — every ~5s.
+        // Neighbor spread tick - every ~5s.
         this._rotSpreadTick++;
         if (this._rotSpreadTick < 300) return;
         this._rotSpreadTick = 0;
@@ -7673,29 +9212,36 @@ class Game3D {
         if (!proj || !proj.coreActive) return;
         if (!this.rotProps || !this.rotProps.length) return;
         if (!this.isRottableRegion()) return;
+        if (!proj._cleansedRotProps) proj._cleansedRotProps = new WeakSet();
         const rid = this.currentRegion.id;
+        const cleanseRadius = proj.rotRadius || radius;
+        const cleanseStrength = Math.max(0.12, proj.rotCleanse || 0.45);
         let cleansed = 0;
         const before = this.progression.getRegionRot(rid);
         this.rotProps.forEach(p => {
-            if (!p.group) return;
+            if (!p.group || proj._cleansedRotProps.has(p)) return;
             const d = proj.mesh.position.distanceTo(p.group.position);
-            if (d < radius && p.targetRot > 0.05) {
-                p.targetRot = Math.max(0, p.targetRot - 0.4);
-                p.rot = Math.max(0, p.rot - 0.35);
+            if (d < cleanseRadius && p.targetRot > 0.05) {
+                const falloff = Math.max(0.25, 1 - (d / cleanseRadius));
+                const targetDrop = cleanseStrength * falloff;
+                p.targetRot = Math.max(0, p.targetRot - targetDrop);
+                p.rot = Math.max(0, p.rot - (targetDrop * 0.9));
                 this.applyRotVisualToProp(p);
+                proj._cleansedRotProps.add(p);
                 cleansed++;
                 if (Math.random() < 0.5) this.spawnCleanseSparkle(p.group.position);
             }
         });
         if (cleansed > 0) {
             // Reduce region rot in proportion to total props cleansed this hit.
-            const drop = Math.min(before, (cleansed / this.rotProps.length) * 110);
+            const drop = Math.min(before, (cleansed / this.rotProps.length) * 100 * Math.max(0.5, cleanseStrength));
             const next = Math.max(0, before - drop);
             this.progression.setRegionRot(rid, next);
             if (before >= 5 && next < 5) {
-                this.showFloatingText('REGION CLEANSED — THE LAND BREATHES', 0x39FF14, true);
-                try { if (this.uiSynth) this.uiSynth.triggerAttackRelease('C6', '4n'); } catch (_) {}
+                this.showFloatingText('REGION CLEANSED - THE LAND BREATHES', 0x39FF14, true);
+                this.playUiNote('C6', '4n');
             }
+            this.refreshRotQuestState(rid, { announce: before >= 5 && next < 5 });
             this.updateHud();
         }
     }
@@ -7710,7 +9256,7 @@ class Game3D {
         const cost = 5;
         if (now - this._lightPoolLastDrop < cd) {
             const remaining = Math.ceil((cd - (now - this._lightPoolLastDrop)) / 1000);
-            this.showFloatingText(`LIGHT POOL — ${remaining}s`, 0xaaaaaa);
+            this.showFloatingText(`LIGHT POOL - ${remaining}s`, 0xaaaaaa);
             return;
         }
         if ((this.progression.data.blueSpores || 0) < cost) {
@@ -7759,8 +9305,9 @@ class Game3D {
             const next = Math.max(0, before - drop);
             this.progression.setRegionRot(rid, next);
             if (before >= 5 && next < 5) {
-                this.showFloatingText('REGION CLEANSED — THE LIGHT HOLDS', 0x39FF14, true);
+                this.showFloatingText('REGION CLEANSED - THE LIGHT HOLDS', 0x39FF14, true);
             }
+            this.refreshRotQuestState(rid, { announce: before >= 5 && next < 5 });
         }
     }
 
@@ -7804,7 +9351,7 @@ class Game3D {
         if (hud) {
             const p = this.player;
             const prog = this.progression.data;
-            
+
             // Health percentage for Roblox-style bar
             const hpPercent = (p.hp / p.maxHp) * 100;
             const xpPercent = (prog.xp / prog.nextLevelXp) * 100;
@@ -7815,13 +9362,56 @@ class Game3D {
             const alignment = (p.alignment != null) ? p.alignment : 50;
             const alignPercent = Math.max(0, Math.min(100, alignment));
             const isCollectorMode = this.progression.isCollectorMode();
+            const isTerritoryWarMode = this.progression.isTerritoryWarMode();
+            const isMobileHud = !!this.isMobile;
+            const minimapSize = isMobileHud ? 126 : 150;
+            const vitalsWidth = isMobileHud ? 300 : 320;
             const regionLabel = (this.currentRegion?.name || 'Sanctuary').toUpperCase();
             const shardCount = prog.shardsCollected || 0;
-            const statusLabel = isCollectorMode ? 'SPORE COLLECTOR' : 'STORY CAMPAIGN';
-            const statusTitle = isCollectorMode ? 'Daily harvest active' : 'Expedition in progress';
+            const statusLabel = this.getGameModeLabel();
+            const statusTitle = isCollectorMode
+                ? 'Daily harvest active'
+                : isTerritoryWarMode
+                    ? 'Live clan control active'
+                    : 'Expedition in progress';
             const statusDetail = isCollectorMode
                 ? `${this.progression.getCollectorRemainingToday()} spores left today`
-                : `${shardCount}/7 crown shards reclaimed`;
+                : isTerritoryWarMode
+                    ? (this.currentTerritoryEffect?.territory?.ownerClan
+                        ? `${this.currentTerritoryEffect.territory.ownerClan.toUpperCase()} controls this front`
+                        : 'Fight to claim this front')
+                    : `${shardCount}/7 crown shards reclaimed`;
+            const bossAccent = this.getBossAccentHex(this.boss);
+            const bossPercent = this.boss ? Math.max(0, Math.min(100, (this.boss.hp / Math.max(1, this.boss.maxHp || 1)) * 100)) : 0;
+            const bossPhase = this.boss ? Math.max(1, this.boss.phase || 1) : 0;
+            const bossStateText = this.getBossStateText(this.boss);
+            const bossImpactActive = !!(this.boss && this.bossDamageFlashUntil && performance.now() < this.bossDamageFlashUntil);
+            const bossImpactColor = this.bossDamageBlocked ? 'rgba(255, 244, 140, 0.34)' : `${bossAccent}55`;
+            const { timeStr, period } = this.getWorldTimeState();
+            const safeTop = 'env(safe-area-inset-top, 0px)';
+            const safeRight = 'env(safe-area-inset-right, 0px)';
+            const safeBottom = 'env(safe-area-inset-bottom, 0px)';
+            const mobileCardWidth = 'min(calc(100vw - 24px), 360px)';
+            const vitalsWidthCss = isMobileHud ? mobileCardWidth : `${vitalsWidth}px`;
+            const summaryCardTop = isMobileHud ? `calc(150px + ${safeTop})` : '10px';
+            const vitalsCardTop = isMobileHud ? `calc(54px + ${safeTop})` : '10px';
+            const topButtonsTop = isMobileHud ? `calc(10px + ${safeTop})` : '10px';
+            const topButtonsRight = isMobileHud ? `calc(12px + ${safeRight})` : '10px';
+            const bossCardTop = isMobileHud ? `calc(292px + ${safeTop})` : '108px';
+            const bossCardWidth = isMobileHud ? mobileCardWidth : '430px';
+            const minimapTop = isMobileHud
+                ? (this.boss ? `calc(386px + ${safeTop})` : `calc(292px + ${safeTop})`)
+                : '50px';
+            const actionClusterBottom = isMobileHud ? `calc(92px + ${safeBottom})` : '18px';
+            const hotbarBottom = isMobileHud ? `calc(174px + ${safeBottom})` : '80px';
+            const keys = prog.keyItems || {};
+            const heldIds = Object.keys(keys).filter(k => (keys[k] || 0) > 0);
+            const keyPills = heldIds.map(id => {
+                const cfg = Object.values(CONFIG.PORTAL_KEYS || {}).find(k => k.id === id);
+                if (!cfg) return '';
+                const c = '#' + cfg.color.toString(16).padStart(6, '0');
+                return `<span style="display:inline-block; margin: 2px 4px 0 0; padding: 2px 8px; border-radius: 10px; background: rgba(0,0,0,0.6); border: 1px solid ${c}; color: ${c}; font-size: 9px; font-weight: bold;">🔑 ${cfg.name}${keys[id] > 1 ? ' ×' + keys[id] : ''}</span>`;
+            }).join('');
             // Color the morality bar: low alignment = rot purple, mid = neutral white,
             // high = clan-green so the player can read their standing at a glance.
             let moralColor;
@@ -7847,25 +9437,25 @@ class Game3D {
 
             hud.innerHTML = `
                 <!-- Roblox Style HUD -->
-                <div style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; font-family: sans-serif;">
-                    
+                <div id="hud-root" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; font-family: sans-serif;">
+
                     <!-- Top Right Menu Buttons -->
-                    <div style="position: absolute; top: 10px; right: 10px; pointer-events: auto; display: flex; gap: 10px;">
+                    <div style="position: absolute; top: ${topButtonsTop}; right: ${topButtonsRight}; pointer-events: auto; display: flex; gap: 10px; z-index: 4;">
                         <button onclick="window.game.toggleMinimap()" style="
-                            width: 32px; height: 32px; border-radius: 5px; 
-                            background: rgba(0,0,0,0.5); border: 2px solid #39FF14; 
+                            width: 32px; height: 32px; border-radius: 5px;
+                            background: rgba(0,0,0,0.5); border: 2px solid #39FF14;
                             color: #39FF14; font-size: 10px; cursor: pointer;
                             display: flex; align-items: center; justify-content: center;
                         ">MAP</button>
                         <button onclick="window.game.toggleHud()" style="
-                            width: 32px; height: 32px; border-radius: 5px; 
-                            background: rgba(0,0,0,0.5); border: 2px solid white; 
+                            width: 32px; height: 32px; border-radius: 5px;
+                            background: rgba(0,0,0,0.5); border: 2px solid white;
                             color: white; font-size: 10px; cursor: pointer;
                             display: flex; align-items: center; justify-content: center;
                         ">HUD</button>
                         <button onclick="window.game.togglePause()" style="
-                            width: 32px; height: 32px; border-radius: 50%; 
-                            background: rgba(0,0,0,0.5); border: 2px solid white; 
+                            width: 32px; height: 32px; border-radius: 50%;
+                            background: rgba(0,0,0,0.5); border: 2px solid white;
                             color: white; font-size: 16px; cursor: pointer;
                             display: flex; align-items: center; justify-content: center;
                         ">≡</button>
@@ -7873,23 +9463,43 @@ class Game3D {
 
                     <!-- Minimap Container -->
                     ${this.minimapVisible ? `
-                    <div style="position: absolute; top: 50px; right: 10px; width: 150px; height: 150px; background: rgba(0,0,0,0.5); border: 2px solid #39FF14; border-radius: 5px; overflow: hidden; pointer-events: auto;">
-                        <canvas id="minimap-canvas" width="150" height="150" style="width: 100%; height: 100%;"></canvas>
+                    <div id="minimap-card" style="position: absolute; top: ${minimapTop}; right: ${topButtonsRight}; width: ${minimapSize}px; height: ${minimapSize}px; background: rgba(0,0,0,0.5); border: 2px solid #39FF14; border-radius: 8px; overflow: hidden; pointer-events: auto; box-shadow: 0 10px 26px rgba(0,0,0,0.28); z-index: 2;">
+                        <canvas id="minimap-canvas" width="${minimapSize}" height="${minimapSize}" style="width: 100%; height: 100%;"></canvas>
                     </div>
                     ` : ''}
 
                     <!-- Top Left Session Status -->
-                    <div style="position: absolute; top: 10px; left: 10px; width: 240px; background: rgba(4,8,10,0.55); border: 1px solid rgba(0,255,255,0.24); border-radius: 8px; padding: 8px 10px; box-shadow: 0 0 12px rgba(0,0,0,0.35);">
+                    <div id="status-card" style="position: absolute; top: ${summaryCardTop}; left: 12px; width: ${isMobileHud ? mobileCardWidth : '240px'}; background: rgba(4,8,10,0.72); border: 1px solid rgba(0,255,255,0.24); border-radius: 12px; padding: ${isMobileHud ? '10px 12px' : '8px 10px'}; box-shadow: 0 0 12px rgba(0,0,0,0.35); z-index: 2;">
                         <div style="display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px;">
                             <span style="color: #9fdcff; font-size: 9px; font-weight: bold; letter-spacing: 1px;">${statusLabel}</span>
                             <span style="color: #7effa1; font-size: 9px; font-weight: bold; letter-spacing: 1px;">${regionLabel}</span>
                         </div>
                         <div style="color: white; font-size: 11px; font-weight: bold; margin-bottom: 3px;">${statusTitle}</div>
                         <div style="color: #c2d1d6; font-size: 9px; line-height: 1.5;">${statusDetail}</div>
+                        ${isMobileHud ? `
+                            <div style="display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:8px; margin-top:8px;">
+                                <div style="padding:7px 8px; background:rgba(0,0,0,0.32); border:1px solid rgba(255,255,255,0.08); border-radius:8px;">
+                                    <div style="font-size:8px; color:#9be98a; letter-spacing:1px; margin-bottom:3px;">WORLD TIME</div>
+                                    <div style="font-size:9px; color:#ffffff; margin-bottom:2px;">${period}</div>
+                                    <div style="font-size:12px; color:#ffffff;">${timeStr}</div>
+                                </div>
+                                <div style="padding:7px 8px; background:rgba(0,0,0,0.32); border:1px solid rgba(255,255,255,0.08); border-radius:8px; display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:6px; align-content:start;">
+                                    <div>
+                                        <div style="font-size:8px; color:#7edbff; margin-bottom:3px;">BLUE</div>
+                                        <div style="font-size:12px; color:#00ffff;">${prog.blueSpores}</div>
+                                    </div>
+                                    <div>
+                                        <div style="font-size:8px; color:#fff2a8; margin-bottom:3px;">GOLD</div>
+                                        <div style="font-size:12px; color:#ffff00;">${prog.goldenSpores}</div>
+                                    </div>
+                                </div>
+                            </div>
+                            ${heldIds.length ? `<div style="margin-top:8px; max-width:100%;">${keyPills}</div>` : ''}
+                        ` : ''}
                     </div>
 
                     <!-- V1.9.16 - Top Center King Myco Vitals: HP / Magic / Morality -->
-                    <div style="position: absolute; top: 10px; left: 50%; transform: translateX(-50%); width: 320px; background: rgba(0,0,0,0.45); border: 1px solid rgba(57,255,20,0.35); border-radius: 8px; padding: 8px 12px; box-shadow: 0 0 12px rgba(0,0,0,0.55); font-family: sans-serif;">
+                    <div id="vitals-card" style="position: absolute; top: ${vitalsCardTop}; left: 50%; transform: translateX(-50%); width: ${vitalsWidthCss}; background: ${this.mobilePerf ? 'rgba(0,0,0,0.74)' : 'rgba(0,0,0,0.45)'}; border: 1px solid rgba(57,255,20,0.35); border-radius: 12px; padding: 8px 12px; box-shadow: ${this.mobilePerf ? 'none' : '0 0 12px rgba(0,0,0,0.55)'}; font-family: sans-serif; backdrop-filter: ${this.mobilePerf ? 'none' : 'blur(8px)'}; z-index: 3;">
                         <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px;">
                             <span style="color: #ffffff; font-size: 11px; font-weight: bold; letter-spacing: 1px; text-shadow: 1px 1px 2px black;">KING MYCO</span>
                             <span style="color: #cccccc; font-size: 10px; text-shadow: 1px 1px 2px black;">LV ${prog.level}</span>
@@ -7898,17 +9508,17 @@ class Game3D {
                         <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 3px;">
                             <span style="width: 36px; color: #ff5555; font-size: 9px; font-weight: bold; text-shadow: 1px 1px 2px black;">HP</span>
                             <div style="flex: 1; height: 10px; background: rgba(0,0,0,0.6); border: 1px solid rgba(255,85,85,0.45); border-radius: 5px; overflow: hidden;">
-                                <div style="width: ${hpPercent}%; height: 100%; background: linear-gradient(90deg, #ff3344, #ff7755); transition: width 0.2s;"></div>
+                                <div id="hp-fill" style="width: ${hpPercent}%; height: 100%; background: linear-gradient(90deg, #ff3344, #ff7755); transition: width 0.2s;"></div>
                             </div>
-                            <span style="width: 52px; text-align: right; color: #ffaaaa; font-size: 9px; font-weight: bold; text-shadow: 1px 1px 2px black;">${Math.ceil(p.hp)}/${p.maxHp}</span>
+                            <span id="hp-text" style="width: 52px; text-align: right; color: #ffaaaa; font-size: 9px; font-weight: bold; text-shadow: 1px 1px 2px black;">${Math.ceil(p.hp)}/${p.maxHp}</span>
                         </div>
                         <!-- Magic Row -->
                         <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 3px;">
                             <span style="width: 36px; color: #66ccff; font-size: 9px; font-weight: bold; text-shadow: 1px 1px 2px black;">MAGIC</span>
                             <div style="flex: 1; height: 10px; background: rgba(0,0,0,0.6); border: 1px solid rgba(102,204,255,0.45); border-radius: 5px; overflow: hidden;">
-                                <div style="width: ${magicPercent}%; height: 100%; background: linear-gradient(90deg, #2266ff, #66ccff); transition: width 0.2s;"></div>
+                                <div id="magic-fill" style="width: ${magicPercent}%; height: 100%; background: linear-gradient(90deg, #2266ff, #66ccff); transition: width 0.2s;"></div>
                             </div>
-                            <span style="width: 52px; text-align: right; color: #aaddff; font-size: 9px; font-weight: bold; text-shadow: 1px 1px 2px black;">${Math.ceil(magicCur)}/${magicMax}</span>
+                            <span id="magic-text" style="width: 52px; text-align: right; color: #aaddff; font-size: 9px; font-weight: bold; text-shadow: 1px 1px 2px black;">${Math.ceil(magicCur)}/${magicMax}</span>
                         </div>
                         <!-- Morality Row -->
                         <div id="moral-row" style="display: flex; align-items: center; gap: 6px;">
@@ -7921,35 +9531,30 @@ class Game3D {
                         </div>
                     </div>
 
-                    <!-- Bottom Center Health & XP -->
-                    <div style="position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); width: 300px; display: flex; flex-direction: column; align-items: center; gap: 5px;">
-                        <!-- XP Bar -->
-                        <div style="width: 100%; height: 4px; background: rgba(0,0,0,0.5); border-radius: 2px; overflow: hidden;">
-                            <div style="width: ${xpPercent}%; height: 100%; background: #ffffff;"></div>
+                    <!-- Bottom Center Progress / Cooldown Cluster -->
+                    <div id="action-cluster" style="position: absolute; bottom: ${actionClusterBottom}; left: 50%; transform: translateX(-50%); width: ${isMobileHud ? 300 : 320}px; display: flex; flex-direction: column; align-items: center; gap: 6px; background: ${this.mobilePerf ? 'rgba(0,0,0,0.82)' : 'rgba(0,0,0,0.48)'}; border: 1px solid rgba(255,255,255,0.16); border-radius: 12px; padding: 8px 12px; box-shadow: ${this.mobilePerf ? 'none' : '0 12px 24px rgba(0,0,0,0.24)'}; backdrop-filter: ${this.mobilePerf ? 'none' : 'blur(8px)'}; z-index: 2;">
+                        <div style="width: 100%; display: flex; justify-content: space-between; align-items: center; color: #f2f5f7; font-size: 10px; font-weight: bold; letter-spacing: 0.8px; text-shadow: 1px 1px 2px black;">
+                            <span id="hud-level-label">LEVEL ${prog.level}</span>
+                            <span id="xp-label">${Math.round(xpPercent)}% TO NEXT</span>
                         </div>
-                        <!-- Health Bar -->
-                        <div style="width: 100%; height: 12px; background: rgba(0,0,0,0.5); border-radius: 6px; overflow: hidden; border: 1px solid rgba(255,255,255,0.2);">
-                            <div style="width: ${hpPercent}%; height: 100%; background: #00ff00; transition: width 0.3s;"></div>
+                        <div style="width: 100%; height: 5px; background: rgba(0,0,0,0.5); border-radius: 999px; overflow: hidden;">
+                            <div id="xp-fill" style="width: ${xpPercent}%; height: 100%; background: linear-gradient(90deg, #d7dde3, #ffffff);"></div>
                         </div>
-                        <div style="color: white; font-size: 10px; font-weight: bold; text-shadow: 1px 1px 2px black;">LEVEL ${prog.level}</div>
+                        <div style="width: 100%; display: flex; justify-content: space-between; align-items: center; color: #d7dfe6; font-size: 9px; font-weight: bold; letter-spacing: 1px; text-shadow: 1px 1px 2px black;">
+                            <span>${isCollectorMode ? 'UTILITY' : 'ROYAL SPORE'}</span>
+                            <span id="cooldown-percent">READY</span>
+                        </div>
+                        <div style="width: 100%; height: 8px; background: rgba(0,0,0,0.62); border: 1px solid rgba(255,255,255,0.18); border-radius: 999px; overflow: hidden;">
+                            <div id="cooldown-bar" style="width: 0%; height: 100%; background: #39FF14; transition: width 0.15s, opacity 0.15s, background 0.15s;"></div>
+                        </div>
                     </div>
 
                     <!-- Bottom Left Stats -->
-                    <div style="position: absolute; bottom: 20px; left: 20px; color: white; text-shadow: 1px 1px 2px black;">
+                    ${!isMobileHud ? `
+                    <div style="position: absolute; bottom: 20px; left: 20px; color: white; text-shadow: 1px 1px 2px black; z-index: 2;">
                         <div style="font-size: 14px; font-weight: bold; color: #00ffff;">${prog.blueSpores} <span style="font-size: 10px;">BLUE</span></div>
                         <div style="font-size: 14px; font-weight: bold; color: #ffff00;">${prog.goldenSpores} <span style="font-size: 10px;">GOLD</span></div>
-                        ${(() => {
-                            const keys = prog.keyItems || {};
-                            const heldIds = Object.keys(keys).filter(k => (keys[k] || 0) > 0);
-                            if (!heldIds.length) return '';
-                            const pills = heldIds.map(id => {
-                                const cfg = Object.values(CONFIG.PORTAL_KEYS || {}).find(k => k.id === id);
-                                if (!cfg) return '';
-                                const c = '#' + cfg.color.toString(16).padStart(6, '0');
-                                return `<span style="display:inline-block; margin: 2px 4px 0 0; padding: 2px 8px; border-radius: 10px; background: rgba(0,0,0,0.6); border: 1px solid ${c}; color: ${c}; font-size: 9px; font-weight: bold;">🔑 ${cfg.name}${keys[id] > 1 ? ' ×' + keys[id] : ''}</span>`;
-                            }).join('');
-                            return `<div style="margin-top: 6px; max-width: 240px;">${pills}</div>`;
-                        })()}
+                        ${heldIds.length ? `<div style="margin-top: 6px; max-width: 240px;">${keyPills}</div>` : ''}
                         ${(() => {
                             // V1.9.21 - In Spore Collector mode the rot/light-pool panel is
                             // replaced by a collector dashboard: mode badge + daily cap meter.
@@ -8005,7 +9610,7 @@ class Game3D {
                                             <div style="width:${pct}%; height:100%; background:${meterColor}; transition: width 0.4s;"></div>
                                         </div>
                                         <div style="font-size: 8px; color: ${remaining > 0 ? '#aaa' : '#ff8888'}; margin-top: 4px; letter-spacing: 1px; text-shadow: 1px 1px 2px black;">
-                                            ${remaining > 0 ? `${remaining} REMAINING TODAY` : 'CAP REACHED — RESETS AT MIDNIGHT'}
+                                            ${remaining > 0 ? `${remaining} REMAINING TODAY` : 'CAP REACHED - RESETS AT MIDNIGHT'}
                                         </div>
 
                                         <!-- Divider -->
@@ -8054,18 +9659,27 @@ class Game3D {
                             if (!ids.length) return '';
                             const rows = ids.map(id => {
                                 const reg = CONFIG.REGIONS.find(r => r.id === id);
+                                const questCfg = CONFIG.ROT_QUESTS[id];
+                                const questState = questCfg ? this.progression.getRotQuestState(id) : null;
                                 const label = reg ? reg.name : id;
                                 const rot = Math.round((prog.regionRot && prog.regionRot[id]) || 0);
                                 const cleansed = rot < 5;
                                 const barColor = cleansed ? '#39FF14' : (rot >= 50 ? '#aa00ff' : '#ffaa00');
                                 const status = cleansed ? '✓ CLEANSED' : `${rot}%`;
+                                const questLabel = !questCfg ? ''
+                                    : questState.active ? questCfg.title.toUpperCase()
+                                    : questState.completed ? (questState.rewardClaimed && questCfg.rewardMagicId ? `MASTERED • ${questCfg.rewardMagicId.toUpperCase()}` : 'MASTERED')
+                                    : 'NO DUTY';
                                 return `
-                                    <div style="display:flex; align-items:center; gap:6px; font-size:9px; margin-top:3px;">
-                                        <span style="width:80px; color:#ddd; text-shadow: 1px 1px 2px black; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${label}</span>
-                                        <div style="flex:1; height:6px; background:rgba(0,0,0,0.6); border:1px solid rgba(255,255,255,0.2); border-radius:3px; overflow:hidden;">
-                                            <div style="width:${rot}%; height:100%; background:${barColor}; transition: width 0.4s;"></div>
+                                    <div style="margin-top:4px; padding-top:2px; ${questCfg ? 'border-top:1px solid rgba(255,255,255,0.05);' : ''}">
+                                        <div style="display:flex; align-items:center; gap:6px; font-size:9px;">
+                                            <span style="width:80px; color:#ddd; text-shadow: 1px 1px 2px black; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${label}</span>
+                                            <div style="flex:1; height:6px; background:rgba(0,0,0,0.6); border:1px solid rgba(255,255,255,0.2); border-radius:3px; overflow:hidden;">
+                                                <div style="width:${rot}%; height:100%; background:${barColor}; transition: width 0.4s;"></div>
+                                            </div>
+                                            <span style="width:62px; text-align:right; color:${barColor}; font-weight:bold; text-shadow: 1px 1px 2px black;">${status}</span>
                                         </div>
-                                        <span style="width:62px; text-align:right; color:${barColor}; font-weight:bold; text-shadow: 1px 1px 2px black;">${status}</span>
+                                        ${questCfg ? `<div style="margin-left:86px; margin-top:3px; color:${questCfg.accent ? '#' + questCfg.accent.toString(16).padStart(6, '0') : '#80ffaa'}; font-size:8px; letter-spacing:0.5px; text-shadow:1px 1px 2px black;">${questLabel}</div>` : ''}
                                     </div>
                                 `;
                             }).join('');
@@ -8088,16 +9702,17 @@ class Game3D {
                             `;
                             return `
                                 <div style="margin-top: 10px; padding: 6px 8px; background: rgba(0,0,0,0.45); border: 1px solid rgba(170,0,255,0.45); border-radius: 6px; max-width: 240px;">
-                                    <div style="font-size: 10px; font-weight: bold; color: #aa00ff; letter-spacing: 1px; text-shadow: 1px 1px 2px black;">🍄 DAILY ROT</div>
+                                    <div style="font-size: 10px; font-weight: bold; color: #aa00ff; letter-spacing: 1px; text-shadow: 1px 1px 2px black;">🍄 DAILY ROT • DAY ${prog.worldDay || 1}</div>
                                     ${rows}
                                 </div>
                                 ${poolPill}
                             `;
                         })()}
                     </div>
+                    ` : ''}
 
                     <!-- Hotbar -->
-                    <div style="position: absolute; bottom: 80px; left: 50%; transform: translateX(-50%); display: flex; gap: 5px; pointer-events: auto;">
+                    <div id="hotbar" style="position: absolute; bottom: ${hotbarBottom}; left: 50%; transform: translateX(-50%); display: flex; gap: 5px; pointer-events: auto; z-index: 2;">
                         ${[1, 2, 3, 4, 5].map(i => {
                             const isActive = p.activeSlot === i;
                             let icon = '';
@@ -8105,24 +9720,24 @@ class Game3D {
                             let count = 0;
                             if (i === 1) { icon = '🪄'; label = 'Magic'; }
                             else if (i === 2) { icon = '🗡️'; label = 'Melee'; }
-                            else if (i === 3) { 
-                                icon = '🧪'; label = 'Potion'; 
+                            else if (i === 3) {
+                                icon = '🧪'; label = 'Potion';
                                 count = prog.inventory.filter(id => id === 'capPotion').length;
                             }
-                            else if (i === 4) { 
-                                icon = '💣'; label = 'Bomb'; 
+                            else if (i === 4) {
+                                icon = '💣'; label = 'Bomb';
                                 count = prog.inventory.filter(id => id === 'sporeBomb').length;
                             }
-                            else if (i === 5) { 
-                                icon = '🛡️'; label = 'Salve'; 
+                            else if (i === 5) {
+                                icon = '🛡️'; label = 'Salve';
                                 count = prog.inventory.filter(id => id === 'rotSalve').length;
                             }
 
                             return `
                                 <div onclick="window.game.player.activeSlot = ${i}; window.game.updateHud();" style="
-                                    width: 46px; height: 46px; 
-                                    background: ${isActive ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.5)'}; 
-                                    border: 2px solid ${isActive ? 'white' : 'rgba(255,255,255,0.3)'}; 
+                                    width: 46px; height: 46px;
+                                    background: ${isActive ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.5)'};
+                                    border: 2px solid ${isActive ? 'white' : 'rgba(255,255,255,0.3)'};
                                     border-radius: 5px; position: relative; cursor: pointer;
                                     display: flex; align-items: center; justify-content: center;
                                     transition: all 0.1s;
@@ -8138,18 +9753,30 @@ class Game3D {
                         }).join('')}
                     </div>
 
-                    <!-- Boss Health Bar (V1.9.16: pushed below the top-center vitals) -->
+                    <!-- Boss Health Bar (V1.9.42: stronger encounter presentation) -->
                     ${this.boss ? `
-                        <div style="position: absolute; top: 110px; left: 50%; transform: translateX(-50%); width: 400px; display: flex; flex-direction: column; align-items: center; gap: 5px;">
-                            <div style="color: #ff0055; font-size: 12px; font-weight: bold; text-shadow: 2px 2px 4px black; text-transform: uppercase;">${this.boss.name}</div>
-                            <div style="width: 100%; height: 16px; background: rgba(0,0,0,0.7); border: 2px solid #ff0055; border-radius: 8px; overflow: hidden; box-shadow: 0 0 15px rgba(255,0,85,0.5);">
-                                <div style="width: ${(this.boss.hp / this.boss.maxHp) * 100}%; height: 100%; background: linear-gradient(90deg, #ff0055, #ff5500); transition: width 0.1s;"></div>
+                        <div id="boss-card" style="position: absolute; top: ${bossCardTop}; left: 50%; transform: translateX(-50%); width: ${bossCardWidth}; display: flex; flex-direction: column; align-items: center; gap: 6px; z-index: 2;">
+                            <div style="display:flex; align-items:center; gap:8px; max-width:100%; background: rgba(0,0,0,0.68); border: 1px solid ${bossAccent}66; border-radius: 999px; padding: 6px 12px; box-shadow: 0 0 16px ${bossAccent}33;">
+                                <span id="boss-phase-chip" style="color:${bossAccent}; font-size:10px; font-weight:900; letter-spacing:1.5px; white-space:nowrap;">PHASE ${bossPhase}</span>
+                                <span id="boss-name" style="color:white; font-size:${isMobileHud ? 12 : 14}px; font-weight:900; letter-spacing:1.4px; text-transform:uppercase; text-shadow:0 0 12px ${bossAccent}, 2px 2px 4px black; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${this.boss.name}</span>
+                                <span id="boss-state" style="color:#d3dce2; font-size:10px; font-weight:bold; letter-spacing:1px; text-transform:uppercase; white-space:nowrap;">${bossStateText}</span>
+                            </div>
+                            <div style="width: 100%; height: 18px; background: rgba(0,0,0,0.74); border: 2px solid ${bossAccent}; border-radius: 999px; overflow: hidden; box-shadow: 0 0 18px ${bossAccent}55; position: relative;">
+                                <div style="position:absolute; inset:0; background: linear-gradient(90deg, transparent, ${bossAccent}22, transparent);"></div>
+                                <div id="boss-impact-flash" style="position:absolute; inset:0; background:${bossImpactColor}; opacity:${bossImpactActive ? 1 : 0}; transition:opacity 0.16s;"></div>
+                                <div id="boss-fill" style="width: ${bossPercent}%; height: 100%; background: linear-gradient(90deg, ${bossAccent}, #ffffff); transition: width 0.1s;"></div>
+                            </div>
+                            <div style="width:100%; display:flex; justify-content:space-between; gap:10px; color:#c7d2d9; font-size:10px; font-weight:bold; letter-spacing:1px; text-shadow:1px 1px 2px black; text-transform:uppercase;">
+                                <span id="boss-hp-text">${Math.ceil(this.boss.hp)} / ${this.boss.maxHp} HP</span>
+                                <span>${(this.currentRegion?.name || 'Boss Arena').toUpperCase()}</span>
                             </div>
                         </div>
                     ` : ''}
 
                 </div>
             `;
+            this.cacheHudRefs();
+            this.refreshClockUi(true);
         }
     }
 
@@ -8220,7 +9847,7 @@ class Game3D {
         const verb = nextState === 'ROT' ? 'EMBRACED THE ROT'
                    : nextState === 'LIGHT' ? 'WALKS IN KING\'S LIGHT'
                    : 'FINDS BALANCE';
-        banner.textContent = `${label} — ${verb}`;
+        banner.textContent = `${label} - ${verb}`;
         banner.style.cssText = `
             position: fixed; top: 90px; left: 50%;
             transform: translateX(-50%);
@@ -8253,14 +9880,32 @@ class Game3D {
     updateDynamicHud() {
         if (this.gameState !== 'PLAYING' || !this.player) return;
 
+        const prog = this.progression.data;
+        const refs = this.getHudRefs();
+        const { hpFill, hpText, magicFill, magicText, xpFill, xpLabel, levelLabel } = refs;
+
+        const hpPercent = Math.max(0, Math.min(100, (this.player.hp / this.player.maxHp) * 100));
+        const magicMax = this.player.maxMagic || 100;
+        const magicCur = (this.player.magic != null) ? this.player.magic : magicMax;
+        const magicPercent = Math.max(0, Math.min(100, (magicCur / magicMax) * 100));
+        const xpPercent = Math.max(0, Math.min(100, ((prog.xp || 0) / Math.max(1, prog.nextLevelXp || 1)) * 100));
+
+        if (hpFill) hpFill.style.width = `${hpPercent}%`;
+        if (hpText) hpText.innerText = `${Math.ceil(this.player.hp)}/${this.player.maxHp}`;
+        if (magicFill) magicFill.style.width = `${magicPercent}%`;
+        if (magicText) magicText.innerText = `${Math.ceil(magicCur)}/${magicMax}`;
+        if (xpFill) xpFill.style.width = `${xpPercent}%`;
+        if (xpLabel) xpLabel.innerText = `${Math.round(xpPercent)}% TO NEXT`;
+        if (levelLabel) levelLabel.innerText = `LEVEL ${prog.level}`;
+
         // Update Special Cooldown Bar
-        const cooldownBar = document.getElementById('cooldown-bar');
-        const cooldownText = document.getElementById('cooldown-percent');
-        
+        const { cooldownBar, cooldownText } = refs;
+
         if (cooldownBar && cooldownText) {
             if (!this.player.hasRoyalSpore) {
                 cooldownBar.style.width = '0%';
                 cooldownBar.style.background = '#444';
+                cooldownBar.style.opacity = '1';
                 cooldownText.innerText = 'LOCKED';
                 cooldownText.style.color = '#888';
             } else {
@@ -8268,30 +9913,50 @@ class Game3D {
                 const elapsed = now - this.player.lastSpecialTime;
                 const cooldown = CONFIG.PLAYER.SPECIAL_COOLDOWN;
                 const progress = Math.min(1, elapsed / cooldown);
-                
+
                 cooldownBar.style.width = `${progress * 100}%`;
-                
+
                 if (progress < 1) {
                     cooldownBar.style.background = '#ff4400';
+                    cooldownBar.style.opacity = '1';
                     const remaining = Math.ceil((cooldown - elapsed) / 1000);
                     cooldownText.innerText = `${remaining}s`;
                     cooldownText.style.color = '#ff4400';
-                    this.player._specialReadySoundPlayed = false; // Reset flag
+                    this.player._specialReadySoundPlayed = false;
                 } else {
                     cooldownBar.style.background = '#39FF14';
                     cooldownText.innerText = 'READY';
                     cooldownText.style.color = '#39FF14';
-                    
-                    // Play cooldown complete sound once
+
                     if (!this.player._specialReadySoundPlayed) {
                         this.playCooldownReadySound();
                         this.player._specialReadySoundPlayed = true;
                     }
-                    
-                    // Subtle pulse effect when ready
+
                     const pulse = 0.8 + Math.sin(Date.now() * 0.01) * 0.2;
-                    cooldownBar.style.opacity = pulse;
+                    cooldownBar.style.opacity = `${pulse}`;
                 }
+            }
+        }
+
+        const { bossFill, bossName, bossState, bossPhaseChip, bossHpText, bossImpact } = refs;
+
+        if (this.boss && bossFill) {
+            const bossPercent = Math.max(0, Math.min(100, (this.boss.hp / Math.max(1, this.boss.maxHp || 1)) * 100));
+            const accent = this.getBossAccentHex(this.boss);
+            bossFill.style.width = `${bossPercent}%`;
+            bossFill.style.background = `linear-gradient(90deg, ${accent}, #ffffff)`;
+            if (bossName) bossName.innerText = this.boss.name;
+            if (bossState) bossState.innerText = this.getBossStateText(this.boss);
+            if (bossPhaseChip) {
+                bossPhaseChip.innerText = `PHASE ${Math.max(1, this.boss.phase || 1)}`;
+                bossPhaseChip.style.color = accent;
+            }
+            if (bossHpText) bossHpText.innerText = `${Math.ceil(this.boss.hp)} / ${this.boss.maxHp} HP`;
+            if (bossImpact) {
+                const active = !!(this.bossDamageFlashUntil && performance.now() < this.bossDamageFlashUntil);
+                bossImpact.style.background = this.bossDamageBlocked ? 'rgba(255, 244, 140, 0.34)' : `${accent}55`;
+                bossImpact.style.opacity = active ? '1' : '0';
             }
         }
     }
@@ -8306,22 +9971,30 @@ class Game3D {
         setTimeout(() => synth.triggerAttackRelease("E5", "16n"), 100);
     }
 
+    renderGameplayHudChrome() {
+        const controlHint = this.isMobile
+            ? ''
+            : this.progression.isCollectorMode()
+                ? `WASD: FREE MOVE • ARROWS: TURN / DRIVE • SPACE: JUMP • E: COLLECT / INTERACT • SHIFT: DASH • B: BURN PIT`
+                : `WASD: FREE MOVE • ARROWS: TURN / DRIVE • SPACE: JUMP (x2) • X: MAGIC • Q: ROYAL SPORE • R: MYCELIAL NET • E: INTERACT • SHIFT: DASH • U: UPGRADES • B: BURN PIT`;
+
+        this.uiOverlay.innerHTML = `
+            <div id="hud" style="position: absolute; inset: 0; pointer-events: none;"></div>
+            ${controlHint ? `
+                <div style="position: absolute; bottom: 84px; left: 50%; transform: translateX(-50%); pointer-events: none; max-width: min(92vw, 760px); font-size: 10px; color: #aeb8bc; text-shadow: 1px 1px 2px black; white-space: normal; text-align: center; letter-spacing: 0.6px; background: rgba(0,0,0,0.42); border: 1px solid rgba(255,255,255,0.12); border-radius: 999px; padding: 7px 14px; backdrop-filter: blur(8px);">
+                    ${controlHint}
+                </div>
+            ` : ''}
+        `;
+    }
+
     startGameplay() {
         this.gameState = 'PLAYING';
         this.startTime = Date.now();
         this.spawnCollectibles(); // Refresh with correct clan colors
         this.checkClanRewards(); // Check for rewards on game start
         this.playEpicMusic('AUTO');
-        // V1.9.21 - Collector mode shows a stripped-down control hint; story mode keeps the full bar.
-        const controlHint = this.progression.isCollectorMode()
-            ? `WASD: MOVE | SPACE: JUMP | E: COLLECT / INTERACT | B: BURN PIT`
-            : `WASD: MOVE | SPACE: JUMP (x2) | X: MAGIC | Q: ROYAL SPORE | R: MYCELIAL NET | E: INTERACT | U: UPGRADES | B: BURN PIT`;
-        this.uiOverlay.innerHTML = `
-            <div id="hud" style="position: absolute; top: 20px; left: 20px; pointer-events: none; background: rgba(0,0,0,0.5); padding: 15px; border-radius: 10px; width: 220px;"></div>
-            <div style="position: absolute; bottom: 70px; left: 50%; transform: translateX(-50%); pointer-events: none; font-size: 10px; color: #888; text-shadow: 1px 1px 2px black; white-space: nowrap;">
-                ${controlHint}
-            </div>
-        `;
+        this.renderGameplayHudChrome();
 
         window.openSkillMenu = () => this.showSkillMenu();
         window.openBurnPit = () => this.showBurnPitMenu();
@@ -8347,12 +10020,12 @@ class Game3D {
     checkClanRewards() {
         const p = this.progression.data;
         const lastBurnTime = this.getMostRecentBurnTime();
-        
+
         if (p.lastWeeklyRewardClaimed < lastBurnTime.getTime()) {
             const rankings = this.leaderboard.getBurnRankings();
             const winner = rankings[0];
             const runnerUp = rankings[1];
-            
+
             let reward = null;
             let title = "";
 
@@ -8382,7 +10055,7 @@ class Game3D {
         const sunday = new Date();
         sunday.setDate(now.getDate() - now.getDay()); // Go back to Sunday
         sunday.setHours(20, 0, 0, 0); // 8 PM CST
-        
+
         if (now < sunday) {
             sunday.setDate(sunday.getDate() - 7); // Go back one more week if we haven't reached Sunday 8pm yet
         }
@@ -8401,7 +10074,7 @@ class Game3D {
         div.style.textAlign = 'center';
         div.style.zIndex = '1000';
         div.style.pointerEvents = 'auto';
-        
+
         div.innerHTML = `
             <h2 style="color: #ffff00; font-size: 20px; margin-bottom: 15px;">${title}</h2>
             <p style="color: #39FF14; font-size: 10px; margin-bottom: 20px;">Your clan excelled in the Great Burn!</p>
@@ -8412,9 +10085,9 @@ class Game3D {
             </div>
             <button onclick="this.parentElement.remove()" style="padding: 10px 20px; background: #ffff00; border: none; font-family: inherit;">RECLAIM POWER</button>
         `;
-        
+
         this.uiOverlay.appendChild(div);
-        
+
         const synth = new TONE.PolySynth().toDestination();
         synth.triggerAttackRelease(["C4", "E4", "G4", "B4", "C5"], "1n");
     }
@@ -8428,13 +10101,13 @@ class Game3D {
             <div style="pointer-events: auto; background: rgba(0,0,0,0.95); padding: 25px; border: 2px solid #ffff00; width: 90%; max-width: 700px; text-align: center; max-height: 90vh; overflow-y: auto;">
                 <h2 style="color: #ffff00; margin-bottom: 15px; font-size: 18px;">KING'S UPGRADES</h2>
                 <p style="color: #39FF14; margin-bottom: 15px; font-size: 12px;">SKILL POINTS: ${p.skillPoints}</p>
-                
+
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px;">
                     ${CONFIG.SKILLS.map(skill => {
                         const level = p.upgrades[skill.id] || 0;
                         const isUnlocked = skill.isAbility ? level > 0 : true;
                         const canAfford = p.skillPoints >= 1;
-                        
+
                         return `
                             <div style="background: #111; padding: 10px; border: 1px solid #333; display: flex; flex-direction: column; justify-content: space-between;">
                                 <div>
@@ -8466,7 +10139,7 @@ class Game3D {
                 this.updateHud();
                 const synth = new TONE.Synth().toDestination();
                 synth.triggerAttackRelease("C5", "8n");
-                
+
                 if (skill.isAbility) {
                     this.showFloatingText(`LEARNED: ${skill.name}!`, 0xffff00, true);
                 }
@@ -8480,33 +10153,9 @@ class Game3D {
     }
 
     playEpicMusic(mode = 'AUTO') {
-        // V1.9.13 - Background music disabled per design. Sound effects remain live.
-        // We still tear down any previously scheduled voices and stop the Transport
-        // so we leave a clean audio graph for SFX.
-        try {
-            TONE.Transport.cancel();
-            TONE.Transport.stop();
-        } catch (_) {}
-        if (this._music) {
-            try {
-                this._music.lead && this._music.lead.dispose();
-                this._music.bass && this._music.bass.dispose();
-                this._music.blip && this._music.blip.dispose();
-                this._music.filter && this._music.filter.dispose();
-                this._music.leadSeq && this._music.leadSeq.dispose();
-                this._music.bassSeq && this._music.bassSeq.dispose();
-                this._music.blipSeq && this._music.blipSeq.dispose();
-            } catch (_) {}
-            this._music = null;
-        }
-        return;
-
-        // --- legacy chiptune kept below for future re-enable ---
-        // eslint-disable-next-line no-unreachable
-
         // Per-region 16-bit melody. 16 steps of 8n each = one bar of catchy chip melody.
         // null = rest. All notes are tagged with octave to keep the synth monophonic-stable.
-        const regionId = this.currentRegion.id;
+        const regionId = this.currentRegion?.id || 'overworld';
         const songs = {
             overworld: {
                 bpm: 132,
@@ -8562,47 +10211,82 @@ class Game3D {
         else if (songs[regionId]) song = songs[regionId];
         else song = songs.overworld;
 
+        const musicSignature = `${mode}:${this.gameState}:${regionId}:${song.bpm}`;
+        if (this._musicSignature === musicSignature && this._music) return;
+
+        const musicToken = Symbol('music');
+        this._musicToken = musicToken;
+
+        try {
+            TONE.Transport.cancel();
+            TONE.Transport.stop();
+        } catch (_) {}
+
+        let filter = this._music?.filter || null;
+        let lead = this._music?.lead || null;
+        let bass = this._music?.bass || null;
+        let blip = this._music?.blip || null;
+
+        if (this._music) {
+            try {
+                this._music.leadSeq && this._music.leadSeq.dispose();
+                this._music.bassSeq && this._music.bassSeq.dispose();
+                this._music.blipSeq && this._music.blipSeq.dispose();
+                this._music.lead?.releaseAll?.();
+                this._music.bass?.releaseAll?.();
+            } catch (_) {}
+            this._music = null;
+        }
+
         // === 16-bit voices ===
-        // Lead: square wave for that classic NES pulse melody, gently filtered.
-        const filter = new TONE.Filter(2200, 'lowpass').toDestination();
-        filter.Q.value = 1.0;
+        // Lead and bass use PolySynth wrappers instead of a single monophonic voice.
+        // That keeps repeated 8th-note attacks stable when Tone schedules notes on
+        // adjacent ticks, especially on mobile Safari / headless Chromium.
+        if (!filter || !lead || !bass || !blip) {
+            filter = new TONE.Filter(2200, 'lowpass').toDestination();
+            filter.Q.value = 1.0;
 
-        const lead = new TONE.Synth({
-            oscillator: { type: 'square' },
-            envelope:   { attack: 0.005, decay: 0.08, sustain: 0.55, release: 0.08 },
-            volume: -10
-        }).connect(filter);
+            lead = new TONE.PolySynth(TONE.Synth, {
+                oscillator: { type: 'square' },
+                envelope:   { attack: 0.005, decay: 0.08, sustain: 0.55, release: 0.08 },
+                volume: -10
+            }).connect(filter);
 
-        // Bass: triangle for that warm chiptune low-end.
-        const bass = new TONE.Synth({
-            oscillator: { type: 'triangle' },
-            envelope:   { attack: 0.005, decay: 0.20, sustain: 0.30, release: 0.12 },
-            volume: -14
-        }).toDestination();
+            // Bass: triangle for that warm chiptune low-end.
+            bass = new TONE.PolySynth(TONE.Synth, {
+                oscillator: { type: 'triangle' },
+                envelope:   { attack: 0.005, decay: 0.20, sustain: 0.30, release: 0.12 },
+                volume: -14
+            }).toDestination();
 
-        // Blip: tiny noise hat for groove.
-        const blip = new TONE.NoiseSynth({
-            noise: { type: 'white' },
-            envelope: { attack: 0.001, decay: 0.04, sustain: 0, release: 0.04 },
-            volume: -28
-        }).toDestination();
+            // Blip: tiny noise hat for groove.
+            blip = new TONE.NoiseSynth({
+                noise: { type: 'white' },
+                envelope: { attack: 0.001, decay: 0.04, sustain: 0, release: 0.04 },
+                volume: -28
+            }).toDestination();
+        }
 
-        // Tone.Sequence schedules notes per step with the loop's `time` directly — each call gets
+        // Tone.Sequence schedules notes per step with the loop's `time` directly - each call gets
         // a strictly-increasing time, eliminating the monosynth start-time-collision crash.
         const leadSeq = new TONE.Sequence((time, note) => {
-            if (note) lead.triggerAttackRelease(note, '8n', time);
+            if (this._musicToken !== musicToken || !note) return;
+            lead.triggerAttackRelease(note, '8n', time);
         }, song.lead, '8n').start(0);
 
         const bassSeq = new TONE.Sequence((time, note) => {
-            if (note) bass.triggerAttackRelease(note, '8n', time);
+            if (this._musicToken !== musicToken || !note) return;
+            bass.triggerAttackRelease(note, '8n', time);
         }, song.bass, '8n').start(0);
 
         const hatPattern = ['x', null, 'x', null, 'x', null, 'x', 'x'];
         const blipSeq = new TONE.Sequence((time, hit) => {
-            if (hit) blip.triggerAttackRelease('16n', time);
+            if (this._musicToken !== musicToken || !hit) return;
+            blip.triggerAttackRelease('16n', time);
         }, hatPattern, '8n').start(0);
 
         this._music = { lead, bass, blip, filter, leadSeq, bassSeq, blipSeq };
+        this._musicSignature = musicSignature;
 
         TONE.Transport.bpm.value = song.bpm;
         TONE.Transport.start();
@@ -8611,19 +10295,24 @@ class Game3D {
     drawMinimap() {
         const canvas = document.getElementById('minimap-canvas');
         if (!canvas || !this.player || this.gameState !== 'PLAYING') return;
-        const ctx = canvas.getContext('2d');
+        if (this._minimapCanvas !== canvas) {
+            this._minimapCanvas = canvas;
+            this._minimapCtx = canvas.getContext('2d');
+        }
+        const ctx = this._minimapCtx;
+        if (!ctx) return;
         const w = canvas.width;
         const h = canvas.height;
-        
+
         ctx.fillStyle = 'rgba(0, 5, 0, 0.9)';
         ctx.fillRect(0, 0, w, h);
-        
+
         const mapScale = 2.0; // Zoom level
         const centerX = w / 2;
         const centerY = h / 2;
-        
+
         const playerPos = this.player.group.position;
-        
+
         // Draw Grid
         ctx.strokeStyle = 'rgba(57, 255, 20, 0.1)';
         ctx.lineWidth = 1;
@@ -8707,16 +10396,16 @@ class Game3D {
         ctx.translate(centerX, centerY);
         const rotation = this.player.group.rotation.y;
         ctx.rotate(-rotation); // Inverse rotation for top-down
-        
+
         ctx.fillStyle = '#39FF14';
         ctx.shadowBlur = 10; ctx.shadowColor = '#39FF14';
-        
+
         // Triangle for direction (Points UP)
         ctx.beginPath();
         ctx.moveTo(0, -8); ctx.lineTo(-5, 4); ctx.lineTo(5, 4);
         ctx.closePath();
         ctx.fill();
-        
+
         ctx.restore();
     }
 
@@ -8733,7 +10422,7 @@ class Game3D {
 
     updateGhost() {
         if (!this.ghost || !this.ghostPath || !this.thronecapStartTime) return;
-        
+
         const elapsed = (Date.now() - this.thronecapStartTime) / 1000;
         // Find nearest path node
         // Path is recorded every 0.1s
@@ -8752,7 +10441,8 @@ class Game3D {
         requestAnimationFrame(() => this.animate());
         this._frame = (this._frame || 0) + 1;
         this.updateOverlayChrome();
-        
+        const now = Date.now();
+
         // Hit Stop Logic
         if (this.hitStopFrames > 0) {
             this.hitStopFrames--;
@@ -8764,23 +10454,17 @@ class Game3D {
 
         this.updateDayCycle();
         this.simulateGlobalActivity();
+        if ((this.gameState === 'PLAYING' || this.isPaused) && now >= (this.nextTerritoryRefreshAt || 0)) {
+            this.nextTerritoryRefreshAt = now + 15000;
+            void this.refreshLiveTerritory();
+        }
 
         // V1.9.7 - Enemies are always visible so the player can read threats day or night.
         this.enemies.forEach(enemy => {
             if (enemy.mesh) enemy.mesh.visible = true;
         });
 
-        // Sunday 8pm CST Reset Check
-        const lb = this.leaderboard.data;
-        const now = new Date();
-        const currentCST = new Date(now.toLocaleString("en-US", {timeZone: "America/Chicago"}));
-        
-        if (currentCST.getDay() === 0 && currentCST.getHours() === 20 && currentCST.getMinutes() === 0 && currentCST.getSeconds() < 2) {
-            if (this.leaderboard.data.weeklyGlobalBurned > 0) {
-                this.leaderboard.resetWeeklyBurns();
-                this.showFloatingText("WEEKLY BURN RESET!", 0xff0000, true);
-            }
-        }
+        this.checkWeeklyBurnReset();
 
         // Apply Weather Status Effects to Player/Enemies
         if (this.currentWeather === 'SPORE_RAIN' && this.weatherIntensity > 0.5) {
@@ -8796,30 +10480,56 @@ class Game3D {
 
         if (this.gameState === 'PLAYING' && this.player && !this.isPaused) {
             this.player.update(this.collidables, this.platforms);
+            this.applyMobileSceneBudget();
 
-            // Roblox Camera Logic
+            // Roblox Camera Logic, but with a little more spring and look-ahead so
+            // movement feels smoother and combat reads better.
             this.cameraDist = THREE.MathUtils.lerp(this.cameraDist, this.cameraTargetDist, 0.1);
 
-            // V1.9.9 Free Stride - Camera always rides behind King Myco unless the user is actively
-            // right-mouse-dragging to look around. The desired yaw mirrors the player's facing so the
-            // camera sits OPPOSITE the direction he's walking.
             const playerYaw = this.player.group.rotation.y;
             const desiredYaw = playerYaw + Math.PI;
             if (!this.isRightMouseDown) {
-                // Shortest-arc lerp toward the desired yaw.
                 let delta = desiredYaw - this.cameraYaw;
                 delta = Math.atan2(Math.sin(delta), Math.cos(delta));
-                this.cameraYaw += delta * 0.05;
-                // Also gently return the pitch to the default behind-and-above angle.
-                this.cameraPitch = THREE.MathUtils.lerp(this.cameraPitch, -0.35, 0.03);
+                this.cameraYaw += delta * (this.player.isWalking ? 0.085 : 0.06);
+                this.cameraPitch = THREE.MathUtils.lerp(this.cameraPitch, -0.35, 0.04);
             }
 
-            const cameraX = this.player.group.position.x + Math.sin(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDist;
-            const cameraY = this.player.group.position.y - Math.sin(this.cameraPitch) * this.cameraDist + 1.5;
-            const cameraZ = this.player.group.position.z + Math.cos(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDist;
-            
+            const facing = this._tmpCameraFacing.set(0, 0, 1).applyQuaternion(this.player.group.quaternion);
+            facing.y = 0;
+            if (facing.lengthSq() < 0.001) facing.set(0, 0, 1);
+            facing.normalize();
+
+            if (this.cameraPivot.lengthSq() === 0) this.cameraPivot.copy(this.player.group.position);
+
+            const dashLookAhead = performance.now() < (this.player._dashActiveUntil || 0) ? 0.85 : 0;
+            const lookAheadDistance = this.player.isWalking ? 0.7 + dashLookAhead : 0.22 + dashLookAhead;
+            const desiredPivot = this._tmpCameraPivot.copy(this.player.group.position).addScaledVector(facing, this.player.isWalking ? 0.18 : 0);
+            const desiredLookTarget = this._tmpCameraLookTarget.copy(this.player.group.position).addScaledVector(facing, lookAheadDistance);
+            desiredLookTarget.y += this.player.isWalking ? 1.35 : 1.28;
+
+            this.cameraPivot.lerp(desiredPivot, this.player.isWalking ? 0.22 : 0.12);
+            this.cameraLookTarget.lerp(desiredLookTarget, this.player.isWalking ? 0.18 : 0.11);
+
+            let shakeX = 0;
+            let shakeY = 0;
+            let shakeZ = 0;
+            if ((this.cameraShakeEnergy || 0) > 0.001) {
+                this.cameraShakeTime += 0.65 + this.cameraShakeEnergy;
+                const amp = (this.isMobile ? 0.05 : 0.08) * this.cameraShakeEnergy;
+                shakeX = Math.sin(this.cameraShakeTime * 1.9) * amp;
+                shakeY = Math.cos(this.cameraShakeTime * 2.7) * amp * 0.55;
+                shakeZ = Math.sin(this.cameraShakeTime * 1.2 + 1.4) * amp * 0.65;
+                this.cameraShakeEnergy *= 0.84;
+                if (this.cameraShakeEnergy < 0.002) this.cameraShakeEnergy = 0;
+            }
+
+            const cameraX = this.cameraPivot.x + Math.sin(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDist + shakeX;
+            const cameraY = this.cameraPivot.y - Math.sin(this.cameraPitch) * this.cameraDist + 1.5 + shakeY;
+            const cameraZ = this.cameraPivot.z + Math.cos(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDist + shakeZ;
+
             this.camera.position.set(cameraX, cameraY, cameraZ);
-            this.camera.lookAt(this.player.group.position.x, this.player.group.position.y + 1.5, this.player.group.position.z);
+            this.camera.lookAt(this.cameraLookTarget.x, this.cameraLookTarget.y, this.cameraLookTarget.z);
 
             // Update Spatial Audio Listener
             if (this.audioUnlocked) {
@@ -8827,9 +10537,9 @@ class Game3D {
                 listener.positionX.value = this.camera.position.x;
                 listener.positionY.value = this.camera.position.y;
                 listener.positionZ.value = this.camera.position.z;
-                
-                const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
-                const up = new THREE.Vector3(0, 1, 0).applyQuaternion(this.camera.quaternion);
+
+                const forward = this._tmpAudioForward.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+                const up = this._tmpAudioUp.set(0, 1, 0).applyQuaternion(this.camera.quaternion);
                 listener.forwardX.value = forward.x;
                 listener.forwardY.value = forward.y;
                 listener.forwardZ.value = forward.z;
@@ -8838,10 +10548,13 @@ class Game3D {
                 listener.upZ.value = up.z;
             }
 
-            // V1.9.10 perf: throttle DOM-heavy HUD work to every 4 frames (~15 Hz at 60fps),
-            // and the minimap canvas redraw to every 6 frames. Both are visually identical.
-            if ((this._frame & 3) === 0) this.updateDynamicHud();
-            if ((this._frame % 6) === 0) this.drawMinimap();
+            // V1.9.10 perf: throttle DOM-heavy HUD work and minimap redraws.
+            // Mobile gets a stricter budget because boss combat already spends most
+            // of the frame on scene updates, particles, and collision checks.
+            const hudEvery = this.mobilePerf ? 8 : 5;
+            const minimapEvery = this.mobilePerf ? 24 : 10;
+            if ((this._frame % hudEvery) === 0) this.updateDynamicHud();
+            if (this.minimapVisible && (this._frame % minimapEvery) === 0) this.drawMinimap();
 
             // Animate Landmarks
             if (this.landmarksGroup) {
@@ -8861,12 +10574,12 @@ class Game3D {
                     const posAttr = this.heartParticles.geometry.attributes.position;
                     const vels = this.heartParticles.userData.velocities;
                     const life = this.heartParticles.userData.life;
-                    
+
                     for (let i = 0; i < life.length; i++) {
                         posAttr.array[i * 3] += vels[i * 3];
                         posAttr.array[i * 3 + 1] += vels[i * 3 + 1];
                         posAttr.array[i * 3 + 2] += vels[i * 3 + 2];
-                        
+
                         life[i] -= 0.005;
                         if (life[i] <= 0) {
                             const angle = Math.random() * Math.PI * 2;
@@ -8885,7 +10598,7 @@ class Game3D {
                     // For now, it's fixed at (0, 10, -40) relative to Sporewood origin
                 }
             }
-            
+
             // Speedrun Path Recording
             if (this.currentRegion.id === 'thronecap') {
                 this.pathSampleTimer++;
@@ -8945,10 +10658,10 @@ class Game3D {
                             this.citadelGate.advanceState();
                             this.showFloatingText("THRONE GATE OPENED!", 0x39FF14, true);
                             this.showBossDefeatEffect(this.citadelGate.position);
-                            
+
                             // Play triumphant activation sound
                             this.gateActivationSynth.triggerAttackRelease(["C4", "E4", "G4", "C5"], "2n");
-                            
+
                             // Spawn the final boss portal
                             const portal = new Portal3D(this.scene, this.citadelGate.position.clone().add(new THREE.Vector3(0,0,5)), 'thronecap', false);
                             portal.label.visible = false;
@@ -8997,7 +10710,7 @@ class Game3D {
                     this.showProximityPrompt(this.cookingStation, "COOKING STATION (E)");
                     if (this.player.keys.interact) this.showCookingMenu();
                 }
-                
+
                 // Interaction: Bed
                 if (this.placedBeds) {
                     this.placedBeds.forEach(bed => {
@@ -9081,7 +10794,7 @@ class Game3D {
                 }
             }
 
-            // Interaction: Portals (always inspectable — shows region requirements checklist).
+            // Interaction: Portals (always inspectable - shows region requirements checklist).
             if (!this.isInterior) {
                 this.portals.forEach(portal => {
                     portal.update();
@@ -9147,7 +10860,7 @@ class Game3D {
                 // Check collision with Player Body
                 if (ep.mesh.position.distanceTo(this.player.group.position) < 1.2) {
                     this.player.takeDamage(1);
-                    
+
                     // Specific Boss Projectile Effects
                     if (ep.isSilk) {
                         this.showFloatingText("TANGLED!", 0xffffff);
@@ -9169,8 +10882,14 @@ class Game3D {
             // V1.9.20 - Light pool lifetimes + slow ambient cleanse inside their radius.
             this.updateLightPools();
 
-            this.enemies.forEach((enemy) => {
-                enemy.update(this.player.group.position);
+            this.enemies.forEach((enemy, enemyIndex) => {
+                const distSq = enemy.mesh.position.distanceToSquared(this.player.group.position);
+                const shouldFullyUpdate = !this.mobilePerf || distSq < (28 * 28) || ((this._frame + enemyIndex) % 3 === 0);
+                if (shouldFullyUpdate) {
+                    enemy.update(this.player.group.position);
+                }
+                if (this.mobilePerf && distSq > (42 * 42)) return;
+
                 this.player.projectiles.forEach((proj) => {
                     // Check main fireball collision
                     if (proj.coreActive && proj.mesh.position.distanceTo(enemy.mesh.position) < 1.5) {
@@ -9193,8 +10912,6 @@ class Game3D {
                                 if (enemy.takeDamage(particle.userData.damage)) {
                                     deadEnemies.add(enemy);
                                 }
-                                // Small visual for trail hit
-                                const hitColor = 0x39FF14;
                                 particle.scale.set(1.5, 1.5, 1.5);
                                 particle.material.color.setHex(0xffffff);
                             }
@@ -9204,42 +10921,7 @@ class Game3D {
             });
 
             // Cleanup
-            deadEnemies.forEach(enemy => {
-                const index = this.enemies.indexOf(enemy);
-                if (index !== -1) {
-                    if (enemy === this.boss) {
-                        this.showFloatingText(`${this.currentRegion.bossName} DEFEATED!`, 0xffff00, true);
-                        this.spawnDrops(enemy.mesh.position, true); // True for boss drops
-                        this.boss = null;
-                        this.updateHud();
-                        
-                        // Increment shards collected
-                        this.progression.data.shardsCollected = (this.progression.data.shardsCollected || 0) + 1;
-                        // V1.9.18 - Mark this region as conquered so the daily Rot Cycle
-                        // will blight it overnight and require cleansing before progress.
-                        if (this.currentRegion && this.currentRegion.id) {
-                            this.progression.markConquered(this.currentRegion.id);
-                        }
-                        this.progression.save();
-
-                        // Final Boss check
-                        if (enemy.isFinalBoss) {
-                            setTimeout(() => this.triggerNarrativeConclusion(), 2000);
-                        }
-                        
-                        // Unlock next region logic
-                        const currentIndex = CONFIG.REGIONS.findIndex(r => r.id === this.currentRegion.id);
-                        if (currentIndex < CONFIG.REGIONS.length - 1) {
-                            const nextRegion = CONFIG.REGIONS[currentIndex + 1];
-                            this.progression.unlockRegion(nextRegion.id);
-                        }
-                    } else {
-                        this.spawnDrops(enemy.mesh.position);
-                    }
-                    enemy.destroy();
-                    this.enemies.splice(index, 1);
-                }
-            });
+            deadEnemies.forEach(enemy => this.handleEnemyDeath(enemy));
 
             this.collectibles.forEach((col, cIndex) => {
                 col.update();
@@ -9260,7 +10942,7 @@ class Game3D {
                     } else if (col.type === 'GOLDEN_SPORE') {
                         const amount = col.amount || 1;
                         this.progression.addSpores(0, amount);
-                        
+
                         // Update Golden Spore Quest
                         const qs = this.progression.data.quests.goldenSpore;
                         if (qs.active && qs.progress < qs.target) {
@@ -9268,9 +10950,16 @@ class Game3D {
                             this.progression.save();
                             if (qs.progress >= qs.target) {
                                 this.showFloatingText("QUEST COMPLETE!", 0x39FF14, true);
+                                if (this.hasVerifiedWalletSession()) {
+                                    void this.submitProgressionEvent('quest_completed', {
+                                        eventKey: 'quest_completed:golden_spore',
+                                        questId: 'golden_spore',
+                                        metadata: { progress: qs.progress, target: qs.target, title: qs.title }
+                                    });
+                                }
                             }
                         }
-                        
+
                         this.showFloatingText(`+${amount} GOLD!`, 0xffff00);
                     } else if (col.type === 'INGREDIENT') {
                         const amount = col.amount || 1;
@@ -9288,12 +10977,32 @@ class Game3D {
                         this.progression.data.inventory.push('rotSalve');
                         this.progression.save();
                         this.showFloatingText("+1 SALVE!", 0x00ffff);
+                    } else if (col.type === 'CROWN_SHARD') {
+                        this.progression.data.shardsCollected = (this.progression.data.shardsCollected || 0) + 1;
+                        this.progression.save();
+                        if (col.rewardRegionId) this.progression.clearBossReward(col.rewardRegionId, 'shard');
+                        if (this.hasVerifiedWalletSession()) {
+                            void this.submitProgressionEvent('crown_shard_collected', {
+                                eventKey: `crown_shard:${this.currentRegion?.id || 'unknown'}:${this.progression.data.shardsCollected}`,
+                                regionId: this.currentRegion?.id || null,
+                                metadata: {
+                                    rewardRegionId: col.rewardRegionId || null,
+                                    shardsCollected: this.progression.data.shardsCollected || 0
+                                }
+                            });
+                        }
+                        this.showFloatingText('CROWN SHARD RECLAIMED!', 0xffff66, true);
+                        try {
+                            const sting = new TONE.PolySynth({ volume: -8 }).toDestination();
+                            sting.triggerAttackRelease(['C4', 'G4', 'C5', 'E5'], '4n');
+                        } catch (_) {}
                     } else if (col.type === 'KEY_ITEM' && col.keyItemConfig) {
                         // V1.9.12 - Picking up a portal key item adds it to keyItems and immediately
                         // unlocks its target region so the portal becomes interactable.
                         const k = col.keyItemConfig;
                         this.progression.addKeyItem(k.id, 1);
                         this.progression.unlockRegion(k.portalRegion);
+                        if (col.rewardRegionId) this.progression.clearBossReward(col.rewardRegionId, 'keyItem');
                         this.showFloatingText(`+ ${k.name.toUpperCase()}!`, k.color, true);
                         this.showFloatingText("PORTAL UNLOCKED!", 0xffff66, true);
                         // Refresh portals so the visual state (locked → unlocked) updates immediately.
@@ -9313,14 +11022,14 @@ class Game3D {
                     }
                 }
             });
-            
+
         } else if (this.gameState === 'START_SCREEN' || this.gameState === 'PROLOGUE' || this.gameState === 'CLAN_SELECT') {
             const time = Date.now() * 0.0003;
             this.camera.position.x = Math.sin(time) * 50; this.camera.position.z = Math.cos(time) * 50;
             this.camera.position.y = 25; this.camera.lookAt(0, 5, 0);
         }
         if (this.goal) { this.goal.rotation.y += 0.05; this.goal.position.y += Math.sin(Date.now() * 0.002) * 0.02; }
-        
+
         // Animate regional particles (Spores & Environmental Dust)
         if (this.particles) {
             const positions = this.particles.geometry.attributes.position.array;
@@ -9329,7 +11038,7 @@ class Game3D {
                 positions[i] += vels[i];
                 positions[i + 1] += vels[i + 1];
                 positions[i + 2] += vels[i + 2];
-                
+
                 // Reset particles that go too low
                 if (positions[i + 1] < 0) {
                     positions[i + 1] = 50;
@@ -9384,9 +11093,9 @@ class Game3D {
             `;
             this.proximityPrompt.innerHTML = `
                 <div style="
-                    width: 24px; height: 24px; 
-                    background: white; color: black; 
-                    border-radius: 50%; 
+                    width: 24px; height: 24px;
+                    background: white; color: black;
+                    border-radius: 50%;
                     display: flex; align-items: center; justify-content: center;
                     font-size: 14px;
                     box-shadow: 0 0 8px white;
@@ -9444,7 +11153,7 @@ class Game3D {
             this.gameState = 'DIALOGUE';
             const greetings = [
                 "Hello, harvester! The spores are plentiful today.",
-                "Wander gently — the Mycoverse is yours.",
+                "Wander gently - the Mycoverse is yours.",
                 "A bright cap to you, traveler.",
                 "Mind the morning dew on the gold ones.",
                 "No quests today. Just spores. Enjoy them."
@@ -9459,10 +11168,10 @@ class Game3D {
         }
         this.gameState = 'DIALOGUE';
         this.activeDialogue = npc.dialogue || (npc.config.npc ? npc.config.npc.dialogue : null);
-        
+
         if (this.activeDialogue) {
             let startNode = this.activeDialogue.root;
-            
+
             // Dynamic dialogue for Elder Spore based on shards
             if (npc.name === 'Elder Spore') {
                 const shards = this.progression.data.shardsCollected || 0;
@@ -9470,11 +11179,10 @@ class Game3D {
                 else if (shards >= 3) startNode = this.activeDialogue.mid_game || startNode;
                 else if (shards >= 1) startNode = this.activeDialogue.progress1 || startNode;
             } else if (npc.name === 'Nov Sprig') {
-                // If Moldjaw Sentinel is defeated (shard 1 is collected and we are in sporewood)
-                const shards = this.progression.data.shardsCollected || 0;
-                if (shards >= 1) startNode = this.activeDialogue.after_boss || startNode;
+                // If Mossfang Sentinel is defeated in Sporewood, switch to the relief line.
+                if (this.progression.isConquered('sporewood')) startNode = this.activeDialogue.after_boss || startNode;
             }
-            
+
             this.showDialogue(startNode, npc.name);
         } else {
             this.gameState = 'PLAYING';
@@ -9491,7 +11199,7 @@ class Game3D {
             const closedLines = {
                 SHOP:    "The merchant has stepped out. Come back when you choose a quest.",
                 SAVE:    "The inn is quiet today. Sleep is for those who battle the Rot.",
-                STORAGE: "The vault sleeps in collector mode — no need to stash what you'll burn."
+                STORAGE: "The vault sleeps in collector mode - no need to stash what you'll burn."
             };
             const titles = { SHOP: 'Merchant Spore', SAVE: 'Innkeeper Fungus', STORAGE: 'Vaultkeeper Mossbeard' };
             this._renderShopkeeperNode(
@@ -9510,7 +11218,7 @@ class Game3D {
             SHOP: {
                 title: 'Merchant Spore',
                 color: '#66ff88',
-                greeting: "Ah, King Myco! Welcome, welcome. Spores burn bright today — what'll you have? Potions? Salves? A little blessing for the road?",
+                greeting: "Ah, King Myco! Welcome, welcome. Spores burn bright today - what'll you have? Potions? Salves? A little blessing for the road?",
                 options: [
                     { label: '> BROWSE WARES',     action: () => this.showShop() },
                     { label: '> WHAT DO YOU SELL?', next: { text: "Salves to mend your cap, bombs to scatter the Rot, and rare ingredients for the Alchemy Pot. My prices are fair... mostly." } },
@@ -9613,18 +11321,18 @@ class Game3D {
                 </div>
                 <p style="font-size: 11px; color: #aaa; font-style: italic; margin-bottom: 18px;">${reg.subtitle || ''}</p>
 
-                <div style="font-size: 11px; color: ${accentHex}; margin-bottom: 8px;">— REQUIREMENTS —</div>
+                <div style="font-size: 11px; color: ${accentHex}; margin-bottom: 8px;">- REQUIREMENTS -</div>
                 <div style="margin-bottom: 20px;">${reqRows}</div>
 
                 <div style="font-size: 10px; color: #888; margin-bottom: 18px;">
                     Shards Collected: <span style="color: #ffff66;">${shards} / 7</span>
-                    &nbsp;·&nbsp; Region Boss: <span style="color: #ff8888;">${reg.bossName || '—'}</span>
+                    &nbsp;·&nbsp; Region Boss: <span style="color: #ff8888;">${reg.bossName || '-'}</span>
                 </div>
 
                 <div style="display: flex; gap: 10px;">
                     ${isUnlocked
                         ? `<button onclick="window.__portalEnter()" style="flex:1; padding: 12px; background: ${accentHex}; color: black; border: none; font-weight: bold; font-size: 12px; cursor: pointer;">ENTER PORTAL</button>`
-                        : `<button disabled style="flex:1; padding: 12px; background: #222; color: #666; border: 1px dashed #444; font-size: 12px;">SEALED — COMPLETE REQUIREMENTS</button>`
+                        : `<button disabled style="flex:1; padding: 12px; background: #222; color: #666; border: 1px dashed #444; font-size: 12px;">SEALED - COMPLETE REQUIREMENTS</button>`
                     }
                     <button onclick="window.closeDialogue()" style="padding: 12px 18px; background: #1a1a1a; color: white; border: 1px solid #444; font-size: 11px; cursor: pointer;">LEAVE</button>
                 </div>
@@ -9672,7 +11380,7 @@ class Game3D {
         const map = {
             region8:    [{ label: 'Return to King\'s Sanctuary', met: true, progress: 'Always Open' }],
             sporewood:  [keyRow('sporewood'), { label: 'Begin your quest', met: true, progress: 'Tutorial' }],
-            crystalcap: [bossRow('Moldjaw Sentinel',  'Sporewood'),  keyRow('crystalcap'), shardRow(1)],
+            crystalcap: [bossRow('Mossfang Sentinel', 'Sporewood'),  keyRow('crystalcap'), shardRow(1)],
             ambermycel: [bossRow('Shardcap Warden',   'Crystalcap'), keyRow('ambermycel'), shardRow(2)],
             silkspore:  [bossRow('Bogbelly Myconid',  'Ambermycel'), keyRow('silkspore'),  shardRow(3)],
             emberstem:  [bossRow('Widowcap Weaver',   'Silkspore'),  keyRow('emberstem'),  shardRow(4)],
@@ -9726,7 +11434,7 @@ class Game3D {
             }
             this.showFloatingText(`+${loot.amount} XP!`, 0x39FF14, true);
         }
-        
+
         this.updateHud();
         const synth = new TONE.PolySynth().toDestination();
         synth.triggerAttackRelease(["C4", "E4", "G4", "B4"], "4n");
@@ -9877,34 +11585,34 @@ class Game3D {
         this.progression.data.currentRegionId = regionId;
         this.progression.data.playerPosition = null; // Reset position for new region
         this.progression.save();
-        location.reload(); 
+        location.reload();
     }
 
     spawnExplosionParticles(pos, color) {
-        const count = 30;
+        const count = this.mobilePerf ? 14 : 30;
         const geometry = new THREE.BufferGeometry();
         const positions = new Float32Array(count * 3);
         const vels = new Float32Array(count * 3);
-        
+
         for (let i = 0; i < count; i++) {
             positions[i * 3] = pos.x;
             positions[i * 3 + 1] = pos.y + 1;
             positions[i * 3 + 2] = pos.z;
-            
+
             const angle = Math.random() * Math.PI * 2;
             const speed = 0.2 + Math.random() * 0.5;
             vels[i * 3] = Math.cos(angle) * speed;
             vels[i * 3 + 1] = 0.5 + Math.random() * 0.5;
             vels[i * 3 + 2] = Math.sin(angle) * speed;
         }
-        
+
         geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
         const material = new THREE.PointsMaterial({ color: color, size: 0.6, transparent: true, opacity: 1 });
         const points = new THREE.Points(geometry, material);
         this.scene.add(points);
-        
+
         let frames = 0;
-        const maxFrames = 60;
+        const maxFrames = this.mobilePerf ? 36 : 60;
         const animateExplosion = () => {
             frames++;
             const posArray = points.geometry.attributes.position.array;
@@ -9916,7 +11624,7 @@ class Game3D {
             }
             points.geometry.attributes.position.needsUpdate = true;
             points.material.opacity = 1 - (frames / maxFrames);
-            
+
             if (frames < maxFrames) {
                 requestAnimationFrame(animateExplosion);
             } else {
@@ -9929,14 +11637,15 @@ class Game3D {
     }
 
     spawnFootstepParticles(pos, regionId) {
-        const count = 4;
+        if (this.mobilePerf && Math.random() < 0.45) return;
+        const count = this.mobilePerf ? 2 : 4;
         const geometry = new THREE.BufferGeometry();
         const positions = new Float32Array(count * 3);
         const vels = new Float32Array(count * 3);
-        
+
         let color = 0x888888;
         let size = 0.3;
-        
+
         if (regionId === 'crystalcap') color = 0x00ffff;
         else if (regionId === 'emberstem') color = 0xff5500;
         else if (regionId === 'sporewood') color = 0x39FF14;
@@ -9946,21 +11655,21 @@ class Game3D {
             positions[i * 3] = pos.x + (Math.random() - 0.5) * 0.2;
             positions[i * 3 + 1] = pos.y;
             positions[i * 3 + 2] = pos.z + (Math.random() - 0.5) * 0.2;
-            
+
             const angle = Math.random() * Math.PI * 2;
             const speed = 0.05 + Math.random() * 0.1;
             vels[i * 3] = Math.cos(angle) * speed;
             vels[i * 3 + 1] = 0.05 + Math.random() * 0.1;
             vels[i * 3 + 2] = Math.sin(angle) * speed;
         }
-        
+
         geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
         const material = new THREE.PointsMaterial({ color: color, size: size, transparent: true, opacity: 0.8 });
         const points = new THREE.Points(geometry, material);
         this.scene.add(points);
-        
+
         let frames = 0;
-        const maxFrames = 20;
+        const maxFrames = this.mobilePerf ? 12 : 20;
         const animateFootstep = () => {
             frames++;
             const posArray = points.geometry.attributes.position.array;
@@ -9972,7 +11681,7 @@ class Game3D {
             }
             points.geometry.attributes.position.needsUpdate = true;
             points.material.opacity = 0.8 * (1 - (frames / maxFrames));
-            
+
             if (frames < maxFrames) {
                 requestAnimationFrame(animateFootstep);
             } else {
@@ -9984,24 +11693,51 @@ class Game3D {
         animateFootstep();
     }
 
+    showBossSpawnEffect(pos, color = 0xff0055) {
+        for (let i = 0; i < (this.mobilePerf ? 2 : 3); i++) {
+            setTimeout(() => this.spawnExplosionParticles(pos, color), i * 110);
+        }
+
+        if (this.mobilePerf) return;
+
+        const light = new THREE.PointLight(color, 8, 28);
+        light.position.copy(pos).add(new THREE.Vector3(0, 4, 0));
+        this.scene.add(light);
+
+        let intensity = 8;
+        const fadeLight = () => {
+            intensity *= 0.92;
+            light.intensity = intensity;
+            if (intensity > 0.18) {
+                requestAnimationFrame(fadeLight);
+            } else {
+                this.scene.remove(light);
+            }
+        };
+        fadeLight();
+    }
+
     showBossDefeatEffect(pos) {
         // Grand fountain of particles
         const colors = [0x39FF14, 0x00ffff, 0xffff00, 0xff00ff];
-        for (let i = 0; i < 4; i++) {
+        const burstCount = this.mobilePerf ? 2 : 4;
+        for (let i = 0; i < burstCount; i++) {
             setTimeout(() => {
                 this.spawnExplosionParticles(pos, colors[i]);
-                // impactSynth is a NoiseSynth — passing a note as the first arg makes Tone
+                // impactSynth is a NoiseSynth - passing a note as the first arg makes Tone
                 // interpret it as duration and pass null for time, which crashes inside
                 // cancelAndHoldAtTime. NoiseSynth.triggerAttackRelease only takes a duration.
                 try { this.impactSynth.triggerAttackRelease("4n"); } catch (_) {}
             }, i * 300);
         }
 
+        if (this.mobilePerf) return;
+
         // Add a temporary beacon of light
         const light = new THREE.PointLight(0xffffff, 10, 50);
         light.position.copy(pos).add(new THREE.Vector3(0, 5, 0));
         this.scene.add(light);
-        
+
         // Animate beacon out
         let intensity = 10;
         const fadeLight = () => {
@@ -10016,8 +11752,84 @@ class Game3D {
         fadeLight();
     }
 
+    getBossRewardKeyConfig(regionId) {
+        if (!regionId) return null;
+        const currentIndex = CONFIG.REGIONS.findIndex(r => r.id === regionId);
+        const nextRegion = CONFIG.REGIONS[currentIndex + 1];
+        return nextRegion ? ((CONFIG.PORTAL_KEYS || {})[nextRegion.id] || null) : null;
+    }
+
+    spawnBossRewardCollectibles(rewardRegionId, basePos) {
+        if (!rewardRegionId) return;
+        const pending = this.progression.getPendingBossReward(rewardRegionId);
+        if (!pending) return;
+
+        const hasExisting = (rewardType) => this.collectibles.some(col => col && col.rewardRegionId === rewardRegionId && col.rewardType === rewardType);
+
+        if (pending.shard && !hasExisting('shard')) {
+            const shard = new Collectible3D(this.scene, basePos.clone().add(new THREE.Vector3(-1.8, 0, 0.6)), 'CROWN_SHARD');
+            shard.rewardRegionId = rewardRegionId;
+            shard.rewardType = 'shard';
+            this.collectibles.push(shard);
+        }
+
+        const keyCfg = this.getBossRewardKeyConfig(rewardRegionId);
+        if (pending.keyItem && keyCfg && !hasExisting('keyItem')) {
+            const keyDrop = new Collectible3D(this.scene, basePos.clone().add(new THREE.Vector3(1.8, 0, 0.6)), 'KEY_ITEM', null, 1, keyCfg);
+            keyDrop.rewardRegionId = rewardRegionId;
+            keyDrop.rewardType = 'keyItem';
+            this.collectibles.push(keyDrop);
+        }
+    }
+
+    spawnPendingBossRewardsForCurrentRegion() {
+        const regionId = this.currentRegion && this.currentRegion.id;
+        if (!regionId) return;
+        const pending = this.progression.getPendingBossReward(regionId);
+        if (!pending) return;
+
+        const anchor = this.bossDungeon?.arenaPos?.clone() || new THREE.Vector3(0, 0, 55);
+        this.spawnBossRewardCollectibles(regionId, anchor);
+    }
+
+    handleEnemyDeath(enemy) {
+        if (!enemy) return false;
+        const index = this.enemies.indexOf(enemy);
+        if (index === -1) return false;
+
+        const deathPos = enemy.mesh?.position?.clone?.() || new THREE.Vector3();
+        if (enemy.isBoss) {
+            const bossName = (enemy.name || this.currentRegion?.bossName || 'BOSS').toUpperCase();
+            this.showFloatingText(`${bossName} DEFEATED!`, enemy.bossAccent || 0xffff00, true);
+            this.spawnDrops(deathPos, true);
+            this.showFloatingText('SHARD AND FANG DROPPED!', 0xffff66, true);
+            if (this.boss === enemy) this.boss = null;
+            this.updateHud();
+
+            // V1.9.18 - Mark this region as conquered so the daily Rot Cycle
+            // will blight it overnight and require cleansing before progress.
+            if (this.currentRegion && this.currentRegion.id) {
+                this.progression.markConquered(this.currentRegion.id);
+            }
+            this.progression.save();
+
+            if (enemy.isFinalBoss) {
+                setTimeout(() => this.triggerNarrativeConclusion(), 2000);
+            }
+        } else {
+            this.spawnDrops(deathPos);
+        }
+
+        try { enemy.destroy(); } catch (_) {}
+        this.enemies.splice(index, 1);
+        return true;
+    }
+
     spawnDrops(pos, isBoss = false) {
-        const xpAmount = isBoss ? 2000 : 250;
+        const regionId = this.currentRegion && this.currentRegion.id;
+        const territoryEffect = this.getTerritoryGameplayEffect(regionId);
+        const rewardMult = Number(territoryEffect.rewardMult || 1);
+        const xpAmount = Math.max(isBoss ? 2000 : 250, Math.round((isBoss ? 2000 : 250) * rewardMult));
         const xp = new Collectible3D(this.scene, pos.clone(), 'XP', null, xpAmount);
         this.collectibles.push(xp);
 
@@ -10027,15 +11839,12 @@ class Game3D {
         // tutorial-friendly nudge into the world.
         const portalKeys = CONFIG.PORTAL_KEYS || {};
         if (isBoss) {
-            const currentIndex = CONFIG.REGIONS.findIndex(r => r.id === this.currentRegion.id);
-            const nextRegion = CONFIG.REGIONS[currentIndex + 1];
-            const keyCfg = nextRegion ? portalKeys[nextRegion.id] : null;
-            if (keyCfg) {
-                const keyPos = pos.clone().add(new THREE.Vector3(0, 1.5, 0));
-                const keyDrop = new Collectible3D(this.scene, keyPos, 'KEY_ITEM', null, 1, keyCfg);
-                this.collectibles.push(keyDrop);
+            const keyCfg = this.getBossRewardKeyConfig(regionId);
+            if (regionId) {
+                this.progression.queueBossReward(regionId, { shard: true, ...(keyCfg ? { keyItem: keyCfg.id } : {}) });
+                this.spawnBossRewardCollectibles(regionId, pos);
             }
-        } else if (this.currentRegion.id === 'region8') {
+        } else if (regionId === 'region8') {
             // Hub guards have a 30% chance to drop the Mosswood Token if the player hasn't got it.
             const tokenCfg = portalKeys.sporewood;
             const alreadyUnlocked = this.progression.data.unlockedRegions.includes('sporewood');
@@ -10058,7 +11867,8 @@ class Game3D {
             }
 
             // Also drop a bunch of ingredients and loot
-            for (let i = 0; i < 10; i++) {
+            const bonusBossLoot = Math.max(0, Math.round(territoryEffect.extraBossLoot || 0));
+            for (let i = 0; i < 10 + bonusBossLoot; i++) {
                 const angle = Math.random() * Math.PI * 2;
                 const dist = 2 + Math.random() * 5;
                 const offset = new THREE.Vector3(Math.cos(angle) * dist, 0, Math.sin(angle) * dist);
@@ -10082,10 +11892,17 @@ class Game3D {
         } else {
             // Drop Spores or Ingredients
             const rand = Math.random();
-            if (rand > 0.4) {
+            const dropThreshold = Math.max(0.18, 0.4 - Math.max(0, territoryEffect.bonusDropChance || 0));
+            if (rand > dropThreshold) {
                 const type = rand > 0.9 ? 'GOLDEN_SPORE' : (rand > 0.7 ? 'INGREDIENT' : 'LOOT');
                 const loot = new Collectible3D(this.scene, pos.clone().add(new THREE.Vector3(0.5, 0, 0.5)), type, this.selectedClan);
                 this.collectibles.push(loot);
+            }
+
+            if ((territoryEffect.bonusDropChance || 0) > 0 && Math.random() < (territoryEffect.bonusDropChance * 0.5)) {
+                const bonusType = Math.random() > 0.45 ? 'LOOT' : 'INGREDIENT';
+                const bonusLoot = new Collectible3D(this.scene, pos.clone().add(new THREE.Vector3(-0.8, 0, 0.8)), bonusType, this.selectedClan);
+                this.collectibles.push(bonusLoot);
             }
 
             // Rare chance for consumable from regular enemies (5%)
@@ -10100,19 +11917,19 @@ class Game3D {
 
     checkVoidlichenPuzzle() {
         if (this.isPuzzleSolved) return;
-        
+
         const isSolved = this.puzzlePillars.every(p => p.currentValue === p.targetValue);
-        
+
         if (isSolved) {
             this.isPuzzleSolved = true;
             this.showFloatingText("LOGIC GATE RESTORED!", 0xaa00ff, true);
             this.uiSynth.triggerAttackRelease(["C5", "E5", "G5"], "2n");
-            
+
             // Spawn a reward chest
             const chest = new Chest3D(this.scene, new THREE.Vector3(0, 0, 0));
             this.chests.push(chest);
             this.collidables.push(chest.mesh);
-            
+
             // Particle burst
             this.showBurnEffect(100);
         }
@@ -10121,18 +11938,30 @@ class Game3D {
     triggerNarrativeConclusion() {
         this.gameState = 'FINALE';
         this.playEpicMusic('FINALE');
-        
+
         const finalTime = this.thronecapStartTime ? (Date.now() - this.thronecapStartTime) / 1000 : 0;
         const playerName = this.walletAddress ? `Hero_${this.walletAddress.slice(-4)}` : "Anon_King";
-        
+
         if (finalTime > 0) {
             const result = this.leaderboard.addThronecapTime(playerName, finalTime, this.selectedClan, this.currentRunPath);
+            const currentBest = Number(this.progression.data.bestThronecapTime || 0);
+            if (!currentBest || finalTime < currentBest) {
+                this.progression.data.bestThronecapTime = Number(finalTime.toFixed(2));
+                this.progression.save();
+            }
+            if (this.hasVerifiedWalletSession()) {
+                void this.submitRunRecord('thronecap', {
+                    timeSeconds: Number(finalTime.toFixed(2)),
+                    stats: { shardsCollected: this.progression.data.shardsCollected || 0 },
+                    metadata: { clanId: this.selectedClan, path: this.currentRunPath }
+                });
+            }
             if (result.isTop10) {
                 const clanColor = this.getClanColor(this.selectedClan);
                 this.showGlobalNotification(`NEW THRONE CAP RECORD: ${playerName} (${this.selectedClan.toUpperCase()}) ranked #${result.rank} with ${finalTime.toFixed(2)}s!`, clanColor);
             }
         }
-        
+
         this.uiOverlay.innerHTML = `
             <div style="pointer-events: auto; background: rgba(0,0,0,0.95); padding: 50px; border: 4px solid #39FF14; text-align: center; width: 80%; max-width: 800px; animation: fadeIn 2s; max-height: 90vh; overflow-y: auto;">
                 <h1 class="neon-text" style="color: #39FF14; font-size: 32px; margin-bottom: 30px;">NETWORK RESTORED</h1>
@@ -10142,7 +11971,7 @@ class Game3D {
                     The Solana network heart stabilizes. The Mycoverse is saved.<br>
                     You have ascended, King Myco. The true Restoration has begun.
                 </p>
-                
+
                 <div style="background: rgba(0,255,0,0.1); padding: 20px; border: 1px dashed #39FF14; margin-bottom: 20px;">
                     <p style="color: #39FF14; font-size: 12px; margin-bottom: 10px;">CITADEL COMPLETION TIME: <span style="color: #fff; font-weight: bold;">${finalTime.toFixed(2)}s</span></p>
                     <p style="color: #39FF14; font-size: 10px;">FINAL SCORE: ${this.progression.data.level * 1000 + this.progression.data.blueSpores} SP</p>
@@ -10182,7 +12011,7 @@ class Game3D {
         const timeTaken = (Date.now() - this.startTime) / 1000;
         const score = Math.max(10, Math.floor(1000 - timeTaken));
         const playerName = this.walletAddress ? `Hero_${this.walletAddress.slice(-4)}` : "Anon_King";
-        
+
         // Collect stats for leaderboard
         const stats = {
             alignment: this.player.alignment,
@@ -10193,11 +12022,19 @@ class Game3D {
         };
 
         const result = this.leaderboard.addScore(playerName, score, this.selectedClan, stats);
+        this.progression.data.bestScore = Math.max(this.progression.data.bestScore || 0, score);
         if (result.isTopScore) {
             this.showGlobalNotification(`NEW HIGH SCORE: ${playerName} (${this.selectedClan.toUpperCase()}) ranked #${result.rank} with ${score} SP!`, this.getClanColor(this.selectedClan));
         }
         const leveledUp = this.progression.addXp(score * 2);
         this.saveGame(); // Auto-save on victory
+        if (this.hasVerifiedWalletSession()) {
+            void this.submitRunRecord('victory', {
+                score,
+                stats,
+                metadata: { clanId: this.selectedClan, timeTaken: Number(timeTaken.toFixed(2)), lootCount: this.lootCount }
+            });
+        }
 
         this.uiOverlay.innerHTML = `
             <div style="background: rgba(0,0,0,0.9); padding: 50px; border: 4px solid #ffff00; border-radius: 15px; text-align: center; box-shadow: 0 0 40px #ffff00; pointer-events: auto;">
@@ -10205,7 +12042,7 @@ class Game3D {
                 <p style="font-size: 14px; margin-bottom: 10px; color: #39FF14;">+${score * 2} XP Gained</p>
                 <p style="font-size: 14px; margin-bottom: 20px; color: #ffff00;">Loot Collected: ${this.lootCount}</p>
                 <p style="font-size: 18px; color: #39FF14; margin-bottom: 30px;">SCORE: ${score} SP</p>
-                
+
                 <div style="display: flex; gap: 20px; justify-content: center;">
                     <button onclick="location.reload()" style="padding: 15px 30px; background: #ffff00; border: none; color: black; font-size: 12px;">ASCEND AGAIN</button>
                     <button id="view-hall" style="padding: 15px 30px; background: #00ffff; border: none; color: black; font-size: 12px;">VIEW HALL</button>
@@ -10216,11 +12053,11 @@ class Game3D {
     }
 }
 
-// V1.9.35 — Bulletproof bootstrap for mobile / in-app webviews (Telegram, etc.).
+// V1.9.35 - Bulletproof bootstrap for mobile / in-app webviews (Telegram, etc.).
 // Two problems we're solving:
 //   1) On older iOS WebKit (Telegram's webview is roughly Safari 15-era and is
 //      known to silently fail on certain ESM patterns), errors thrown during
-//      module evaluation or in the Game3D constructor never reach the user —
+//      module evaluation or in the Game3D constructor never reach the user -
 //      they just see a black screen.
 //   2) `new Game3D()` at module top level was running before DOMContentLoaded
 //      in some cases, racing with #game-container being available.
@@ -10238,20 +12075,34 @@ const _showBootError = (where, err) => {
             panel = document.createElement('div');
             panel.id = 'boot-error-panel';
             panel.style.cssText = [
-                'position:fixed', 'top:0', 'left:0', 'right:0', 'bottom:0',
-                'background:#0a0010', 'color:#ff7777',
+                'position:fixed', 'inset:0', 'display:flex', 'align-items:flex-start', 'justify-content:center',
+                'background:rgba(10,0,16,0.96)', 'color:#ff7777',
                 'font-family:monospace', 'font-size:12px', 'line-height:1.5',
-                'padding:20px', 'overflow-y:auto',
-                'z-index:2147483647', 'box-sizing:border-box',
+                'padding:calc(12px + env(safe-area-inset-top, 0px)) calc(12px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(12px + env(safe-area-inset-left, 0px))',
+                'overflow-y:auto', 'z-index:2147483647', 'box-sizing:border-box',
                 '-webkit-overflow-scrolling:touch'
             ].join(';');
             (document.body || document.documentElement).appendChild(panel);
         }
-        const msg = (err && (err.stack || err.message)) || String(err);
+        panel.innerHTML = '';
+        const shell = document.createElement('div');
+        shell.style.cssText = 'width:min(100%, 560px); display:flex; flex-direction:column; gap:12px; margin:0 auto;';
+        const controls = document.createElement('div');
+        controls.style.cssText = 'display:flex; gap:10px; flex-wrap:wrap;';
+        controls.innerHTML = ''
+            + '<button id="runtime-reload" style="flex:1; min-width:140px; min-height:44px; border:none; border-radius:10px; background:#39FF14; color:#081007; font-weight:700; cursor:pointer;">Reload</button>'
+            + '<button id="runtime-dismiss" style="flex:1; min-width:140px; min-height:44px; border:1px solid rgba(255,255,255,0.22); border-radius:10px; background:rgba(255,255,255,0.08); color:#fff; font-weight:700; cursor:pointer;">Dismiss</button>';
         const block = document.createElement('div');
-        block.style.cssText = 'margin-bottom:16px; padding:12px; border:1px solid #ff3344; border-radius:6px; background:rgba(255,0,0,0.08); white-space:pre-wrap; word-break:break-word;';
-        block.innerHTML = `<div style="color:#ffcc00; font-weight:bold; margin-bottom:6px;">⚠ ${where}</div><div>${msg.replace(/</g, '&lt;')}</div>`;
-        panel.appendChild(block);
+        block.style.cssText = 'padding:14px; border:1px solid #ff3344; border-radius:10px; background:rgba(255,0,0,0.08); white-space:pre-wrap; word-break:break-word; overflow-wrap:anywhere;';
+        const msg = (err && (err.stack || err.message)) || String(err);
+        block.innerHTML = `<div style="color:#ffcc00; font-weight:bold; margin-bottom:8px; font-size:13px;">⚠ ${where}</div><div>${msg.replace(/</g, '&lt;')}</div>`;
+        shell.appendChild(controls);
+        shell.appendChild(block);
+        panel.appendChild(shell);
+        const reloadBtn = controls.querySelector('#runtime-reload');
+        if (reloadBtn) reloadBtn.onclick = () => window.location.reload();
+        const dismissBtn = controls.querySelector('#runtime-dismiss');
+        if (dismissBtn) dismissBtn.onclick = () => panel.remove();
         // Also log to console so check_runtime sees it.
         console.error('[BOOT ERROR]', where, err);
     } catch (_) { /* never let the error reporter throw */ }
@@ -10267,6 +12118,11 @@ window.addEventListener('unhandledrejection', (e) => {
 const _boot = () => {
     try {
         new Game3D();
+        try {
+            if (typeof window.__MYCO_MARK_BOOT_OK === 'function') {
+                window.__MYCO_MARK_BOOT_OK();
+            }
+        } catch (_) {}
     } catch (err) {
         _showBootError('Game3D constructor', err);
     }
@@ -10276,7 +12132,7 @@ if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', _boot, { once: true });
 } else {
     // DOM is already parsed (which is the case when this module finishes loading
-    // since modules are deferred by default) — boot on the next microtask so
+    // since modules are deferred by default) - boot on the next microtask so
     // module evaluation can finish first.
     Promise.resolve().then(_boot);
 }

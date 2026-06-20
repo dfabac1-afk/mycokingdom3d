@@ -42,6 +42,14 @@ function createToneNode(factory) {
     }
 }
 
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+const ENEMY_TRAIL_GEOMETRY = new THREE.BoxGeometry(0.16, 0.16, 0.42);
+const FIREBALL_TRAIL_GEOMETRIES = {
+    default: new THREE.BoxGeometry(0.2, 0.2, 0.4),
+    rootbind: new THREE.BoxGeometry(0.26, 0.26, 0.52),
+    crownflare: new THREE.BoxGeometry(0.34, 0.34, 0.952)
+};
+
 export class Enemy3D {
     constructor(scene, position, regionConfig = null) {
         this.scene = scene;
@@ -117,13 +125,20 @@ export class Enemy3D {
         this.lastShootTime = 0;
         this.shootCooldown = 2000 + Math.random() * 2000;
         this.knockbackVelocity = new THREE.Vector3();
+        this.hitReact = 0;
+        this.hitTilt = 0;
+        this._tmpDir = new THREE.Vector3();
+        this._tmpToCluster = new THREE.Vector3();
+        this._tmpRepel = new THREE.Vector3();
+        this._tmpSpawnPos = new THREE.Vector3();
     }
 
     update(playerPos) {
-        const dist = this.mesh.position.distanceTo(playerPos);
+        this.updateHitReaction();
+        const distSq = this.mesh.position.distanceToSquared(playerPos);
         
         // Apply knockback friction
-        if (this.knockbackVelocity.length() > 0.01) {
+        if (this.knockbackVelocity.lengthSq() > 0.0001) {
             this.mesh.position.add(this.knockbackVelocity);
             this.knockbackVelocity.multiplyScalar(0.9);
         } else {
@@ -138,29 +153,32 @@ export class Enemy3D {
 
         const currentSpeed = this.baseSpeed * this.slowFactor;
 
-        if (dist < this.detectionRange) {
+        if (distSq < this.detectionRange * this.detectionRange) {
             this.state = 'CHASE';
-            let dir = new THREE.Vector3().subVectors(playerPos, this.mesh.position).normalize();
+            const dir = this._tmpDir.subVectors(playerPos, this.mesh.position);
             dir.y = 0;
+            if (dir.lengthSq() > 0.0001) dir.normalize();
 
             // Simple Obstacle Avoidance
             if (window.game && window.game.rotClusters) {
                 window.game.rotClusters.forEach(cluster => {
                     if (!cluster.mesh) return;
-                    const toCluster = new THREE.Vector3().subVectors(cluster.mesh.position, this.mesh.position);
-                    const clusterDist = toCluster.length();
-                    if (clusterDist < (this.radius + cluster.radius + 1)) {
+                    const toCluster = this._tmpToCluster.subVectors(cluster.mesh.position, this.mesh.position);
+                    const clusterDistSq = toCluster.lengthSq();
+                    const minDist = this.radius + cluster.radius + 1;
+                    if (clusterDistSq > 0.0001 && clusterDistSq < minDist * minDist) {
                         // Repel from cluster
-                        const repel = toCluster.normalize().multiplyScalar(-1.5 / clusterDist);
-                        dir.add(repel).normalize();
+                        const clusterDist = Math.sqrt(clusterDistSq);
+                        this._tmpRepel.copy(toCluster).multiplyScalar(-1 / clusterDist).multiplyScalar(1.5 / clusterDist);
+                        dir.add(this._tmpRepel).normalize();
                     }
                 });
             }
 
-            this.mesh.position.add(dir.multiplyScalar(currentSpeed));
+            this.mesh.position.addScaledVector(dir, currentSpeed);
             this.mesh.lookAt(playerPos.x, this.mesh.position.y, playerPos.z);
 
-            if (dist < this.shootRange) {
+            if (distSq < this.shootRange * this.shootRange) {
                 const now = Date.now();
                 if (now - this.lastShootTime > this.shootCooldown) {
                     this.lastShootTime = now;
@@ -177,23 +195,30 @@ export class Enemy3D {
     }
 
     applyKnockback(direction, force) {
-        this.knockbackVelocity.add(direction.clone().multiplyScalar(force));
+        this.knockbackVelocity.addScaledVector(direction, force);
     }
 
     shoot(playerPos) {
-        const dir = new THREE.Vector3().subVectors(playerPos, this.mesh.position).normalize();
-        dir.y = 0; // Shoot horizontally
-        const spawnPos = this.mesh.position.clone().add(new THREE.Vector3(0, 1.2, 0)).add(dir.clone().multiplyScalar(1));
+        const dir = this._tmpDir.subVectors(playerPos, this.mesh.position);
+        dir.y = 0;
+        if (dir.lengthSq() > 0.0001) dir.normalize();
+        const spawnPos = this._tmpSpawnPos.copy(this.mesh.position);
+        spawnPos.y += 1.2;
+        spawnPos.addScaledVector(dir, 1);
         const projectile = new EnemyProjectile3D(this.scene, spawnPos, dir);
         if (window.game) window.game.enemyProjectiles.push(projectile);
     }
 
     takeDamage(amount) {
         this.hp -= amount;
+
+        const impact = Math.min(this.isBoss ? 1.2 : 0.9, 0.16 + amount * 0.045);
+        this.hitReact = Math.max(this.hitReact || 0, impact);
+        this.hitTilt = (Math.random() > 0.5 ? 1 : -1) * (this.isBoss ? 1.1 : 0.8);
         
         // Play wet squish sound for enemies (Rot based)
         if (window.game && window.game.impactSynth && typeof window.game.impactSynth.triggerAttackRelease === 'function') {
-            window.game.impactSynth.triggerAttackRelease("16n");
+            try { window.game.impactSynth.triggerAttackRelease("16n"); } catch (_) {}
         }
 
         // Kinetic Hit Stop (if it's a significant hit or boss)
@@ -219,6 +244,38 @@ export class Enemy3D {
             }
         });
         return this.hp <= 0;
+    }
+
+    updateHitReaction() {
+        if (!this.mesh) return;
+
+        if (!this._restScale) this._restScale = this.mesh.scale.clone();
+        if (this._restTiltX === undefined) this._restTiltX = this.mesh.rotation.x;
+        if (this._restTiltZ === undefined) this._restTiltZ = this.mesh.rotation.z;
+
+        const react = this.hitReact || 0;
+        const targetScaleX = this._restScale.x * (1 + react * 0.12);
+        const targetScaleY = this._restScale.y * (1 - react * 0.1);
+        const targetScaleZ = this._restScale.z * (1 + react * 0.16);
+        this.mesh.scale.x = THREE.MathUtils.lerp(this.mesh.scale.x, targetScaleX, 0.34);
+        this.mesh.scale.y = THREE.MathUtils.lerp(this.mesh.scale.y, targetScaleY, 0.34);
+        this.mesh.scale.z = THREE.MathUtils.lerp(this.mesh.scale.z, targetScaleZ, 0.34);
+
+        const tiltZ = this._restTiltZ + (this.hitTilt || 0) * react * 0.18;
+        const tiltX = this._restTiltX - react * 0.08;
+        this.mesh.rotation.z = THREE.MathUtils.lerp(this.mesh.rotation.z, tiltZ, 0.28);
+        this.mesh.rotation.x = THREE.MathUtils.lerp(this.mesh.rotation.x, tiltX, 0.28);
+
+        if (react > 0.001) {
+            this.hitReact *= 0.8;
+            this.hitTilt *= 0.88;
+        } else {
+            this.hitReact = 0;
+            this.hitTilt = 0;
+            this.mesh.scale.lerp(this._restScale, 0.18);
+            this.mesh.rotation.z = THREE.MathUtils.lerp(this.mesh.rotation.z, this._restTiltZ, 0.18);
+            this.mesh.rotation.x = THREE.MathUtils.lerp(this.mesh.rotation.x, this._restTiltX, 0.18);
+        }
     }
 
     destroy() {
@@ -597,22 +654,58 @@ export class Boss3D extends Enemy3D {
         this.speed = 0.02; // Slower movement
         this.baseSpeed = this.speed;
         this.bossState = 'INTRO';
+        this.spawnedAt = performance.now ? performance.now() : Date.now();
         this.attackTimer = 0;
         this.phase = 1;
         this.phaseTransitioning = false;
+        this.bossAccent = (regionConfig && (regionConfig.bossTint || regionConfig.accent)) || 0xff0055;
+        this.isMobileFx = !!(window.game && window.game.isMobile);
+
+        if (!this.isMobileFx) {
+            const sigilGeo = new THREE.RingGeometry(2.15, 2.55, 48);
+            const sigilMat = new THREE.MeshBasicMaterial({
+                color: this.bossAccent,
+                transparent: true,
+                opacity: 0.45,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            this.presentationRing = new THREE.Mesh(sigilGeo, sigilMat);
+            this.presentationRing.rotation.x = -Math.PI / 2;
+            this.presentationRing.position.set(position.x, 0.08, position.z);
+            this.scene.add(this.presentationRing);
+        }
         
         // Remove existing enemy parts to rebuild boss specific ones
         while(this.mesh.children.length > 0){
             this.mesh.remove(this.mesh.children[0]);
         }
 
-        if (regionConfig.id === 'crystalcap') {
+        if (regionConfig.id === 'sporewood') {
+            this.setupSporewoodBoss();
+        } else if (regionConfig.id === 'crystalcap') {
             this.setupCrystalcapBoss();
         } else if (regionConfig.id === 'emberstem') {
             this.setupEmberstemBoss();
         } else {
             // Default giant rot boss
             this.setupDefaultBoss();
+        }
+
+        if (!this.isMobileFx) {
+            const crownGeo = new THREE.TorusGeometry(1.35, 0.06, 10, 42);
+            const crownMat = new THREE.MeshStandardMaterial({
+                color: this.bossAccent,
+                emissive: this.bossAccent,
+                emissiveIntensity: 1.5,
+                transparent: true,
+                opacity: 0.72,
+                depthWrite: false
+            });
+            this.presentationCrown = new THREE.Mesh(crownGeo, crownMat);
+            this.presentationCrown.rotation.x = Math.PI / 2;
+            this.presentationCrown.position.y = 2.25;
+            this.mesh.add(this.presentationCrown);
         }
     }
 
@@ -665,6 +758,119 @@ export class Boss3D extends Enemy3D {
         this.mesh.add(vein);
     }
 
+    setupSporewoodBoss() {
+        const barkMat = new THREE.MeshStandardMaterial({ color: 0x4a2d18, roughness: 1 });
+        const mossMat = new THREE.MeshStandardMaterial({ color: 0x315c25, emissive: 0x1d4318, emissiveIntensity: 0.45, roughness: 0.9 });
+        const rotMat = new THREE.MeshStandardMaterial({ color: 0x6f1a5e, emissive: 0xaa00ff, emissiveIntensity: 1.4, roughness: 0.7 });
+
+        const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 1.35, 4.5, 10), barkMat);
+        trunk.position.y = 2.15;
+        this.mesh.add(trunk);
+        this.trunk = trunk;
+
+        const canopy = new THREE.Mesh(new THREE.SphereGeometry(2.35, 10, 8), mossMat);
+        canopy.position.y = 4.65;
+        canopy.scale.set(1.05, 0.85, 0.98);
+        this.mesh.add(canopy);
+        this.canopy = canopy;
+
+        for (let i = 0; i < 4; i++) {
+            const angle = (i / 4) * Math.PI * 2 + 0.35;
+            const root = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.28, 2.2, 6), barkMat);
+            root.position.set(Math.cos(angle) * 0.9, 0.6, Math.sin(angle) * 0.9);
+            root.rotation.z = Math.cos(angle) * 0.65;
+            root.rotation.x = Math.sin(angle) * 0.35;
+            this.mesh.add(root);
+        }
+
+        const branchGeo = new THREE.CylinderGeometry(0.16, 0.28, 2.9, 6);
+        const leftArm = new THREE.Mesh(branchGeo, barkMat);
+        leftArm.position.set(-1.45, 2.95, 0.15);
+        leftArm.rotation.z = 1.05;
+        leftArm.rotation.y = 0.35;
+        this.mesh.add(leftArm);
+        this.leftArm = leftArm;
+
+        const rightArm = new THREE.Mesh(branchGeo, barkMat);
+        rightArm.position.set(1.45, 2.95, 0.15);
+        rightArm.rotation.z = -1.05;
+        rightArm.rotation.y = -0.35;
+        this.mesh.add(rightArm);
+        this.rightArm = rightArm;
+
+        const clawGeo = new THREE.ConeGeometry(0.14, 0.55, 5);
+        for (const [arm, side] of [[leftArm, -1], [rightArm, 1]]) {
+            for (let i = 0; i < 3; i++) {
+                const claw = new THREE.Mesh(clawGeo, rotMat);
+                claw.position.set(side * (0.18 + i * 0.12), 1.32, -0.02 + i * 0.08);
+                claw.rotation.z = side * (Math.PI / 2);
+                claw.rotation.x = Math.PI / 2;
+                arm.add(claw);
+            }
+        }
+
+        const face = new THREE.Mesh(
+            new THREE.BoxGeometry(1.55, 1.45, 0.26),
+            new THREE.MeshStandardMaterial({ color: 0x21120a, emissive: 0x120906, emissiveIntensity: 0.4 })
+        );
+        face.position.set(0, 2.7, 1.07);
+        this.mesh.add(face);
+        this.faceMask = face;
+
+        const browGeo = new THREE.BoxGeometry(0.42, 0.1, 0.1);
+        const eyeMat = new THREE.MeshStandardMaterial({ color: 0xff2200, emissive: 0xff2200, emissiveIntensity: 3 });
+        const leftBrow = new THREE.Mesh(browGeo, barkMat);
+        leftBrow.position.set(-0.34, 3.02, 1.2);
+        leftBrow.rotation.z = -0.35;
+        this.mesh.add(leftBrow);
+        const rightBrow = leftBrow.clone();
+        rightBrow.position.x = 0.34;
+        rightBrow.rotation.z = 0.35;
+        this.mesh.add(rightBrow);
+
+        const eyeGeo = new THREE.BoxGeometry(0.18, 0.18, 0.1);
+        const leftEye = new THREE.Mesh(eyeGeo, eyeMat);
+        leftEye.position.set(-0.3, 2.8, 1.22);
+        this.mesh.add(leftEye);
+        const rightEye = new THREE.Mesh(eyeGeo, eyeMat);
+        rightEye.position.set(0.3, 2.8, 1.22);
+        this.mesh.add(rightEye);
+        this.treeEyes = [leftEye, rightEye];
+
+        const mouth = new THREE.Mesh(
+            new THREE.BoxGeometry(0.85, 0.24, 0.14),
+            new THREE.MeshStandardMaterial({ color: 0x080808, emissive: 0x28000e, emissiveIntensity: 1 })
+        );
+        mouth.position.set(0, 2.25, 1.18);
+        this.mesh.add(mouth);
+        this.mouth = mouth;
+
+        const fangMat = new THREE.MeshStandardMaterial({ color: 0xf2f0de, emissive: 0x886666, emissiveIntensity: 0.55 });
+        const leftFang = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.68, 6), fangMat);
+        leftFang.position.set(-0.24, 1.9, 1.22);
+        leftFang.rotation.x = Math.PI;
+        this.mesh.add(leftFang);
+        const rightFang = leftFang.clone();
+        rightFang.position.x = 0.24;
+        this.mesh.add(rightFang);
+        this.fangs = [leftFang, rightFang];
+
+        for (let i = 0; i < 5; i++) {
+            const knot = new THREE.Mesh(new THREE.SphereGeometry(0.18 + Math.random() * 0.12, 8, 8), rotMat);
+            knot.position.set((Math.random() - 0.5) * 1.6, 1.2 + Math.random() * 2.8, 0.75 + Math.random() * 0.35);
+            this.mesh.add(knot);
+        }
+
+        const rotHalo = new THREE.Mesh(
+            new THREE.TorusGeometry(2.05, 0.14, 10, 30),
+            new THREE.MeshBasicMaterial({ color: 0xaa00ff, transparent: true, opacity: 0.22, depthWrite: false })
+        );
+        rotHalo.rotation.x = Math.PI / 2;
+        rotHalo.position.y = 0.25;
+        this.mesh.add(rotHalo);
+        this.rotHalo = rotHalo;
+    }
+
     setupDefaultBoss() {
         const geo = new THREE.BoxGeometry(2, 4, 2);
         const mat = new THREE.MeshStandardMaterial({ color: 0xff0000 });
@@ -682,6 +888,26 @@ export class Boss3D extends Enemy3D {
     // onPhaseTransition() is defined below with the V1.9.15 rot-bloom shield added.
 
     update(playerPos) {
+        const now = performance.now ? performance.now() : Date.now();
+        const introT = Math.min(1, (now - this.spawnedAt) / 1100);
+        this.bossState = introT < 1 ? 'INTRO' : 'ENGAGED';
+
+        if (this.presentationRing) {
+            const pulse = 1 + Math.sin(Date.now() * 0.006) * 0.05;
+            const introScale = 0.65 + introT * 0.35;
+            this.presentationRing.position.x = this.mesh.position.x;
+            this.presentationRing.position.z = this.mesh.position.z;
+            this.presentationRing.rotation.z += 0.01;
+            this.presentationRing.scale.setScalar(pulse * introScale);
+            this.presentationRing.material.opacity = 0.2 + introT * 0.3 + Math.sin(Date.now() * 0.01) * 0.04;
+        }
+        if (this.presentationCrown) {
+            this.presentationCrown.rotation.z += 0.01;
+            this.presentationCrown.position.y = 2.15 + Math.sin(Date.now() * 0.005) * 0.12;
+            const crownScale = 0.92 + introT * 0.1;
+            this.presentationCrown.scale.setScalar(crownScale);
+        }
+
         this.checkPhaseTransition();
         if (this.phaseTransitioning) return;
         this.updateShield();
@@ -737,7 +963,7 @@ export class Boss3D extends Enemy3D {
     onPhaseTransition() {
         // V1.9.15 - Generic boss phase-2 entry: brief 3s "rot-bloom" self-shield while a
         // telegraphed spore ring blooms around the boss, telling the player to back off.
-        const accent = (this.regionConfig && this.regionConfig.accent) || 0xaa00ff;
+        const accent = (this.regionConfig && (this.regionConfig.bossTint || this.regionConfig.accent)) || 0xaa00ff;
         if (window.game) {
             window.game.showFloatingText("PHASE 2: THE ROT SPREADS!", 0xaa00ff, true);
             const rotFloorGeo = new THREE.CircleGeometry(15, 32);
@@ -845,10 +1071,17 @@ export class Boss3D extends Enemy3D {
             try {
                 if (window.game && window.game.uiSynth) window.game.uiSynth.triggerAttackRelease('A5', '32n');
             } catch (_) {}
-            if (window.game) window.game.showFloatingText('SHIELDED!', 0xffff66, false);
-            return; // Absorb damage entirely.
+            if (window.game) {
+                window.game.showFloatingText('SHIELDED!', 0xffff66, false);
+                if (typeof window.game.markBossDamage === 'function') window.game.markBossDamage(this, amount, true);
+            }
+            return false; // Absorb damage entirely.
         }
-        super.takeDamage(amount);
+        const dead = super.takeDamage(amount);
+        if (window.game && typeof window.game.markBossDamage === 'function') {
+            window.game.markBossDamage(this, amount, false);
+        }
+        return dead;
     }
 
     // Wrap the boss in a glowing dome that pulses; auto-clears after durationMs OR
@@ -857,6 +1090,7 @@ export class Boss3D extends Enemy3D {
         // If already shielded, refresh the expiry/color/reason rather than no-op.
         if (this.shielded) {
             this.shieldExpiresAt = Date.now() + durationMs;
+            this.shieldReason = reason || this.shieldReason || 'shielded';
             if (this.shieldMesh && this.shieldMesh.material) {
                 this.shieldMesh.material.color.setHex(color || 0xffff66);
                 this.shieldMesh.material.emissive.setHex(color || 0xffff66);
@@ -866,6 +1100,7 @@ export class Boss3D extends Enemy3D {
         this.shielded = true;
         this.shieldExpiresAt = Date.now() + durationMs;
         this.shieldColor = color || 0xffff66;
+        this.shieldReason = reason || 'shielded';
         const c = this.shieldColor;
         const geo = new THREE.SphereGeometry(2.4, 16, 12);
         const mat = new THREE.MeshStandardMaterial({
@@ -884,6 +1119,7 @@ export class Boss3D extends Enemy3D {
     dropShield() {
         if (!this.shielded) return;
         this.shielded = false;
+        this.shieldReason = null;
         if (this.shieldMesh) {
             const m = this.shieldMesh;
             try { this.mesh.remove(m); m.geometry.dispose(); m.material.dispose(); } catch (_) {}
@@ -915,12 +1151,33 @@ export class Boss3D extends Enemy3D {
         }
     }
 
+    destroy() {
+        if (this.presentationRing) {
+            try {
+                this.scene.remove(this.presentationRing);
+                this.presentationRing.geometry.dispose();
+                this.presentationRing.material.dispose();
+            } catch (_) {}
+            this.presentationRing = null;
+        }
+        if (this.rotFloor) {
+            try {
+                this.scene.remove(this.rotFloor);
+                this.rotFloor.geometry.dispose();
+                this.rotFloor.material.dispose();
+            } catch (_) {}
+            this.rotFloor = null;
+        }
+        super.destroy();
+    }
+
     // Telegraphed AoE spore burst. Draws an expanding ring on the ground at `pos`
     // for `telegraphMs`, then detonates: damages the player if inside `radius` and
     // plays a green spore burst. Returns the ring mesh so callers can color it.
     spawnAoESpore(pos, radius = 6, telegraphMs = 900, damage = 1.0, color = 0x39FF14) {
         if (!window.game) return null;
-        const ringGeo = new THREE.RingGeometry(radius - 0.4, radius, 48);
+        const perfMobile = !!(window.game && (window.game.mobilePerf || window.game.isMobile));
+        const ringGeo = new THREE.RingGeometry(radius - 0.4, radius, perfMobile ? 24 : 48);
         const ringMat = new THREE.MeshBasicMaterial({
             color: color, transparent: true, opacity: 0.65,
             side: THREE.DoubleSide, depthWrite: false
@@ -931,7 +1188,7 @@ export class Boss3D extends Enemy3D {
         this.scene.add(ring);
 
         // Inner fill that grows during the telegraph.
-        const fillGeo = new THREE.CircleGeometry(radius, 48);
+        const fillGeo = new THREE.CircleGeometry(radius, perfMobile ? 24 : 48);
         const fillMat = new THREE.MeshBasicMaterial({
             color: color, transparent: true, opacity: 0.15,
             side: THREE.DoubleSide, depthWrite: false
@@ -1075,7 +1332,9 @@ export class BogbellyMyconid3D extends Boss3D {
         // Move towards player quickly during leap
         const dir = new THREE.Vector3().subVectors(playerPos, this.mesh.position).normalize();
         this.knockbackVelocity.add(dir.multiplyScalar(0.8));
-        if (window.game) window.game.impactSynth.triggerAttackRelease("8n");
+        if (window.game && window.game.impactSynth) {
+            try { window.game.impactSynth.triggerAttackRelease("8n"); } catch (_) {}
+        }
     }
 
     amberSlam() {
@@ -1406,16 +1665,20 @@ export class SporeBomb3D {
             window.game.enemies.forEach(enemy => {
                 const dist = enemy.mesh.position.distanceTo(this.mesh.position);
                 if (dist < this.radius) {
-                    enemy.takeDamage(25);
-                    // Strong knockback
-                    const dir = new THREE.Vector3().subVectors(enemy.mesh.position, this.mesh.position).normalize();
-                    enemy.applyKnockback(dir, 1.2);
+                    const isDead = enemy.takeDamage(25);
+                    if (isDead) {
+                        if (typeof window.game.handleEnemyDeath === 'function') window.game.handleEnemyDeath(enemy);
+                    } else {
+                        // Strong knockback
+                        const dir = new THREE.Vector3().subVectors(enemy.mesh.position, this.mesh.position).normalize();
+                        enemy.applyKnockback(dir, 1.2);
+                    }
                 }
             });
             
             // Explosion sound
             if (window.game.impactSynth && typeof window.game.impactSynth.triggerAttackRelease === 'function') {
-                window.game.impactSynth.triggerAttackRelease("4n");
+                try { window.game.impactSynth.triggerAttackRelease("4n"); } catch (_) {}
             }
         }
 
@@ -1571,7 +1834,9 @@ export class Hazard3D {
                 this.timer = 0;
                 this.ventMat.emissiveIntensity = 10;
                 this.light.intensity = 15;
-                if (window.game && window.game.impactSynth) window.game.impactSynth.triggerAttackRelease("16n");
+                if (window.game && window.game.impactSynth) {
+                    try { window.game.impactSynth.triggerAttackRelease("16n"); } catch (_) {}
+                }
             }
             
             if (this.active) {
@@ -2070,8 +2335,13 @@ export class Portal3D {
         this.isLocked = isLocked;
         this.mesh = new THREE.Group();
 
-        const regionConfig = CONFIG.REGIONS.find(r => r.id === regionId) || { accent: 0x00ffff, name: 'Unknown' };
-        const color = isLocked ? 0x222222 : regionConfig.accent;
+        this.regionConfig = CONFIG.REGIONS.find(r => r.id === regionId) || { accent: 0x00ffff, name: 'Unknown' };
+        this.baseColor = this.regionConfig.accent;
+        this.displayColor = this.baseColor;
+        this.labelBorderColor = '#39FF14';
+        this.labelTextColor = '#ffffff';
+        this.territoryText = null;
+        const color = isLocked ? 0x222222 : this.baseColor;
         
         // Frame - Larger and more prominent
         const ringGeo = new THREE.TorusGeometry(3.5, 0.3, 16, 64);
@@ -2099,17 +2369,17 @@ export class Portal3D {
         if (!isLocked) {
             const glowGeo = new THREE.CircleGeometry(5, 32);
             const glowMat = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.3 });
-            const groundGlow = new THREE.Mesh(glowGeo, glowMat);
-            groundGlow.rotation.x = -Math.PI / 2;
-            groundGlow.position.y = -4.4;
-            this.mesh.add(groundGlow);
+            this.groundGlow = new THREE.Mesh(glowGeo, glowMat);
+            this.groundGlow.rotation.x = -Math.PI / 2;
+            this.groundGlow.position.y = -4.4;
+            this.mesh.add(this.groundGlow);
             
             // Pillar of light
             const pillarGeo = new THREE.CylinderGeometry(3, 3, 20, 16, 1, true);
             const pillarMat = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.1, side: THREE.DoubleSide });
-            const pillar = new THREE.Mesh(pillarGeo, pillarMat);
-            pillar.position.y = 5;
-            this.mesh.add(pillar);
+            this.lightPillar = new THREE.Mesh(pillarGeo, pillarMat);
+            this.lightPillar.position.y = 5;
+            this.mesh.add(this.lightPillar);
 
             // Point Light for Glow
             this.light = new THREE.PointLight(color, 20, 15);
@@ -2201,7 +2471,7 @@ export class Portal3D {
         }
 
         // Floating Label using Canvas Texture
-        this.label = this.createTextSprite(isLocked ? `LOCKED: ${regionConfig.name}` : regionConfig.name);
+        this.label = this.createTextSprite(isLocked ? `LOCKED: ${this.regionConfig.name}` : this.regionConfig.name);
         this.label.position.y = 5.5;
         this.mesh.add(this.label);
 
@@ -2235,23 +2505,34 @@ export class Portal3D {
         this.hum.volume.value = -30;
     }
 
-    createTextSprite(text) {
+    createTextSprite(text, borderColor = '#39FF14', textColor = '#ffffff') {
         const canvas = document.createElement('canvas');
         const context = canvas.getContext('2d');
         canvas.width = 512;
         canvas.height = 128;
+        const lines = String(text || '').split('\n').filter(Boolean);
+        const fontSize = lines.length > 1 ? 28 : 40;
+        const lineHeight = lines.length > 1 ? 34 : 0;
         
         context.fillStyle = 'rgba(0,0,0,0.7)';
         context.fillRect(0, 0, canvas.width, canvas.height);
-        context.strokeStyle = '#39FF14';
+        context.strokeStyle = borderColor;
         context.lineWidth = 4;
         context.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
         
-        context.font = 'bold 40px "Press Start 2P", cursive';
+        context.font = `bold ${fontSize}px "Press Start 2P", cursive`;
         context.textAlign = 'center';
         context.textBaseline = 'middle';
-        context.fillStyle = '#ffffff';
-        context.fillText(text.toUpperCase(), canvas.width / 2, canvas.height / 2);
+        context.fillStyle = textColor;
+        if (lines.length > 1) {
+            const midY = canvas.height / 2;
+            const startY = midY - ((lines.length - 1) * lineHeight / 2);
+            lines.forEach((line, index) => {
+                context.fillText(line.toUpperCase(), canvas.width / 2, startY + (index * lineHeight));
+            });
+        } else {
+            context.fillText(String(text).toUpperCase(), canvas.width / 2, canvas.height / 2);
+        }
 
         const texture = new THREE.CanvasTexture(canvas);
         const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true });
@@ -2260,22 +2541,41 @@ export class Portal3D {
         return sprite;
     }
 
-    setLocked(locked) {
-        this.isLocked = locked;
-        const regionConfig = CONFIG.REGIONS.find(r => r.id === this.regionId) || { accent: 0x00ffff, name: 'Unknown' };
-        const color = locked ? 0x222222 : regionConfig.accent;
-        this.ring.material.color.setHex(color);
-        this.ring.material.emissive.setHex(color);
-        this.ring.material.emissiveIntensity = locked ? 0.2 : 5.0;
-        this.coreMat.color.setHex(color);
-        this.coreMat.emissive.setHex(color);
-        this.coreMat.opacity = locked ? 0.1 : 0.6;
-        
-        // Update label
-        this.mesh.remove(this.label);
-        this.label = this.createTextSprite(locked ? `LOCKED: ${regionConfig.name}` : regionConfig.name);
+    refreshLabel() {
+        if (this.label) this.mesh.remove(this.label);
+        const labelText = this.isLocked
+            ? `LOCKED: ${this.regionConfig.name}`
+            : (this.territoryText ? `${this.regionConfig.name}\n${this.territoryText}` : this.regionConfig.name);
+        this.label = this.createTextSprite(labelText, this.labelBorderColor, this.labelTextColor);
         this.label.position.y = 5.5;
         this.mesh.add(this.label);
+    }
+
+    refreshVisualState() {
+        const color = this.isLocked ? 0x222222 : (this.displayColor || this.baseColor || 0x00ffff);
+        this.ring.material.color.setHex(color);
+        this.ring.material.emissive.setHex(color);
+        this.ring.material.emissiveIntensity = this.isLocked ? 0.2 : 5.0;
+        this.coreMat.color.setHex(color);
+        this.coreMat.emissive.setHex(color);
+        this.coreMat.opacity = this.isLocked ? 0.1 : 0.6;
+        if (this.groundGlow?.material?.color) this.groundGlow.material.color.setHex(color);
+        if (this.lightPillar?.material?.color) this.lightPillar.material.color.setHex(color);
+        if (this.light) this.light.color.setHex(color);
+        this.refreshLabel();
+    }
+
+    applyTerritoryState(territory = null) {
+        this.displayColor = Number.isFinite(territory?.color) ? territory.color : this.baseColor;
+        this.labelBorderColor = territory?.borderColor || '#39FF14';
+        this.labelTextColor = territory?.textColor || '#ffffff';
+        this.territoryText = territory?.text || null;
+        this.refreshVisualState();
+    }
+
+    setLocked(locked) {
+        this.isLocked = locked;
+        this.refreshVisualState();
 
         if (locked) {
             if (this.hum) this.hum.stop();
@@ -2324,7 +2624,7 @@ export class Portal3D {
 export class Collectible3D {
     constructor(scene, position, type, clanId = null, amount = null, keyItemConfig = null) {
         this.scene = scene;
-        this.type = type; // 'XP', 'LOOT', 'GOLDEN_SPORE', 'INGREDIENT', 'POTION', 'BOMB', 'SALVE', 'KEY_ITEM'
+        this.type = type; // 'XP', 'LOOT', 'GOLDEN_SPORE', 'INGREDIENT', 'POTION', 'BOMB', 'SALVE', 'KEY_ITEM', 'CROWN_SHARD'
         this.amount = amount;
         this.keyItemConfig = keyItemConfig; // V1.9.12 - { id, name, color, shape } from CONFIG.PORTAL_KEYS
         this.mesh = new THREE.Group();
@@ -2333,6 +2633,42 @@ export class Collectible3D {
         let size = 0.3;
         
         const isMultiplier = (type === 'LOOT' && amount > 5) || (type !== 'LOOT' && amount > 1 && !['POTION', 'BOMB', 'SALVE'].includes(type));
+
+        // V1.9.46 - Crown Shard: major boss reward with a brighter silhouette than ordinary loot.
+        if (type === 'CROWN_SHARD') {
+            color = 0xffff66;
+            const shardMat = new THREE.MeshStandardMaterial({ color, emissive: 0xffcc33, emissiveIntensity: 5, metalness: 0.2, roughness: 0.25 });
+            const shard = new THREE.Mesh(new THREE.OctahedronGeometry(0.6, 0), shardMat);
+            shard.rotation.z = Math.PI / 4;
+            this.mesh.add(shard);
+            this._shardCore = shard;
+
+            const crownRing = new THREE.Mesh(
+                new THREE.TorusGeometry(0.82, 0.08, 10, 32),
+                new THREE.MeshBasicMaterial({ color: 0xff66cc, transparent: true, opacity: 0.55 })
+            );
+            crownRing.rotation.x = Math.PI / 2;
+            this.mesh.add(crownRing);
+            this._shardRing = crownRing;
+
+            const pillar = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.42, 0.42, 8, 12, 1, true),
+                new THREE.MeshBasicMaterial({ color: 0xffff99, transparent: true, opacity: 0.18, side: THREE.DoubleSide })
+            );
+            pillar.position.y = 3.3;
+            this.mesh.add(pillar);
+
+            const light = new THREE.PointLight(0xffee88, 3.5, 13);
+            light.position.y = 1.2;
+            this.mesh.add(light);
+
+            this.mesh.position.copy(position);
+            this.mesh.position.y = 1.3;
+            this.scene.add(this.mesh);
+            this.rotationSpeed = 0.05;
+            this.floatY = Math.random() * Math.PI * 2;
+            return;
+        }
 
         // V1.9.12 - Key item: glowing region-themed trophy. Larger, brighter, and floats on a beam.
         if (type === 'KEY_ITEM' && keyItemConfig) {
@@ -2459,6 +2795,19 @@ export class Collectible3D {
     update() {
         this.mesh.rotation.y += this.rotationSpeed;
         this.floatY += 0.05;
+        if (this.type === 'CROWN_SHARD') {
+            this.mesh.position.y = 1.7 + Math.sin(this.floatY) * 0.32;
+            if (this._shardRing) {
+                this._shardRing.rotation.z += 0.035;
+                const s = 1 + Math.sin(this.floatY * 1.35) * 0.12;
+                this._shardRing.scale.set(s, s, 1);
+            }
+            if (this._shardCore) {
+                this._shardCore.rotation.x += 0.02;
+                this._shardCore.rotation.z += 0.01;
+            }
+            return;
+        }
         // Key items float higher and have a stronger sine bob so they read as a beacon.
         if (this.type === 'KEY_ITEM') {
             this.mesh.position.y = 1.6 + Math.sin(this.floatY) * 0.35;
@@ -2538,6 +2887,11 @@ export class EnemyProjectile3D {
     constructor(scene, position, direction) {
         this.scene = scene;
         this.mesh = new THREE.Group();
+        this.trailParticles = [];
+        this.trailTimer = 0;
+        this.isMobileFx = !!(window.game && (window.game.mobilePerf || window.game.isMobile));
+        this.useTrail = !this.isMobileFx;
+        this._tmpLookAt = new THREE.Vector3();
         
         const color = 0xaa00ff; // Rot Purple
         const coreGeo = new THREE.SphereGeometry(0.15, 6, 6);
@@ -2554,22 +2908,46 @@ export class EnemyProjectile3D {
         this.speed = 0.3;
         this.life = 150;
         
-        // Spatial Audio
-        this.panner = createToneNode(() => new TONE.Panner3D({
-            positionX: position.x,
-            positionY: position.y,
-            positionZ: position.z,
-            rolloffFactor: 2
-        }).toDestination());
-        
-        this.buzz = createToneNode(() => new TONE.Oscillator(200, "sawtooth").connect(this.panner).start());
-        this.buzz.volume.value = -30;
+        // Spatial audio per projectile is a desktop hitch source during bullet storms.
+        const activeBuzzers = window.game?._activeProjectileBuzzers || 0;
+        this.useProjectileAudio = !this.isMobileFx && activeBuzzers < 4;
+        if (this.useProjectileAudio) {
+            window.game._activeProjectileBuzzers = activeBuzzers + 1;
+            this.panner = createToneNode(() => new TONE.Panner3D({
+                positionX: position.x,
+                positionY: position.y,
+                positionZ: position.z,
+                rolloffFactor: 2
+            }).toDestination());
+            
+            this.buzz = createToneNode(() => new TONE.Oscillator(200, "sawtooth").connect(this.panner).start());
+            this.buzz.volume.value = -30;
+        }
         
         this.scene.add(this.mesh);
     }
 
     update() {
-        this.mesh.position.add(this.direction.clone().multiplyScalar(this.speed));
+        this.mesh.position.addScaledVector(this.direction, this.speed);
+
+        if (this.useTrail) {
+            this.trailTimer++;
+            if (this.trailTimer % 4 === 0 && this.trailParticles.length < 8) {
+                this.spawnTrailParticle();
+            }
+        }
+
+        this.trailParticles = this.trailParticles.filter(p => {
+            p.position.add(p.userData.velocity);
+            p.scale.multiplyScalar(0.96);
+            p.material.opacity -= p.userData.fade;
+            if (p.material.opacity <= 0.03) {
+                this.scene.remove(p);
+                if (p.material) p.material.dispose();
+                return false;
+            }
+            return true;
+        });
         
         // Update audio position
         if (this.panner) {
@@ -2586,9 +2964,36 @@ export class EnemyProjectile3D {
         return true;
     }
 
+    spawnTrailParticle() {
+        if (!this.useTrail) return;
+        const trailColor = this.projectileColor || this.mesh.children?.[0]?.material?.color?.getHex?.() || 0xaa00ff;
+        const mat = new THREE.MeshBasicMaterial({
+            color: trailColor,
+            transparent: true,
+            opacity: 0.36,
+            depthWrite: false
+        });
+        const trail = new THREE.Mesh(ENEMY_TRAIL_GEOMETRY, mat);
+        trail.position.copy(this.mesh.position);
+        trail.quaternion.copy(this.mesh.quaternion);
+        trail.lookAt(this._tmpLookAt.copy(this.mesh.position).add(this.direction));
+        trail.userData.velocity = this.direction.clone().multiplyScalar(-this.speed * 0.22);
+        trail.userData.fade = 0.06;
+        this.scene.add(trail);
+        this.trailParticles.push(trail);
+    }
+
     destroy() {
+        this.trailParticles.forEach(p => {
+            this.scene.remove(p);
+            if (p.material) p.material.dispose();
+        });
         if (this.buzz) this.buzz.stop();
         if (this.panner) this.panner.dispose();
+        if (this.useProjectileAudio && window.game && window.game._activeProjectileBuzzers) {
+            window.game._activeProjectileBuzzers = Math.max(0, window.game._activeProjectileBuzzers - 1);
+            this.useProjectileAudio = false;
+        }
         this.scene.remove(this.mesh);
     }
 }
@@ -2631,21 +3036,24 @@ export class Fireball3D {
 
         this.trailTimer = 0;
         this.coreActive = true;
+        this._tmpLookAt = new THREE.Vector3();
     }
 
     update() {
         if (this.coreActive) {
-            this.mesh.position.add(this.direction.clone().multiplyScalar(this.speed));
+            this.mesh.position.addScaledVector(this.direction, this.speed);
             
             // Pulsing scale for flame effect
             let pulseScale = 1 + Math.sin(Date.now() * 0.01) * 0.2;
             if (this.isCrownflare) pulseScale *= 1.2;
             this.mesh.scale.set(pulseScale, pulseScale, pulseScale);
 
-            if (this.hasTrail || this.isRootbind || this.isCrownflare) {
+            const allowTrailFx = !(window.game && (window.game.mobilePerf || window.game.isMobile));
+            if (allowTrailFx && (this.hasTrail || this.isRootbind || this.isCrownflare)) {
                 this.trailTimer++;
-                const trailFreq = this.isCrownflare ? 1 : (this.isRootbind ? 2 : 3);
-                if (this.trailTimer % trailFreq === 0) {
+                const trailFreq = this.isCrownflare ? 2 : (this.isRootbind ? 3 : 4);
+                const trailCap = this.isCrownflare ? 14 : 8;
+                if (this.trailTimer % trailFreq === 0 && this.trailParticles.length < trailCap) {
                     this.spawnTrailParticle();
                 }
             }
@@ -2658,10 +3066,14 @@ export class Fireball3D {
 
         // Update trail particles
         this.trailParticles = this.trailParticles.filter(p => {
-            p.material.opacity -= 0.02;
-            p.scale.multiplyScalar(0.95);
+            p.position.add(p.userData.velocity);
+            p.userData.velocity.multiplyScalar(0.92);
+            p.material.opacity -= p.userData.fade;
+            p.scale.multiplyScalar(p.userData.scaleDecay);
             if (p.material.opacity <= 0) {
                 this.scene.remove(p);
+                if (p.material) p.material.dispose();
+                if (p.userData.hitEnemies && typeof p.userData.hitEnemies.clear === 'function') p.userData.hitEnemies.clear();
                 return false;
             }
             return true;
@@ -2675,15 +3087,19 @@ export class Fireball3D {
     }
 
     spawnTrailParticle() {
-        const pGeo = new THREE.BoxGeometry(0.2, 0.2, 0.2);
-        const pMat = new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.6 });
-        const p = new THREE.Mesh(pGeo, pMat);
+        const trailColor = this.trailColor || this.mesh.children?.[0]?.material?.color?.getHex?.() || 0x00ff00;
+        const geoKey = this.isCrownflare ? 'crownflare' : (this.isRootbind ? 'rootbind' : 'default');
+        const pMat = new THREE.MeshBasicMaterial({ color: trailColor, transparent: true, opacity: this.isCrownflare ? 0.68 : 0.54, depthWrite: false });
+        const p = new THREE.Mesh(FIREBALL_TRAIL_GEOMETRIES[geoKey], pMat);
         p.position.copy(this.mesh.position);
-        p.rotation.set(Math.random(), Math.random(), Math.random());
+        p.lookAt(this._tmpLookAt.copy(this.mesh.position).add(this.direction));
         p.userData = {
             isTrail: true,
             damage: (this.damage || 1) * 0.4, // Trail does 40% damage
-            hitEnemies: new Set() // Track which enemies this particle has already hit
+            hitEnemies: new Set(), // Track which enemies this particle has already hit
+            velocity: this.direction.clone().multiplyScalar(-this.speed * (this.isCrownflare ? 0.32 : 0.22)),
+            fade: this.isCrownflare ? 0.03 : 0.04,
+            scaleDecay: this.isCrownflare ? 0.975 : 0.96
         };
         this.scene.add(p);
         this.trailParticles.push(p);
@@ -2695,8 +3111,130 @@ export class Fireball3D {
     }
 
     destroy() {
-        this.trailParticles.forEach(p => this.scene.remove(p));
+        this.trailParticles.forEach(p => {
+            this.scene.remove(p);
+            if (p.material) p.material.dispose();
+            if (p.userData.hitEnemies && typeof p.userData.hitEnemies.clear === 'function') p.userData.hitEnemies.clear();
+        });
         this.scene.remove(this.mesh);
+    }
+}
+
+export class MossfangSentinel3D extends Boss3D {
+    constructor(scene, position, regionConfig) {
+        super(scene, position, regionConfig);
+        this.name = 'Mossfang Sentinel';
+        this.maxHp = 70 + (regionConfig?.hpBonus || 0);
+        this.hp = this.maxHp;
+        this.speed = 0.028;
+        this.baseSpeed = this.speed;
+        this.detectionRange = 30;
+        this.shootRange = 16;
+        this.shootCooldown = 1200;
+        this.bossAccent = (regionConfig && (regionConfig.bossTint || regionConfig.accent)) || 0x39FF14;
+        if (this.presentationRing && this.presentationRing.material) this.presentationRing.material.color.setHex(this.bossAccent);
+        if (this.presentationCrown && this.presentationCrown.material) {
+            this.presentationCrown.material.color.setHex(this.bossAccent);
+            this.presentationCrown.material.emissive.setHex(this.bossAccent);
+        }
+        this.leashOrigin = position.clone();
+        this.leashRadius = 12;
+        this._patrolAngle = Math.random() * Math.PI * 2;
+        this._circleDir = Math.random() > 0.5 ? 1 : -1;
+        this._rootBurstTimer = 0;
+    }
+
+    shoot(playerPos) {
+        const origin = this.mesh.position.clone().add(new THREE.Vector3(0, 2.2, 0));
+        const baseDir = new THREE.Vector3().subVectors(playerPos, this.mesh.position).normalize();
+        baseDir.y = 0;
+        const spread = this.phase >= 2 ? 0.26 : 0.18;
+        const count = this.phase >= 2 ? 5 : 3;
+        for (let i = 0; i < count; i++) {
+            const t = count === 1 ? 0 : (i / (count - 1) - 0.5);
+            const dir = baseDir.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), t * spread * (count - 1));
+            const proj = new EnemyProjectile3D(this.scene, origin, dir);
+            proj.speed = this.phase >= 2 ? 0.34 : 0.28;
+            proj.mesh.scale.set(1.35, 1.35, 1.35);
+            proj.mesh.traverse(child => {
+                if (child.material && child.material.color) {
+                    child.material.color.setHex(0x5cff6b);
+                    if (child.material.emissive) child.material.emissive.setHex(0xaa00ff);
+                }
+            });
+            if (window.game) window.game.enemyProjectiles.push(proj);
+        }
+    }
+
+    onPhaseTransition() {
+        super.onPhaseTransition();
+        this._circleDir *= -1;
+        this.speed *= 1.08;
+        this.baseSpeed = this.speed;
+        if (window.game) {
+            window.game.showFloatingText('PHASE 2: ROOT RAGE!', 0x39FF14, true);
+        }
+    }
+
+    update(playerPos) {
+        const dist = this.mesh.position.distanceTo(playerPos);
+
+        if (this.leftArm) this.leftArm.rotation.y = 0.25 + Math.sin(Date.now() * 0.004) * 0.22;
+        if (this.rightArm) this.rightArm.rotation.y = -0.25 - Math.sin(Date.now() * 0.004) * 0.22;
+        if (this.canopy) this.canopy.scale.y = 0.82 + Math.sin(Date.now() * 0.0035) * 0.05;
+        if (this.mouth) this.mouth.scale.x = 1 + Math.sin(Date.now() * 0.009) * 0.18;
+        if (this.rotHalo) {
+            this.rotHalo.rotation.z += 0.01;
+            const haloScale = 1 + Math.sin(Date.now() * 0.005) * 0.05;
+            this.rotHalo.scale.set(haloScale, haloScale, haloScale);
+        }
+
+        super.update(playerPos);
+
+        if (dist > this.detectionRange) {
+            this._patrolAngle += 0.01;
+            const patrolTarget = this.leashOrigin.clone().add(new THREE.Vector3(
+                Math.cos(this._patrolAngle) * (this.leashRadius * 0.7),
+                0,
+                Math.sin(this._patrolAngle) * (this.leashRadius * 0.7)
+            ));
+            const dir = patrolTarget.sub(this.mesh.position);
+            dir.y = 0;
+            if (dir.lengthSq() > 0.05) {
+                dir.normalize();
+                this.mesh.position.add(dir.multiplyScalar(this.baseSpeed * 0.7));
+                this.mesh.lookAt(patrolTarget.x, this.mesh.position.y + 1.4, patrolTarget.z);
+            }
+            return;
+        }
+
+        if (!this.phaseTransitioning) {
+            const chaseDir = new THREE.Vector3().subVectors(playerPos, this.mesh.position);
+            chaseDir.y = 0;
+            if (chaseDir.lengthSq() > 0.001) {
+                chaseDir.normalize();
+                const tangent = new THREE.Vector3(-chaseDir.z, 0, chaseDir.x).multiplyScalar((this.phase >= 2 ? 0.022 : 0.015) * this._circleDir);
+                this.mesh.position.add(tangent);
+            }
+
+            this._rootBurstTimer++;
+            if (!this.shielded && this._rootBurstTimer > (this.phase >= 2 ? 180 : 250)) {
+                this._rootBurstTimer = 0;
+                const target = playerPos.clone();
+                target.x += (Math.random() - 0.5) * 3;
+                target.z += (Math.random() - 0.5) * 3;
+                this.spawnAoESpore(target, this.phase >= 2 ? 5.8 : 5.1, 950, this.phase >= 2 ? 1.15 : 0.9, 0x39FF14);
+            }
+        }
+
+        const offset = new THREE.Vector3().subVectors(this.mesh.position, this.leashOrigin);
+        offset.y = 0;
+        const len = offset.length();
+        if (len > this.leashRadius) {
+            offset.normalize().multiplyScalar(this.leashRadius);
+            this.mesh.position.x = this.leashOrigin.x + offset.x;
+            this.mesh.position.z = this.leashOrigin.z + offset.z;
+        }
     }
 }
 
@@ -3313,6 +3851,7 @@ export class Player3D {
             regenRate: 0, // HP per second
             critChance: 0
         };
+        this.territoryModifiers = null;
 
         // Character Model (Roblox R6 style)
         this.group = new THREE.Group();
@@ -3374,27 +3913,39 @@ export class Player3D {
         this.group.add(this.rightEye);
         
         // Mushroom Cap (King Myco Signature)
+        // V1.9.40 - Smaller, rounder cap silhouette so King Myco reads more polished
+        // and less cone-hat/cartoon-spiky from every camera angle.
         const capGroup = new THREE.Group();
-        const capGeo = new THREE.ConeGeometry(1.2, 0.8, 8); 
+        const capGeo = new THREE.SphereGeometry(0.92, 18, 14, 0, Math.PI * 2, 0, Math.PI / 2);
         const capMat = new THREE.MeshStandardMaterial({ 
-            color: 0xff0000,
+            color: 0xff3355,
+            roughness: 0.58,
+            metalness: 0.04,
             transparent: this.isGhost,
             opacity: this.isGhost ? 0.3 : 1.0
         });
         this.cap = new THREE.Mesh(capGeo, capMat);
+        this.cap.scale.set(1.0, 0.72, 1.0);
+        this.cap.position.y = 0.03;
         capGroup.add(this.cap);
 
-        // White Spots on Cap
-        const spotGeo = new THREE.BoxGeometry(0.2, 0.2, 0.05);
-        const spotMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
-        for (let i = 0; i < 6; i++) {
+        // White spots on cap, now round instead of boxy so the silhouette stays organic.
+        const spotGeo = new THREE.SphereGeometry(0.1, 10, 10);
+        const spotMat = new THREE.MeshStandardMaterial({ color: 0xfff8ef, roughness: 0.7 });
+        const capSpots = [
+            { x: 0.00, y: 0.29, z: 0.18, s: 1.0 },
+            { x: 0.28, y: 0.17, z: 0.22, s: 0.92 },
+            { x: -0.30, y: 0.14, z: 0.12, s: 0.88 },
+            { x: 0.22, y: 0.08, z: -0.26, s: 0.82 },
+            { x: -0.20, y: 0.10, z: -0.30, s: 0.78 }
+        ];
+        capSpots.forEach(({ x, y, z, s }) => {
             const spot = new THREE.Mesh(spotGeo, spotMat);
-            const angle = (i / 6) * Math.PI * 2;
-            spot.position.set(Math.cos(angle) * 0.5, -0.1, Math.sin(angle) * 0.5);
-            spot.lookAt(0, 0, 0);
+            spot.position.set(x, y, z);
+            spot.scale.setScalar(s);
             capGroup.add(spot);
-        }
-        capGroup.position.y = 2.2;
+        });
+        capGroup.position.y = 2.14;
         this.group.add(capGroup);
 
         // Gnarled Wooden Staff
@@ -3503,10 +4054,18 @@ export class Player3D {
         
         // Physics/Movement stats
         this.velocity = new THREE.Vector3();
+        this._prevPos = new THREE.Vector3();
+        this._tempFacing = new THREE.Vector3();
+        this._tempTankMove = new THREE.Vector3();
+        this._tempForward = new THREE.Vector3();
+        this._tempRight = new THREE.Vector3();
+        this._tempMoveDir = new THREE.Vector3();
+        this._tempPushDir = new THREE.Vector3();
         // V1.9.14 - Snappier King Myco stride. Was 0.18; raised to keep the bigger
         // hub world from feeling slow to cross.
         this.baseSpeed = 0.28;
         this.rotationSpeed = 0.05;
+        this.turnInPlaceSpeed = 0.18;
         this.slowFactor = 1.0;
         this.baseGravity = -0.015;
         this.jumpPower = 0.35;
@@ -3516,10 +4075,13 @@ export class Player3D {
         
         this.keys = {
             forward: false, backward: false, left: false, right: false,
+            tankForward: false, tankBackward: false, turnLeft: false, turnRight: false,
             jump: false, shoot: false, special: false, interact: false,
             melee: false, trap: false
         };
         this.moveVector = new THREE.Vector2();
+        this.tankTurnInput = 0;
+        this.tankThrottleInput = 0;
 
         // V1.9.30 - Universal mobile-friendly dash. Available to every clan,
         // separate from clan-locked specialAbility(). Player code only reads
@@ -3856,6 +4418,16 @@ export class Player3D {
                 break;
         }
 
+        const territory = this.territoryModifiers || {};
+        this.modifiers.speedMult *= territory.speedMult || 1;
+        this.modifiers.cooldownMult *= territory.cooldownMult || 1;
+        this.modifiers.goalRadiusMult *= territory.goalRadiusMult || 1;
+        this.modifiers.projectileSpeedMult *= territory.projectileSpeedMult || 1;
+        this.modifiers.damageBonus = (this.modifiers.damageBonus + (territory.damageBonusFlat || 0)) * (territory.damageBonusMult || 1);
+        this.modifiers.wardBonus += territory.wardBonusFlat || 0;
+        this.modifiers.regenRate += territory.regenBonus || 0;
+        this.modifiers.critChance += territory.critBonus || 0;
+
         this.updateModelVisuals();
     }
 
@@ -3980,14 +4552,22 @@ export class Player3D {
     // V1.9.6 Core Linkage - layout-independent movement via KeyboardEvent.code
     handleKeyCode(code, isDown) {
         switch (code) {
-            case 'KeyW': case 'ArrowUp':
+            case 'KeyW':
                 this.keys.forward = isDown; return true;
-            case 'KeyS': case 'ArrowDown':
+            case 'KeyS':
                 this.keys.backward = isDown; return true;
-            case 'KeyA': case 'ArrowLeft':
+            case 'KeyA':
                 this.keys.left = isDown; return true;
-            case 'KeyD': case 'ArrowRight':
+            case 'KeyD':
                 this.keys.right = isDown; return true;
+            case 'ArrowUp':
+                this.keys.tankForward = isDown; return true;
+            case 'ArrowDown':
+                this.keys.tankBackward = isDown; return true;
+            case 'ArrowLeft':
+                this.keys.turnLeft = isDown; return true;
+            case 'ArrowRight':
+                this.keys.turnRight = isDown; return true;
             case 'Space':
                 if (isDown && !this.keys.jump) this.onJumpPress();
                 this.keys.jump = isDown;
@@ -3997,10 +4577,10 @@ export class Player3D {
     }
     
     handleKey(key, isDown) {
-        if (key === this.keyBinds.forward || key === 'arrowup') this.keys.forward = isDown;
-        else if (key === this.keyBinds.backward || key === 'arrowdown') this.keys.backward = isDown;
-        else if (key === this.keyBinds.left || key === 'arrowleft') this.keys.left = isDown;
-        else if (key === this.keyBinds.right || key === 'arrowright') this.keys.right = isDown;
+        if (key === this.keyBinds.forward) this.keys.forward = isDown;
+        else if (key === this.keyBinds.backward) this.keys.backward = isDown;
+        else if (key === this.keyBinds.left) this.keys.left = isDown;
+        else if (key === this.keyBinds.right) this.keys.right = isDown;
         else if (key === this.keyBinds.jump) {
             if (isDown && !this.keys.jump) this.onJumpPress();
             this.keys.jump = isDown;
@@ -4191,7 +4771,9 @@ export class Player3D {
         this.hp -= actualDamage;
         this.triggerDamageFlash();
         if (window.game) {
-            window.game.glitchIntensity = Math.min(1.0, window.game.glitchIntensity + 0.5);
+            window.game.glitchIntensity = Math.min(1.0, window.game.glitchIntensity + 0.42);
+            window.game.addCameraImpulse(actualDamage >= 1 ? 0.48 : 0.3);
+            window.game.pulseHud('damage');
             window.game.showFloatingText("OUCH!", 0xff0000);
             window.game.updateHud();
             if (this.hp <= 0) {
@@ -4241,7 +4823,7 @@ export class Player3D {
         const currentMagicId = learnedMagic[this.currentMagicIdx] || 'sparkSpore';
         const magicCfg = CONFIG.MAGIC.find(m => m.id === currentMagicId) || { name: 'Spark', damageBonus: 0 };
 
-        const magicCost = currentMagicId === 'Crownflare' ? 25 : (currentMagicId === 'Rootbind' ? 15 : 10);
+        const magicCost = currentMagicId === 'Crownflare' ? 25 : (currentMagicId === 'Rootbind' ? 15 : (currentMagicId === 'PurifyBloom' ? 12 : 10));
         if (this.magic < magicCost) return;
         this.magic -= magicCost;
 
@@ -4264,17 +4846,25 @@ export class Player3D {
             
             // Special VFX for different spells
             let spellColor = this.magicColor;
+            if (currentMagicId === 'PurifyBloom') spellColor = 0x80ffaa;
             if (currentMagicId === 'Rootbind') spellColor = 0x39FF14;
             if (currentMagicId === 'Crownflare') spellColor = 0xffaa00;
 
             const fireball = new Fireball3D(this.scene, shootPos, forward, isCrit, this.hasFireTrail);
             fireball.speed *= this.modifiers.projectileSpeedMult;
-            
+            fireball.magicId = currentMagicId;
+            fireball.rotCleanse = magicCfg.rotCleanse || 0.45;
+            fireball.rotRadius = magicCfg.rotRadius || 4.5;
+
             // Scaling and Damage
             let damage = (1 + this.modifiers.damageBonus + (magicCfg.damageBonus || 0)) * (isCrit ? 2 : 1);
             let size = 1 + (this.modifiers.damageBonus * 0.2);
-            
-            if (currentMagicId === 'Rootbind') {
+
+            if (currentMagicId === 'PurifyBloom') {
+                size *= 1.15;
+                fireball.isPurifyBloom = true;
+                fireball.hasTrail = true;
+            } else if (currentMagicId === 'Rootbind') {
                 size *= 1.2;
                 fireball.isRootbind = true;
             } else if (currentMagicId === 'Crownflare') {
@@ -4284,6 +4874,7 @@ export class Player3D {
 
             fireball.mesh.scale.set(size, size, size);
             fireball.damage = damage;
+            fireball.trailColor = isCrit ? 0xffffff : spellColor;
 
             // Apply spell color
             if (!isCrit) {
@@ -4315,6 +4906,7 @@ export class Player3D {
         this.isMeleeAttacking = true;
         this.meleeAnimTimer = 0;
         this.meleeHasHit = false; // Reset hit flag for this swing
+        this.createMeleeTrail(weaponCfg);
 
         // Melee sound - Pitch shift based on weapon
         const pitch = weaponCfg ? (weaponCfg.id === 'ember_axe' ? "E2" : "G2") : "C2";
@@ -4366,9 +4958,10 @@ export class Player3D {
                     // Hit spark effect
                     this.createHitSpark(enemy.mesh.position);
                     
-                    // Small screen shake
-                    if (window.game.camera) {
-                        window.game.glitchIntensity = Math.min(0.5, window.game.glitchIntensity + 0.1);
+                    if (window.game) {
+                        window.game.glitchIntensity = Math.min(0.5, window.game.glitchIntensity + (isCrit ? 0.16 : 0.1));
+                        window.game.addCameraImpulse(isCrit ? 0.34 : 0.2);
+                        window.game.pulseHud('impact');
                     }
                 }
             });
@@ -4393,29 +4986,30 @@ export class Player3D {
                 }
             });
 
-            if (hitAny) {
-                // Impact sound - Dynamic based on crit or count
-                if (window.game.impactSynth) {
-                    window.game.impactSynth.triggerAttackRelease("8n");
-                }
-                const impact = new TONE.MembraneSynth({ volume: -2 }).toDestination();
-                impact.triggerAttackRelease(hitCrit ? "G2" : "C3", "16n");
+            if (hitAny && window.game) {
+                try {
+                    if (window.game.impactSynth) window.game.impactSynth.triggerAttackRelease("8n");
+                    if (window.game.uiSynth) window.game.uiSynth.triggerAttackRelease(hitCrit ? "G3" : "C3", "16n");
+                } catch (_) {}
             }
         }
     }
 
     createHitSpark(pos) {
-        const sparkCount = 5;
+        const isMobileFx = !!(window.game && (window.game.mobilePerf || window.game.isMobile));
+        const sparkCount = isMobileFx ? (this.currentWeaponId === 'ember_axe' ? 3 : 2) : (this.currentWeaponId === 'ember_axe' ? 12 : 9);
         const group = new THREE.Group();
         group.position.copy(pos);
         this.scene.add(group);
 
-        for(let i=0; i<sparkCount; i++) {
-            const pGeo = new THREE.BoxGeometry(0.1, 0.1, 0.1);
-            const pMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+        for (let i = 0; i < sparkCount; i++) {
+            const pGeo = new THREE.BoxGeometry(0.06, 0.2 + Math.random() * 0.16, 0.06);
+            const pMat = new THREE.MeshBasicMaterial({ color: i % 3 === 0 ? 0xffddaa : 0xffffff, transparent: true, opacity: 0.95 });
             const p = new THREE.Mesh(pGeo, pMat);
-            const dir = new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize();
-            p.userData.velocity = dir.multiplyScalar(0.2);
+            const dir = new THREE.Vector3(Math.random() - 0.5, Math.random() * 0.6, Math.random() - 0.5).normalize();
+            p.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+            p.userData.velocity = dir.multiplyScalar(0.16 + Math.random() * 0.12);
+            p.userData.spin = (Math.random() - 0.5) * 0.35;
             group.add(p);
         }
 
@@ -4424,15 +5018,63 @@ export class Player3D {
             frames++;
             group.children.forEach(p => {
                 p.position.add(p.userData.velocity);
-                p.scale.multiplyScalar(0.9);
+                p.rotation.x += p.userData.spin;
+                p.rotation.y += p.userData.spin * 0.7;
+                p.scale.multiplyScalar(0.92);
+                if (p.material) p.material.opacity *= 0.9;
             });
-            if (frames < 20) {
+            if (frames < (isMobileFx ? 10 : 18)) {
                 requestAnimationFrame(animateSparks);
             } else {
                 this.scene.remove(group);
             }
         };
         animateSparks();
+    }
+
+    createMeleeTrail(weaponCfg) {
+        if (window.game && (window.game.mobilePerf || window.game.isMobile)) return;
+        if (!this.staff || !this.staff.parent) return;
+
+        const color = weaponCfg?.id === 'ember_axe'
+            ? 0xffaa00
+            : weaponCfg?.id === 'crystal_spire'
+                ? 0x66f0ff
+                : 0x39FF14;
+
+        const slash = new THREE.Mesh(
+            new THREE.RingGeometry(0.45, weaponCfg?.id === 'ember_axe' ? 1.55 : 1.35, 28, 1, -1.2, 2.2),
+            new THREE.MeshBasicMaterial({
+                color,
+                transparent: true,
+                opacity: 0.78,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            })
+        );
+        slash.position.set(0.15, 0.95, 0.8);
+        slash.rotation.y = Math.PI / 2;
+        slash.rotation.z = weaponCfg?.id === 'ember_axe' ? -0.3 : 0.12;
+        this.staff.parent.add(slash);
+
+        const born = performance.now ? performance.now() : Date.now();
+        const animateTrail = () => {
+            const now = performance.now ? performance.now() : Date.now();
+            const t = (now - born) / 180;
+            if (t >= 1 || !slash.parent) {
+                try {
+                    slash.parent?.remove(slash);
+                    slash.geometry.dispose();
+                    slash.material.dispose();
+                } catch (_) {}
+                return;
+            }
+            slash.material.opacity = (1 - t) * 0.82;
+            slash.scale.setScalar(1 + t * 0.28);
+            slash.rotation.x = -0.15 + t * 0.45;
+            requestAnimationFrame(animateTrail);
+        };
+        animateTrail();
     }
 
     specialAbility() {
@@ -4564,7 +5206,11 @@ export class Player3D {
         } catch (_) {}
 
         // Camera shake hint via the existing glitch channel (tiny).
-        if (window.game) window.game.glitchIntensity = Math.min(0.6, (window.game.glitchIntensity || 0) + 0.08);
+        if (window.game) {
+            window.game.glitchIntensity = Math.min(0.6, (window.game.glitchIntensity || 0) + 0.08);
+            window.game.addCameraImpulse(0.14);
+            window.game.pulseHud('impact');
+        }
 
         return true;
     }
@@ -4760,7 +5406,9 @@ export class Player3D {
                         const pullDir = new THREE.Vector3().subVectors(this.group.position, enemy.mesh.position).normalize();
                         enemy.mesh.position.add(pullDir.multiplyScalar(0.2));
                         // Small DOT
-                        enemy.takeDamage(0.2);
+                        if (enemy.takeDamage(0.2) && typeof window.game.handleEnemyDeath === 'function') {
+                            window.game.handleEnemyDeath(enemy);
+                        }
                     }
                 });
             }
@@ -4788,7 +5436,9 @@ export class Player3D {
         if (window.game) {
             window.game.enemies.forEach(enemy => {
                 if (enemy.mesh.position.distanceTo(position) < radius) {
-                    enemy.takeDamage(damage + (this.modifiers.damageBonus || 0));
+                    if (enemy.takeDamage(damage + (this.modifiers.damageBonus || 0)) && typeof window.game.handleEnemyDeath === 'function') {
+                        window.game.handleEnemyDeath(enemy);
+                    }
                 }
             });
         }
@@ -5213,7 +5863,7 @@ export class Player3D {
         if (this.isGhost) return;
         this.checkGamepad();
         
-        const prevPos = this.group.position.clone();
+        const prevPos = this._prevPos.copy(this.group.position);
         if (!this._tempBox) this._tempBox = new THREE.Box3();
 
         // Passive HP Regeneration
@@ -5248,23 +5898,54 @@ export class Player3D {
 
         const moveSpeed = this.baseSpeed * this.modifiers.speedMult * this.slowFactor;
         this.isWalking = false;
-        
+
+        const analogTurn = Math.max(-1, Math.min(1, this.tankTurnInput || 0));
+        const analogThrottle = Math.max(-1, Math.min(1, this.tankThrottleInput || 0));
+        const usingTankControls = Math.abs(analogTurn) > 0.01 || Math.abs(analogThrottle) > 0.01 || this.keys.turnLeft || this.keys.turnRight || this.keys.tankForward || this.keys.tankBackward;
+
+        if (usingTankControls) {
+            const digitalTurn = (this.keys.turnRight ? 1 : 0) - (this.keys.turnLeft ? 1 : 0);
+            const turnInput = Math.max(-1, Math.min(1, digitalTurn + analogTurn));
+            // Tank/mobile steering uses +1 for "turn right", but King Myco's
+            // forward basis and world camera make positive Y rotation read as a
+            // left turn on-screen. Invert the applied yaw so left actually turns
+            // left and right actually turns right across keyboard + touch.
+            if (Math.abs(turnInput) > 0.01) this.group.rotation.y -= this.turnInPlaceSpeed * turnInput;
+
+            const digitalThrottle = (this.keys.tankForward ? 1 : 0) - (this.keys.tankBackward ? 1 : 0);
+            const throttleInput = Math.abs(analogThrottle) > 0.01
+                ? Math.max(-1, Math.min(1, analogThrottle + digitalThrottle))
+                : digitalThrottle;
+
+            const facing = this._tempFacing.set(0, 0, 1).applyQuaternion(this.group.quaternion);
+            facing.y = 0;
+            if (facing.lengthSq() < 0.001) facing.set(0, 0, 1);
+            facing.normalize();
+
+            if (Math.abs(throttleInput) > 0.01) {
+                const reverseScale = throttleInput < 0 ? 0.92 : 1.0;
+                this._tempTankMove.copy(facing).multiplyScalar(throttleInput);
+                this.group.position.addScaledVector(this._tempTankMove, moveSpeed * reverseScale);
+                this.isWalking = true;
+            }
+        }
+
         // V1.9.9 - Camera-relative movement that works whether or not window.game is wired up.
         const camera = (window.game && window.game.camera) || this.camera;
-        if (camera) {
-            const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        if (camera && !usingTankControls) {
+            const forward = this._tempForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
             forward.y = 0;
-            forward.normalize();
             if (forward.lengthSq() < 0.001) forward.set(0, 0, -1); // Camera looking straight down fallback.
+            else forward.normalize();
 
-            const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0));
+            const right = this._tempRight.crossVectors(forward, WORLD_UP);
 
-            const moveDir = new THREE.Vector3(0, 0, 0);
+            const moveDir = this._tempMoveDir.set(0, 0, 0);
 
             // Priority to moveVector (Analog) then keys (Digital)
             if (this.moveVector.lengthSq() > 0.01) {
-                moveDir.add(forward.clone().multiplyScalar(this.moveVector.y));
-                moveDir.add(right.clone().multiplyScalar(this.moveVector.x));
+                moveDir.addScaledVector(forward, this.moveVector.y);
+                moveDir.addScaledVector(right, this.moveVector.x);
             } else {
                 if (this.keys.forward)  moveDir.add(forward);
                 if (this.keys.backward) moveDir.sub(forward);
@@ -5272,9 +5953,9 @@ export class Player3D {
                 if (this.keys.right)    moveDir.add(right);
             }
 
-            if (moveDir.length() > 0) {
+            if (moveDir.lengthSq() > 0) {
                 moveDir.normalize();
-                this.group.position.add(moveDir.multiplyScalar(moveSpeed));
+                this.group.position.addScaledVector(moveDir, moveSpeed);
                 this.isWalking = true;
 
                 // V1.9.9 - Slower, shortest-arc turn so direction changes are smooth, never jumpy.
@@ -5291,18 +5972,19 @@ export class Player3D {
 
         // Generic vertical grounding check for anything in collidables too
         // (Treat anything with a top as a platform if we are above it)
-        const allGroundables = [...platforms, ...collidables];
-
         collidables.forEach(obj => {
-            const dist = new THREE.Vector2(this.group.position.x - obj.position.x, this.group.position.z - obj.position.z).length();
+            const dx = this.group.position.x - obj.position.x;
+            const dz = this.group.position.z - obj.position.z;
+            const distSq = (dx * dx) + (dz * dz);
             const minCenteredDist = this.radius + (obj.userData.radius || 1);
             
             // Only push if we are NOT significantly above the object (horizontal collision)
             const isAbove = this.group.position.y > (obj.position.y + (obj.userData.height || 2));
-            if (dist < minCenteredDist && !isAbove) {
-                const pushDir = new THREE.Vector3(this.group.position.x - obj.position.x, 0, this.group.position.z - obj.position.z).normalize();
+            if (distSq > 0.0001 && distSq < (minCenteredDist * minCenteredDist) && !isAbove) {
+                const dist = Math.sqrt(distSq);
+                const pushDir = this._tempPushDir.set(dx / dist, 0, dz / dist);
                 const overlap = minCenteredDist - dist;
-                this.group.position.add(pushDir.multiplyScalar(overlap));
+                this.group.position.addScaledVector(pushDir, overlap);
             }
         });
 
@@ -5311,7 +5993,7 @@ export class Player3D {
         this.group.position.y += this.velocity.y;
 
         let onGround = false;
-        allGroundables.forEach(plat => {
+        const checkGroundable = (plat) => {
             this._tempBox.setFromObject(plat);
             const box = this._tempBox;
             // Allow a bit of cushion for grounding
@@ -5328,7 +6010,9 @@ export class Player3D {
                     onGround = true;
                 }
             }
-        });
+        };
+        platforms.forEach(checkGroundable);
+        if (!onGround) collidables.forEach(checkGroundable);
 
         if (!onGround && this.group.position.y < 0) {
             if (this.velocity.y < -0.1) {

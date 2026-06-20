@@ -143,10 +143,51 @@ export const CONFIG = {
         { progress: 100, label: "Network Fully Restored", desc: "Solana Fungal Grid at 100% capacity." }
     ],
     MAGIC: [
-        { id: 'sparkSpore', name: 'Spark Spore', costBlue: 10, costGold: 2, damageBonus: 3, desc: 'A quick green flame spell. +3 magic.' },
-        { id: 'Rootbind', name: 'Rootbind', costBlue: 16, costGold: 4, damageBonus: 5, desc: 'Binding roots weaken boss guards. +5 magic.' },
-        { id: 'Crownflare', name: 'Crownflare', costBlue: 28, costGold: 8, damageBonus: 8, desc: 'Royal flame of the shattered crown. +8 magic.' }
+        { id: 'sparkSpore', name: 'Spark Spore', costBlue: 10, costGold: 2, damageBonus: 3, rotCleanse: 0.75, rotRadius: 4.5, desc: 'A quick green flame spell. Steadies weak rot growths.' },
+        { id: 'PurifyBloom', name: 'Purify Bloom', costBlue: 12, costGold: 3, damageBonus: 2, rotCleanse: 1.6, rotRadius: 6.5, desc: 'A cleansing bloom that washes rot from mushrooms and ground.' },
+        { id: 'Rootbind', name: 'Rootbind', costBlue: 16, costGold: 4, damageBonus: 5, rotCleanse: 1.1, rotRadius: 5.5, desc: 'Binding roots unravel rot veins and pin corrupted growths.' },
+        { id: 'Crownflare', name: 'Crownflare', costBlue: 28, costGold: 8, damageBonus: 8, rotCleanse: 2.2, rotRadius: 8, desc: 'Royal flame of the shattered crown. Scorches rot clusters clean.' }
     ],
+    ROT_QUESTS: {
+        sporewood: {
+            title: 'Purge Hollow Rot',
+            description: 'Wash the Sporewood heartwood clean so patrols thin and the grove can breathe again.',
+            rewardMagicId: 'PurifyBloom',
+            accent: 0x80ffaa
+        },
+        crystalcap: {
+            title: 'Tune the Crystal Blight',
+            description: 'Clear the humming rot from the crystal floor before it fractures the cave song.',
+            rewardMagicId: 'Rootbind',
+            accent: 0x66f0ff
+        },
+        ambermycel: {
+            title: 'Drain the Marsh Rot',
+            description: 'Burn back the ooze on the reeds and ground until the marsh paths stay open.',
+            accent: 0xffcc66
+        },
+        silkspore: {
+            title: 'Free the Silk Canopy',
+            description: 'Clean the woven rot from the canopy so fewer corrupted hunters stalk the web roads.',
+            accent: 0xeed6ff
+        },
+        emberstem: {
+            title: 'Temper the Ember Blight',
+            description: 'Scour the furnace rot from ash and magma crust before it wakes fresh warbands.',
+            rewardMagicId: 'Crownflare',
+            accent: 0xff8844
+        },
+        voidlichen: {
+            title: 'Quiet the Relay Rot',
+            description: 'Scrub the void-static from the relay ground and lichen beds until the signal clears.',
+            accent: 0xaa88ff
+        },
+        thronecap: {
+            title: 'Cleanse the Fallen Crown',
+            description: 'Purge the last thronecap blight from stone and mushroom root so the kingdom stays restored.',
+            accent: 0xff5577
+        }
+    },
     LORE: [
         { id: 'start', title: 'The Fall', text: 'The day the crown shattered, the Solana network fell silent. King Myco was forced into the fungal depths.' },
         { id: 'sporewood_restored', title: 'Sporewood Awakening', text: 'Nov Sprig whispers of a time when the Sporewood was a nursery for data-shrooms.' },
@@ -160,7 +201,7 @@ export const CONFIG = {
     // token drops from the hub's guard enemies as the tutorial introduction.
     PORTAL_KEYS: {
         sporewood:  { id: 'mosswood_token',   name: 'Mosswood Token',   color: 0x39FF14, shape: 'leaf',     droppedBy: 'Hub Guard',         portalRegion: 'sporewood'  },
-        crystalcap: { id: 'moldjaw_fang',     name: 'Moldjaw Fang',     color: 0xaa00ff, shape: 'fang',     droppedBy: 'Moldjaw Sentinel',  portalRegion: 'crystalcap' },
+        crystalcap: { id: 'moldjaw_fang',     name: 'Mossfang Fang',    color: 0xaa00ff, shape: 'fang',     droppedBy: 'Mossfang Sentinel', portalRegion: 'crystalcap' },
         ambermycel: { id: 'shardcap_crystal', name: 'Shardcap Crystal', color: 0x00ffff, shape: 'octa',     droppedBy: 'Shardcap Warden',   portalRegion: 'ambermycel' },
         silkspore:  { id: 'bog_pearl',        name: 'Bog Pearl',        color: 0xffaa33, shape: 'sphere',   droppedBy: 'Bogbelly Myconid',  portalRegion: 'silkspore'  },
         emberstem:  { id: 'widow_silk',       name: 'Widow Silk',       color: 0xeeeeff, shape: 'silk',     droppedBy: 'Widowcap Weaver',   portalRegion: 'emberstem'  },
@@ -178,12 +219,12 @@ export const CONFIG = {
     // `sage` { name, clue, tactic } - shown in the dungeon modal so the player knows what to do
     BOSS_DUNGEONS: {
         sporewood: {
-            bossName: 'Moldjaw Sentinel',
+            bossName: 'Mossfang Sentinel',
             minLevel: 2, minShards: 0, minSpores: 25, requireMagic: null, keyItem: 'mosswood_token',
             sage: {
                 name: 'Sage Bramblecap',
-                clue: 'The Moldjaw Sentinel lashes with a moss-whip. Strike between sweeps and aim for its glowing throat-bulb.',
-                tactic: 'Wide swing → opening. Dash sideways, never backwards.'
+                clue: 'Mossfang Sentinel lashes with root-whips and slams its trunk-face into the earth. Strike after the slam and aim for the glowing heartwood behind its fangs.',
+                tactic: 'Circle the haunted tree, bait the slam, then punish the face while it recovers.'
             }
         },
         crystalcap: {
@@ -303,7 +344,53 @@ export const CONFIG = {
                 name: 'Myco Hamlet',
                 npcs: [
                     { name: 'Merchant Spore', sprite: 'npc-sprig.webp', role: 'shop' },
-                    { name: 'Wise Fungus', sprite: 'npc-sprig.webp', role: 'save' }
+                    { name: 'Wise Fungus', sprite: 'npc-sprig.webp', role: 'save' },
+                    {
+                        name: 'Gate Scout Luma',
+                        sprite: 'npc-sprig.webp',
+                        role: 'quest',
+                        trust: 'good',
+                        dialogue: {
+                            root: {
+                                text: "The outer gates still answer to your crown, Majesty, but only after you clear the starter blight around the hamlet.",
+                                options: [
+                                    { label: 'STARTER BLIGHT?', next: 'task' },
+                                    { label: 'OUTER GATES?', next: 'gates' }
+                                ]
+                            },
+                            task: {
+                                text: "Sweep the nearby rotlings, gather a few blue spores, and speak with Elder Spore again. Once the network stirs, the Sporewood path will obey you.",
+                                options: [{ label: 'I\'LL HANDLE IT', next: 'root' }]
+                            },
+                            gates: {
+                                text: "Each restored land wakes another portal. Defeat a boss, claim its prize, then the next route opens. The kingdom remembers its king in stages.",
+                                options: [{ label: 'GOOD TO KNOW', next: 'root' }]
+                            }
+                        }
+                    },
+                    {
+                        name: 'Page Myr',
+                        sprite: 'npc-sprig.webp',
+                        role: 'quest',
+                        trust: 'good',
+                        dialogue: {
+                            root: {
+                                text: "The Chronicler sent me ahead with fresh pages. Want a quick note on SHARDS or SPORES?",
+                                options: [
+                                    { label: 'SHARDS', next: 'shards' },
+                                    { label: 'SPORES', next: 'spores' }
+                                ]
+                            },
+                            shards: {
+                                text: "Crown Shards restore the kingdom itself. They matter more than gold, and every boss keeps one where the Rot is thickest.",
+                                options: [{ label: 'NOTED', next: 'root' }]
+                            },
+                            spores: {
+                                text: "Blue spores keep you alive. Gold spores open royal options. Spend blue freely, but think before you part with gold.",
+                                options: [{ label: 'SMART', next: 'root' }]
+                            }
+                        }
+                    }
                 ]
             }
         },
@@ -311,7 +398,7 @@ export const CONFIG = {
             id: 'sporewood',
             name: 'Sporewood Hollow',
             subtitle: 'The first grove where the rot took root.',
-            bossName: 'Moldjaw Sentinel',
+            bossName: 'Mossfang Sentinel',
             requirement: 'Defeat 5 Mini-Guards',
             tint: 0x2d1b33,
             skyColor: 0x08020d,
@@ -346,7 +433,7 @@ export const CONFIG = {
                         ]
                     },
                     after_boss: {
-                        text: "You did it! The Moldjaw Sentinel has fallen. The spores here are pure again. Thank you, King.",
+                        text: "You did it! Mossfang Sentinel has fallen. The spores here are pure again. Thank you, King.",
                         options: [{ label: "JUST DOING MY DUTY", next: "root" }]
                     }
                 }
@@ -356,7 +443,7 @@ export const CONFIG = {
                 // V1.9.37 - Expanded Sporewood roster. Each NPC owns a small
                 // dialogue tree so the player gets quest direction, boss clues,
                 // spell hints, item lore, and explorer tips before facing the
-                // Moldjaw Sentinel. The spawner reads village.npcs in
+                // Mossfang Sentinel. The spawner reads village.npcs in
                 // setupRegion() and arranges them in a circle around the
                 // village center.
                 npcs: [
@@ -369,10 +456,10 @@ export const CONFIG = {
                         trust: 'good',
                         dialogue: {
                             root: {
-                                text: "Hmph. Another mushroom claiming the crown. Prove you are King — clear Hollowcap House before you face the Moldjaw.",
+                                text: "Hmph. Another mushroom claiming the crown. Prove you are King - clear Hollowcap House before you face Mossfang.",
                                 options: [
                                     { label: "HOLLOWCAP HOUSE?", next: "house" },
-                                    { label: "THE MOLDJAW SENTINEL?", next: "boss" },
+                                    { label: "THE MOSSFANG SENTINEL?", next: "boss" },
                                     { label: "WHAT DO YOU NEED?", next: "task" }
                                 ]
                             },
@@ -381,7 +468,7 @@ export const CONFIG = {
                                 options: [{ label: "BACK", next: "root" }]
                             },
                             boss: {
-                                text: "Moldjaw is BLIND but his hearing is sharp. Strike when his jaw opens to roar — that is when the rot in his chest is exposed. His armor turns spores aside; melee at that moment.",
+                                text: "Mossfang lurches like a haunted tree. Strike when its carved maw opens after a slam - that is when the rot in its heartwood is exposed. Its bark shrugs off spores until then.",
                                 options: [{ label: "I'LL REMEMBER", next: "root" }]
                             },
                             task: {
@@ -409,7 +496,7 @@ export const CONFIG = {
                                 ]
                             },
                             spell: {
-                                text: "The Verdant Pulse — a healing wave that restores HP when MAGIC is high. The Moldjaw cannot interrupt it if you cast from cover. Practice with your wand and the spell will reveal itself when you are ready.",
+                                text: "The Verdant Pulse - a healing wave that restores HP when MAGIC is high. Mossfang cannot interrupt it if you cast from cover. Practice with your wand and the spell will reveal itself when you are ready.",
                                 options: [{ label: "THANK YOU", next: "root" }]
                             },
                             grove: {
@@ -429,7 +516,7 @@ export const CONFIG = {
                         trust: 'good',
                         dialogue: {
                             root: {
-                                text: "Tinctures, salves, spore-bombs — Tilda has it all. The Moldjaw drops a fang; bring it to me and I'll brew you something nasty.",
+                                text: "Tinctures, salves, spore-bombs - Tilda has it all. Mossfang drops a fang; bring it to me and I'll brew you something nasty.",
                                 options: [
                                     { label: "WHAT DOES THE FANG DO?", next: "fang" },
                                     { label: "WHAT DO YOU SELL?", next: "wares" },
@@ -437,7 +524,7 @@ export const CONFIG = {
                                 ]
                             },
                             fang: {
-                                text: "The Moldjaw Fang, distilled, becomes a Rot Resist Tonic — halves the damage from spore pools for one region. Essential before you delve Crystalcap.",
+                                text: "The Mossfang Fang, distilled, becomes a Rot Resist Tonic - halves the damage from spore pools for one region. Essential before you delve Crystalcap.",
                                 options: [{ label: "I'LL GET IT", next: "root" }]
                             },
                             wares: {
@@ -445,7 +532,7 @@ export const CONFIG = {
                                 options: [{ label: "WILL DO", next: "root" }]
                             },
                             advice: {
-                                text: "Never engage the Moldjaw on low Magic. His phase-2 spore belch fills the arena — you'll want Verdant Pulse to heal through it. Mirella knows.",
+                                text: "Never engage Mossfang on low Magic. Its phase-2 spore belch fills the arena - you'll want Verdant Pulse to heal through it. Mirella knows.",
                                 options: [{ label: "GOOD POINT", next: "root" }]
                             }
                         }
@@ -465,7 +552,7 @@ export const CONFIG = {
                                 ]
                             },
                             tip: {
-                                text: "Double-jump (SPACE twice) clears the spore-pool gaps. Hold X for charged magic — it crits the Moldjaw's exposed chest.",
+                                text: "Double-jump (SPACE twice) clears the spore-pool gaps. Hold X for charged magic - it crits Mossfang's exposed heartwood.",
                                 options: [{ label: "NICE", next: "root" }]
                             },
                             chest: {
@@ -473,7 +560,7 @@ export const CONFIG = {
                                 options: [{ label: "THANKS PIP", next: "root" }]
                             },
                             hazard: {
-                                text: "Spore pools = damage over time. Rot clusters can spawn mini-guards if you stand near them too long. And the Moldjaw's gate-stones — DON'T touch them before you've found the Mosswood Token.",
+                                text: "Spore pools = damage over time. Rot clusters can spawn mini-guards if you stand near them too long. And Mossfang's gate-stones - DON'T touch them before you've found the Mosswood Token.",
                                 options: [{ label: "GOT IT", next: "root" }]
                             }
                         }
@@ -486,8 +573,8 @@ export const CONFIG = {
             id: 'crystalcap',
             name: 'Crystalcap Caverns',
             subtitle: 'Glass spores hum beneath violet stone.',
-            bossName: 'Shardcap Warden',
-            requirement: 'Defeat Moldjaw Sentinel',
+                bossName: 'Shardcap Warden',
+                requirement: 'Defeat Mossfang Sentinel',
             tint: 0x112244,
             skyColor: 0x030816,
             groundColor: 0x081326,
@@ -526,7 +613,53 @@ export const CONFIG = {
                 name: 'Crystal Port',
                 npcs: [
                     { name: 'Gem Merchant', sprite: 'npc-prism.webp', role: 'shop' },
-                    { name: 'Shard Watcher', sprite: 'npc-prism.webp', role: 'save' }
+                    { name: 'Shard Watcher', sprite: 'npc-prism.webp', role: 'save' },
+                    {
+                        name: 'Resonant Miner Pell',
+                        sprite: 'npc-prism.webp',
+                        role: 'quest',
+                        trust: 'good',
+                        dialogue: {
+                            root: {
+                                text: "Hear that ringing? The cave only opens when the crystal tones answer in pairs. Miss a note and the path collapses back into echo.",
+                                options: [
+                                    { label: 'PAIR THE TONES?', next: 'tones' },
+                                    { label: 'THE WARDEN?', next: 'boss' }
+                                ]
+                            },
+                            tones: {
+                                text: "Strike the bright crystal, then match its twin before the hum fades. Start with the highest pitch. The low notes lie when the Rot is near.",
+                                options: [{ label: 'I CAN DO THAT', next: 'root' }]
+                            },
+                            boss: {
+                                text: "Shardcap Warden reflects careless shots. Wait for the crystal plates on its arms to flare, then blast the glowing seam in its chest.",
+                                options: [{ label: 'SEAM IN THE CHEST', next: 'root' }]
+                            }
+                        }
+                    },
+                    {
+                        name: 'Cantor Ves',
+                        sprite: 'npc-prism.webp',
+                        role: 'mage',
+                        trust: 'good',
+                        dialogue: {
+                            root: {
+                                text: "I tune spellwork against crystal hum. Ask about a SPELL TIP or a SECRET VEIN.",
+                                options: [
+                                    { label: 'SPELL TIP', next: 'spell' },
+                                    { label: 'SECRET VEIN', next: 'vein' }
+                                ]
+                            },
+                            spell: {
+                                text: "Spark Spore arcs farther when you fire from high ground. In these caverns, ledges are worth more than armor.",
+                                options: [{ label: 'GOOD TIP', next: 'root' }]
+                            },
+                            vein: {
+                                text: "North of the docks, a cracked geode hides a gold seam. Break the dull crystals, not the bright ones, or the chamber seals again.",
+                                options: [{ label: 'I\'LL LOOK', next: 'root' }]
+                            }
+                        }
+                    }
                 ]
             },
             place: { type: 'cave', name: 'Echo Crystal Cave', puzzle: 'Pair matching crystal tones before the echo fades.', quest: 'Stabilize the echo crystals.', rewardBlue: 4, rewardGold: 1, magic: 'Spark Spore' }
@@ -575,7 +708,53 @@ export const CONFIG = {
                 name: 'Bog Hamlet',
                 npcs: [
                     { name: 'Swamp Trader', sprite: 'npc-boglin.webp', role: 'shop' },
-                    { name: 'Mud Seer', sprite: 'npc-boglin.webp', role: 'quest' }
+                    { name: 'Mud Seer', sprite: 'npc-boglin.webp', role: 'quest' },
+                    {
+                        name: 'Reed Diver Sprock',
+                        sprite: 'npc-boglin.webp',
+                        role: 'quest',
+                        trust: 'mixed',
+                        dialogue: {
+                            root: {
+                                text: "The safe reeds shimmer amber, not violet. Follow the amber bridges and you'll reach the drain wheel below the marsh.",
+                                options: [
+                                    { label: 'DRAIN WHEEL?', next: 'wheel' },
+                                    { label: 'BOGBELLY?', next: 'boss' }
+                                ]
+                            },
+                            wheel: {
+                                text: "Turn the sluice locks in the order carved on the root posts. Miss one and the bog burps up more rot bubbles.",
+                                options: [{ label: 'ROOT POSTS, GOT IT', next: 'root' }]
+                            },
+                            boss: {
+                                text: "Bogbelly hates dry footing. Lure it onto the islands after it belly-slams, then punish the glowing sack under its chin.",
+                                options: [{ label: 'THAT HELPS', next: 'root' }]
+                            }
+                        }
+                    },
+                    {
+                        name: 'Lantern Nib',
+                        sprite: 'npc-boglin.webp',
+                        role: 'quest',
+                        trust: 'good',
+                        dialogue: {
+                            root: {
+                                text: "I hang lanterns where treasure sinks. Want the CHEST ROUTE or the SAFE CAMP?",
+                                options: [
+                                    { label: 'CHEST ROUTE', next: 'chest' },
+                                    { label: 'SAFE CAMP', next: 'camp' }
+                                ]
+                            },
+                            chest: {
+                                text: "Three lanterns in a triangle mark a buried chest. Dig between them after draining the first pool and you will pull up a gold spore cache.",
+                                options: [{ label: 'I\'LL FIND IT', next: 'root' }]
+                            },
+                            camp: {
+                                text: "If the marsh overwhelms you, retreat to the dry stump camp east of the village. Even the Rot avoids that old firepit.",
+                                options: [{ label: 'USEFUL', next: 'root' }]
+                            }
+                        }
+                    }
                 ]
             },
             place: { type: 'cave', name: 'Sunken Root Cave', puzzle: 'Choose the amber root bridges and avoid rot bubbles.', quest: 'Drain the rot pool below the marsh.', rewardBlue: 5, rewardGold: 2, item: 'Amber Reed' }
@@ -624,7 +803,53 @@ export const CONFIG = {
                 name: 'Silk Outpost',
                 npcs: [
                     { name: 'Web Merchant', sprite: 'npc-silkeye.webp', role: 'shop' },
-                    { name: 'Silk Weaver', sprite: 'npc-silkeye.webp', role: 'save' }
+                    { name: 'Silk Weaver', sprite: 'npc-silkeye.webp', role: 'save' },
+                    {
+                        name: 'Moth Tender Iri',
+                        sprite: 'npc-silkeye.webp',
+                        role: 'quest',
+                        trust: 'good',
+                        dialogue: {
+                            root: {
+                                text: "Our supply moths are trussed up in silk cocoons. Free them in reverse beacon order and they'll carry you to hidden ledges.",
+                                options: [
+                                    { label: 'REVERSE ORDER?', next: 'order' },
+                                    { label: 'WIDOWCAP?', next: 'boss' }
+                                ]
+                            },
+                            order: {
+                                text: "Watch the lantern-webs flash, then step the pattern backward. The canopy loves to punish anyone moving on instinct.",
+                                options: [{ label: 'BACKWARD PATTERN', next: 'root' }]
+                            },
+                            boss: {
+                                text: "Widowcap Weaver drops from above after every cocoon burst. Roll clear, then strike before she climbs back into the rafters.",
+                                options: [{ label: 'I\'LL WATCH THE CEILING', next: 'root' }]
+                            }
+                        }
+                    },
+                    {
+                        name: 'Rope Scout Venn',
+                        sprite: 'npc-silkeye.webp',
+                        role: 'quest',
+                        trust: 'mixed',
+                        dialogue: {
+                            root: {
+                                text: "I map the hanging bridges. Need a SHORTCUT or a HAZARD WARNING?",
+                                options: [
+                                    { label: 'SHORTCUT', next: 'shortcut' },
+                                    { label: 'HAZARD', next: 'hazard' }
+                                ]
+                            },
+                            shortcut: {
+                                text: "Cut the pale silk knots near the west scaffold and a bridge drops straight to the dungeon mouth. Saves a long walk, costs a little courage.",
+                                options: [{ label: 'WORTH IT', next: 'root' }]
+                            },
+                            hazard: {
+                                text: "The white webs slow you, but the blue webs fling you. Use the blue lanes during the boss chase or you'll never keep up.",
+                                options: [{ label: 'GOOD TO KNOW', next: 'root' }]
+                            }
+                        }
+                    }
                 ]
             },
             place: { type: 'dungeon', name: 'Silkspore Dungeon', puzzle: 'Untangle the web sequence in reverse order.', quest: 'Free the trapped supply moths.', rewardBlue: 6, rewardGold: 2, armor: 'Moss Cloak' }
@@ -673,7 +898,53 @@ export const CONFIG = {
                 name: 'Ember Forge',
                 npcs: [
                     { name: 'Anvil Spore', sprite: 'npc-cinder.webp', role: 'shop' },
-                    { name: 'Flame Sage', sprite: 'npc-cinder.webp', role: 'save' }
+                    { name: 'Flame Sage', sprite: 'npc-cinder.webp', role: 'save' },
+                    {
+                        name: 'Bellows Smith Orin',
+                        sprite: 'npc-cinder.webp',
+                        role: 'quest',
+                        trust: 'good',
+                        dialogue: {
+                            root: {
+                                text: "The furnace keep answers to order, not force. Cool the vents blue, then gold, then green or the fire cycle resets.",
+                                options: [
+                                    { label: 'VENT ORDER', next: 'order' },
+                                    { label: 'CINDERSTALK?', next: 'boss' }
+                                ]
+                            },
+                            order: {
+                                text: "Each correct vent drops the heat one tier. Miss a color and the furnace floods the room with cinders. Keep moving between pulls.",
+                                options: [{ label: 'UNDERSTOOD', next: 'root' }]
+                            },
+                            boss: {
+                                text: "Cinderstalk Brute overheats after a charge. When its shoulder vents glow white, circle behind and strike the exposed spine mushrooms.",
+                                options: [{ label: 'WHITE VENTS, REAR STRIKE', next: 'root' }]
+                            }
+                        }
+                    },
+                    {
+                        name: 'Ash Runner Pyra',
+                        sprite: 'npc-cinder.webp',
+                        role: 'quest',
+                        trust: 'good',
+                        dialogue: {
+                            root: {
+                                text: "I run the upper catwalks. Want an ORE CACHE or a SAFE ROUTE through the vents?",
+                                options: [
+                                    { label: 'ORE CACHE', next: 'cache' },
+                                    { label: 'SAFE ROUTE', next: 'route' }
+                                ]
+                            },
+                            cache: {
+                                text: "There's a gold spore satchel tucked behind the third cooling fan. Shut the nearby blue vent first or you'll get roasted reaching for it.",
+                                options: [{ label: 'I\'LL GRAB IT', next: 'root' }]
+                            },
+                            route: {
+                                text: "The left catwalk is hotter, but faster. The right tunnel is safer and stocked with healing caps. Pick what your HP can afford.",
+                                options: [{ label: 'FAIR', next: 'root' }]
+                            }
+                        }
+                    }
                 ]
             },
             place: { type: 'castle', name: 'Emberstem Furnace Keep', puzzle: 'Cool the vents in the order: blue, gold, green.', quest: 'Restore the furnace bellows.', rewardBlue: 10, rewardGold: 4, armor: 'Amber Plate' }
@@ -722,7 +993,53 @@ export const CONFIG = {
                 name: 'Void Haven',
                 npcs: [
                     { name: 'Null Merchant', sprite: 'npc-null.webp', role: 'shop' },
-                    { name: 'Ruin Seer', sprite: 'npc-null.webp', role: 'save' }
+                    { name: 'Ruin Seer', sprite: 'npc-null.webp', role: 'save' },
+                    {
+                        name: 'Signal Scribe Oxa',
+                        sprite: 'npc-null.webp',
+                        role: 'quest',
+                        trust: 'good',
+                        dialogue: {
+                            root: {
+                                text: "These relays wake only after the pulse disappears. Wait for silence, then hit the pad. The void punishes impatience.",
+                                options: [
+                                    { label: 'WAIT FOR SILENCE?', next: 'pulse' },
+                                    { label: 'NULLSPORE?', next: 'boss' }
+                                ]
+                            },
+                            pulse: {
+                                text: "Every relay cycles bright, dim, then dead-black. Step in on dead-black. Any earlier and the whole ruin screams back to life.",
+                                options: [{ label: 'DEAD-BLACK, GOT IT', next: 'root' }]
+                            },
+                            boss: {
+                                text: "Nullspore Oracle copies your last move. Break the pattern. If you spam spells, it learns spells. If you dodge, it forgets.",
+                                options: [{ label: 'I\'LL MIX IT UP', next: 'root' }]
+                            }
+                        }
+                    },
+                    {
+                        name: 'Pulse Hermit Vex',
+                        sprite: 'npc-null.webp',
+                        role: 'quest',
+                        trust: 'mixed',
+                        dialogue: {
+                            root: {
+                                text: "The ruins hide code caches. Ask for a SECRET NODE or a SURVIVAL TIP.",
+                                options: [
+                                    { label: 'SECRET NODE', next: 'node' },
+                                    { label: 'SURVIVAL TIP', next: 'survival' }
+                                ]
+                            },
+                            node: {
+                                text: "A broken relay under the west arch still stores blue spores. Activate the side pad after the main pulse vanishes and the cache drawer slides out.",
+                                options: [{ label: 'SLICK', next: 'root' }]
+                            },
+                            survival: {
+                                text: "Void pools don't always hurt immediately. They slow first. The moment your step drags, jump clear before the damage tick begins.",
+                                options: [{ label: 'GOOD WARNING', next: 'root' }]
+                            }
+                        }
+                    }
                 ]
             },
             place: { type: 'dungeon', name: 'Voidlichen Relay Ruins', puzzle: 'Wait for the pulse to vanish, then activate the relay.', quest: 'Reboot the silent Solana relay.', rewardBlue: 12, rewardGold: 5, magic: 'Rootbind' }
@@ -769,7 +1086,53 @@ export const CONFIG = {
                 name: 'Royal Capital',
                 npcs: [
                     { name: 'Royal Merchant', sprite: 'npc-sprig.webp', role: 'shop' },
-                    { name: 'Grand Archivist', sprite: 'npc-crownless.webp', role: 'save' }
+                    { name: 'Grand Archivist', sprite: 'npc-crownless.webp', role: 'save' },
+                    {
+                        name: 'Tower Mason Brikk',
+                        sprite: 'npc-sprig.webp',
+                        role: 'quest',
+                        trust: 'good',
+                        dialogue: {
+                            root: {
+                                text: "Every shard you restore strengthens the royal tower. Bring home enough gold and I'll raise new ledges, banners, and storage lofts.",
+                                options: [
+                                    { label: 'WHAT CHANGES?', next: 'changes' },
+                                    { label: 'HOW MUCH GOLD?', next: 'gold' }
+                                ]
+                            },
+                            changes: {
+                                text: "New rooms, faster traversal, and better sights over the kingdom. A proper king should feel the capital growing with every victory.",
+                                options: [{ label: 'I LIKE THAT', next: 'root' }]
+                            },
+                            gold: {
+                                text: "Keep a reserve of ten gold spores if you want upgrades on demand. Spend the rest as you please.",
+                                options: [{ label: 'TEN GOLD RESERVED', next: 'root' }]
+                            }
+                        }
+                    },
+                    {
+                        name: 'Garden Keeper Sola',
+                        sprite: 'npc-sprig.webp',
+                        role: 'quest',
+                        trust: 'good',
+                        dialogue: {
+                            root: {
+                                text: "The palace garden tracks your journey. Want a REST TIP or a REGION REMINDER?",
+                                options: [
+                                    { label: 'REST TIP', next: 'rest' },
+                                    { label: 'REGION REMINDER', next: 'regions' }
+                                ]
+                            },
+                            rest: {
+                                text: "Come home whenever your potions run low. A quick rest here tops your health without spending supplies.",
+                                options: [{ label: 'GOOD TO KNOW', next: 'root' }]
+                            },
+                            regions: {
+                                text: "Sporewood teaches timing. Crystalcap tests memory. Ambermycel punishes footing. Silkspore flips patterns. Emberstem loves order. Voidlichen rewards patience.",
+                                options: [{ label: 'NICE SUMMARY', next: 'root' }]
+                            }
+                        }
+                    }
                 ]
             }
         },
@@ -817,7 +1180,53 @@ export const CONFIG = {
                 name: 'Citadel Gate',
                 npcs: [
                     { name: 'Last Merchant', sprite: 'npc-crownless.webp', role: 'shop' },
-                    { name: 'Grave Watcher', sprite: 'npc-crownless.webp', role: 'save' }
+                    { name: 'Grave Watcher', sprite: 'npc-crownless.webp', role: 'save' },
+                    {
+                        name: 'Exile Knight Ruen',
+                        sprite: 'npc-crownless.webp',
+                        role: 'quest',
+                        trust: 'good',
+                        dialogue: {
+                            root: {
+                                text: "The throne gate demands tribute in sequence: blue spores, then gold spores, then crown magic. The order matters more than the amount.",
+                                options: [
+                                    { label: 'GATE SEQUENCE', next: 'sequence' },
+                                    { label: 'THE GRAND ROT?', next: 'boss' }
+                                ]
+                            },
+                            sequence: {
+                                text: "Offer the lesser wealth first so the citadel recognizes restraint. Then pay gold. Then cast. Dark Mycelius cannot understand sacrifice done in the right order.",
+                                options: [{ label: 'I SEE', next: 'root' }]
+                            },
+                            boss: {
+                                text: "The Grand Rot mirrors greed and panic. When it copies your stance, change rhythm immediately. Make it chase you into mistakes.",
+                                options: [{ label: 'CHANGE RHYTHM', next: 'root' }]
+                            }
+                        }
+                    },
+                    {
+                        name: 'Relay Penitent Solm',
+                        sprite: 'npc-crownless.webp',
+                        role: 'quest',
+                        trust: 'mixed',
+                        dialogue: {
+                            root: {
+                                text: "Few reach this far. Ask me for a LAST CACHE or a FINAL WARNING.",
+                                options: [
+                                    { label: 'LAST CACHE', next: 'cache' },
+                                    { label: 'FINAL WARNING', next: 'warning' }
+                                ]
+                            },
+                            cache: {
+                                text: "Behind the fallen banner at the gate rests one final chest. It won't win the war, but it may fund the potion that does.",
+                                options: [{ label: 'I\'LL TAKE IT', next: 'root' }]
+                            },
+                            warning: {
+                                text: "Do not rush the final room with empty magic. Every phase asks a different answer, and the citadel gives no safe pause once the heart wakes.",
+                                options: [{ label: 'I\'LL PREPARE', next: 'root' }]
+                            }
+                        }
+                    }
                 ]
             },
             place: { type: 'castle', name: 'Thronecap Citadel', puzzle: 'Offer blue spores, gold spores, then cast crown magic.', quest: 'Unlock the throne gate of Dark Mycelius.', rewardBlue: 15, rewardGold: 8, magic: 'Crownflare' }
