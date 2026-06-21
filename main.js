@@ -32,6 +32,7 @@ const CLOUD_BALANCE_KEY = 'myco_quest_wallet_balance_v1';
 const CLOUD_LAST_SYNC_KEY = 'myco_quest_wallet_last_sync_v1';
 const LIVE_LEADERBOARD_TTL_MS = 60 * 1000;
 const LIVE_TERRITORY_TTL_MS = 45 * 1000;
+const HOLDER_ACCESS_REFRESH_MS = 15 * 60 * 1000;
 
 function resolveMycoApiBase() {
     const override = localStorage.getItem('myco_api_base');
@@ -106,6 +107,9 @@ class LeaderboardManager {
     save() {
         this.data.updatedAt = Date.now();
         localStorage.setItem(this.storageKey, JSON.stringify(this.data));
+        try {
+            window.game?.handleLocalProgressSaved?.('leaderboard');
+        } catch (_) {}
     }
 
     // V1.9.23 - Returns the calendar-day key used to roll over "today" burn totals.
@@ -462,6 +466,13 @@ class ProgressionManager {
                         armor: 0
                     }
                 },
+                kingdom: {
+                    structures: {},
+                    residents: {},
+                    threats: {},
+                    dwellingTier: 1
+                },
+                walletTierClaims: {},
                 quests: {
                     goldenSpore: {
                         active: true,
@@ -577,6 +588,15 @@ class ProgressionManager {
         if (!data.pendingBossRewards || typeof data.pendingBossRewards !== 'object') data.pendingBossRewards = {}; // V1.9.46 migration
         if (!data.home) data.home = { level: 1, decorations: [], storedItems: [], storedWeapons: [], forgeLevels: { weapons: 0, armor: 0 } };
         if (!data.home.forgeLevels) data.home.forgeLevels = { weapons: 0, armor: 0 };
+        if (!data.kingdom || typeof data.kingdom !== 'object') data.kingdom = {};
+        if (!data.kingdom.structures || typeof data.kingdom.structures !== 'object') data.kingdom.structures = {};
+        if (!data.kingdom.residents || typeof data.kingdom.residents !== 'object') data.kingdom.residents = {};
+        if (!data.kingdom.threats || typeof data.kingdom.threats !== 'object') data.kingdom.threats = {};
+        if (!data.walletTierClaims || typeof data.walletTierClaims !== 'object') data.walletTierClaims = {};
+        if (!Number.isFinite(data.kingdom.dwellingTier) || data.kingdom.dwellingTier < 1) {
+            data.kingdom.dwellingTier = Math.max(1, Number(data.home.level) || 1);
+        }
+        data.home.level = Math.max(Number(data.home.level) || 1, data.kingdom.dwellingTier || 1);
         if (data.ingredients === undefined) data.ingredients = 0;
         if (data.dailyBurnedAmount === undefined) data.dailyBurnedAmount = 0;
         if (data.totalBurned === undefined) data.totalBurned = 0;
@@ -610,6 +630,9 @@ class ProgressionManager {
     save() {
         this.data.lastSavedAt = Date.now();
         localStorage.setItem(this.storageKey, JSON.stringify(this.data));
+        try {
+            window.game?.handleLocalProgressSaved?.('progression');
+        } catch (_) {}
     }
 
     addAlignment(amount) {
@@ -622,7 +645,7 @@ class ProgressionManager {
         // ignores ingredients (no cooking loop). Story mode is unchanged.
         if (this.isCollectorMode()) {
             this._resetCollectorDailyIfNeeded();
-            const remaining = Math.max(0, (this.data.collectorDailyCap || 1000) - (this.data.collectorDailyCollected || 0));
+            const remaining = Math.max(0, this.getCollectorDailyCap() - (this.data.collectorDailyCollected || 0));
             const total = Math.max(0, (blue || 0) + (gold || 0));
             const allowed = Math.min(total, remaining);
             if (allowed > 0) {
@@ -680,8 +703,65 @@ class ProgressionManager {
     }
     getCollectorRemainingToday() {
         this._resetCollectorDailyIfNeeded();
-        const cap = this.data.collectorDailyCap || 1000;
+        const cap = this.getCollectorDailyCap();
         return Math.max(0, cap - (this.data.collectorDailyCollected || 0));
+    }
+
+    getKingdomState() {
+        if (!this.data.kingdom || typeof this.data.kingdom !== 'object') this.data.kingdom = {};
+        if (!this.data.kingdom.structures || typeof this.data.kingdom.structures !== 'object') this.data.kingdom.structures = {};
+        if (!this.data.kingdom.residents || typeof this.data.kingdom.residents !== 'object') this.data.kingdom.residents = {};
+        if (!this.data.kingdom.threats || typeof this.data.kingdom.threats !== 'object') this.data.kingdom.threats = {};
+        if (!Number.isFinite(this.data.kingdom.dwellingTier) || this.data.kingdom.dwellingTier < 1) {
+            this.data.kingdom.dwellingTier = Math.max(1, Number(this.data.home?.level) || 1);
+        }
+        return this.data.kingdom;
+    }
+
+    getKingdomCollectorCapBonus() {
+        const kingdom = this.getKingdomState();
+        const sumBucket = (catalog, store) => (catalog || []).reduce((total, item) => {
+            const count = Number(store?.[item.id] || 0);
+            return total + (count * Number(item.capBonus || 0));
+        }, 0);
+        const dwellingBonus = (CONFIG.DWELLING_UPGRADES || []).reduce((total, upgrade) => {
+            return total + ((kingdom.dwellingTier || 1) >= upgrade.tier ? Number(upgrade.capBonus || 0) : 0);
+        }, 0);
+        return sumBucket(CONFIG.KINGDOM_BLUEPRINTS, kingdom.structures)
+            + sumBucket(CONFIG.KINGDOM_RESIDENTS, kingdom.residents)
+            + sumBucket(CONFIG.KINGDOM_THREATS, kingdom.threats)
+            + dwellingBonus;
+    }
+
+    getCollectorDailyCap() {
+        return 1000 + this.getKingdomCollectorCapBonus();
+    }
+
+    getKingdomSummary() {
+        const kingdom = this.getKingdomState();
+        const sumBucket = (catalog, store, field) => (catalog || []).reduce((total, item) => {
+            const count = Number(store?.[item.id] || 0);
+            return total + (count * Number(item[field] || 0));
+        }, 0);
+        const countBucket = (store) => Object.values(store || {}).reduce((total, value) => total + Number(value || 0), 0);
+        const structures = countBucket(kingdom.structures);
+        const residents = countBucket(kingdom.residents);
+        const threats = countBucket(kingdom.threats);
+        const prosperity = sumBucket(CONFIG.KINGDOM_BLUEPRINTS, kingdom.structures, 'prosperity')
+            + sumBucket(CONFIG.KINGDOM_RESIDENTS, kingdom.residents, 'prosperity');
+        const defense = sumBucket(CONFIG.KINGDOM_RESIDENTS, kingdom.residents, 'defense');
+        const danger = sumBucket(CONFIG.KINGDOM_THREATS, kingdom.threats, 'danger');
+        return {
+            structures,
+            residents,
+            threats,
+            prosperity,
+            defense,
+            danger,
+            dwellingTier: kingdom.dwellingTier || 1,
+            collectorCap: this.getCollectorDailyCap(),
+            collectorBonus: this.getKingdomCollectorCapBonus()
+        };
     }
 
     unlockRegion(regionId) {
@@ -948,6 +1028,7 @@ class Game3D {
         this.nextTerritoryRefreshAt = 0;
         this.territoryLabels = [];
         this.pendingCloudSyncTimer = null;
+        this.suspendAutoCloudSync = false;
         this.liveProgressionEvents = new Set();
         this.enemies = [];
         this.enemyProjectiles = [];
@@ -974,7 +1055,7 @@ class Game3D {
         this.hudMinimized = false;
         // V1.9.17 - Track last morality state so HUD can pulse on alignment shift.
         this.lastMoralState = null;
-        this.activeInventoryTab = 'QUESTS'; // QUESTS, MAGIC, ITEMS, UPGRADES
+        this.activeInventoryTab = 'MAP';
         this.glitchIntensity = 0;
         this.isPuzzleSolved = false;
         this.hitStopFrames = 0;
@@ -1545,9 +1626,9 @@ class Game3D {
 
         this.progression.save();
         this.leaderboard.save();
-        this.queueCloudSync('save');
+        this.queueCloudSync('manual save', 150);
 
-        this.showGlobalNotification("GAME PROGRESS SAVED", "#39FF14");
+        this.showGlobalNotification(this.hasVerifiedWalletSession() ? "GAME + WALLET PROGRESS SAVED" : "GAME PROGRESS SAVED", "#39FF14");
         this.playUiNote("C5", "16n");
 
         if (this.isPaused) {
@@ -1646,7 +1727,7 @@ class Game3D {
 
                 <div style="margin-top: 20px; border-top: 1px solid #333; padding-top: 15px;">
                     <div style="font-size: 7px; color: #6f8d89; margin-bottom: 8px; line-height: 1.6;">
-                        ${this.walletSessionToken ? `LIVE CLOUD SAVE READY • ${this.shortWallet()} • ${this.formatMycoBalance()} MYCO` : 'CONNECT PHANTOM TO TURN ON LIVE CLOUD SAVE'}
+                        ${this.walletSessionToken ? `LIVE CLOUD SAVE READY • ${this.shortWallet()} • ${this.formatMycoBalance()} MYCO` : `VERIFY PHANTOM WITH ${this.getMinimumMycoToPlay().toLocaleString('en-US')} MYCO TO ENTER LIVE MODE`}
                     </div>
                     <button onclick="window.game.syncWithSolana()" class="tooltip-trigger" data-tip="Push your current adventure to the live wallet-backed archive" style="width: 100%; padding: 10px; background: #00ffff; border: none; font-family: inherit; font-size: 8px; cursor: pointer; color: #000; margin-bottom: 8px;">
                         ${this.walletSessionToken ? 'SYNC CLOUD SAVE' : 'VERIFY WALLET FOR CLOUD SAVE'}
@@ -1783,7 +1864,22 @@ class Game3D {
         const moralColor = alignment < 35 ? '#aa00ff' : (alignment > 65 ? '#39FF14' : '#cccccc');
         const moralLabel = alignment < 35 ? 'ROT-TOUCHED' : (alignment > 65 ? 'KING\'S LIGHT' : 'NEUTRAL');
         const { timeStr, period } = this.getWorldTimeState();
+        const collectorCap = this.progression.getCollectorDailyCap();
+        const collectorRemaining = this.progression.getCollectorRemainingToday();
+        const access = this.getGameplayAccessState();
+        const holderTier = access.tier;
+        const saveStamp = p.lastSavedAt
+            ? new Date(p.lastSavedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+            : 'JUST NOW';
         const pauseLayoutColumns = this.isMobile ? '1fr' : 'minmax(0, 1.35fr) minmax(240px, 0.85fr)';
+        const pauseOverlayPadding = this.isMobile
+            ? 'calc(10px + env(safe-area-inset-top, 0px)) calc(10px + env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px)) calc(10px + env(safe-area-inset-left, 0px))'
+            : '18px';
+        const pausePanelMaxHeight = this.isMobile
+            ? 'calc(100dvh - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px))'
+            : 'min(92vh, 940px)';
+        const validTabs = new Set(['MAP', 'INVENTORY', 'SPORES', 'MAGIC', 'LOG', 'ACCESSORIES', 'SETTINGS']);
+        if (!validTabs.has(this.activeInventoryTab)) this.activeInventoryTab = 'MAP';
 
         const renderTabButton = (id, label) => `
             <button onclick="window.setInventoryTab('${id}')" style="
@@ -1861,7 +1957,7 @@ class Game3D {
             content = `
                 <div style="padding: 20px;">
                     <h3 style="color: #39FF14; font-size: 12px; margin-bottom: 10px;">SUPPLIES</h3>
-                    <div style="max-height: 300px; overflow-y: auto;">
+                    <div>
                         ${otherItems.length > 0 ? otherItems.map(id => {
                             const item = CONFIG.SUPPLIES.find(i => i.id === id) || { name: id, desc: 'A mysterious fungal object.' };
                             return `
@@ -1913,7 +2009,7 @@ class Game3D {
             content = `
                 <div style="padding: 20px; text-align: left;">
                     <h3 style="color: #ffaa00; font-size: 12px; margin-bottom: 20px;">ACTIVITY LOG & LORE</h3>
-                    <div style="max-height: 350px; overflow-y: auto; font-size: 9px; line-height: 1.6; color: #ccc;">
+                    <div style="font-size: 9px; line-height: 1.6; color: #ccc;">
                         ${discoveredLore.map(id => {
                             const entry = CONFIG.LORE.find(l => l.id === id);
                             if (!entry) return '';
@@ -1934,14 +2030,14 @@ class Game3D {
         }
 
         this.uiOverlay.innerHTML = `
-            <div style="pointer-events: auto; background: rgba(0,0,0,0.95); width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; font-family: 'Press Start 2P', cursive;">
-                <div style="background: #050505; border: 4px solid ${clanColor}; width: 90%; max-width: 900px; box-shadow: 0 0 30px ${clanColor};">
-                    <div style="padding: 20px; background: ${clanColor}; color: black; display: flex; justify-content: space-between; align-items: center;">
+            <div style="pointer-events: auto; background: rgba(0,0,0,0.95); width: 100%; height: 100%; display: flex; justify-content: center; align-items: ${this.isMobile ? 'flex-start' : 'center'}; font-family: 'Press Start 2P', cursive; box-sizing: border-box; padding: ${pauseOverlayPadding}; overflow-y: auto; -webkit-overflow-scrolling: touch;">
+                <div style="background: #050505; border: 4px solid ${clanColor}; width: min(100%, 900px); box-shadow: 0 0 30px ${clanColor}; max-height: ${pausePanelMaxHeight}; overflow: hidden; display: flex; flex-direction: column; margin: auto;">
+                    <div style="padding: ${this.isMobile ? '16px' : '20px'}; background: ${clanColor}; color: black; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
                         <h2 style="font-size: 18px; margin: 0;">PAUSED</h2>
                         <span style="font-size: 10px;">KING MYCO'S JOURNEY</span>
                     </div>
 
-                    <div style="padding: 16px 20px 0 20px; display: grid; grid-template-columns: ${pauseLayoutColumns}; gap: 12px; align-items: stretch;">
+                    <div style="padding: 16px 20px 0 20px; display: grid; grid-template-columns: ${pauseLayoutColumns}; gap: 12px; align-items: stretch; flex: 0 0 auto;">
                         <div style="background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.12); border-radius: 10px; padding: 14px 16px;">
                             <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:10px;">
                                 <span style="font-size:10px; color:#ffffff;">KING MYCO</span>
@@ -1990,26 +2086,48 @@ class Game3D {
                                     <div style="font-size:12px; color:#ffff00;">${p.goldenSpores}</div>
                                 </div>
                             </div>
+                            ${this.progression.isCollectorMode() ? `
+                                <div style="margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.08); display:flex; justify-content:space-between; gap:8px; font-size:7px; color:#c6a6ff;">
+                                    <span>DAILY CAP ${collectorCap}</span>
+                                    <span>${collectorRemaining} LEFT</span>
+                                </div>
+                            ` : ''}
+                            <div style="margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.08); display:grid; gap:4px; font-size:7px;">
+                                <div style="display:flex; justify-content:space-between; gap:8px; color:${holderTier?.accent || '#ffaa66'};">
+                                    <span>HOLDER TIER</span>
+                                    <span>${holderTier ? `${holderTier.badge || '🍄'} ${holderTier.name}` : 'LOCKED'}</span>
+                                </div>
+                                <div style="display:flex; justify-content:space-between; gap:8px; color:#9cb8b1;">
+                                    <span>${access.walletVerified ? 'VERIFIED BALANCE' : 'ACCESS CHECK'}</span>
+                                    <span>${access.walletVerified ? `${this.formatMycoBalance(access.currentBalance)} MYCO` : `${access.minimum.toLocaleString('en-US')} MYCO REQUIRED`}</span>
+                                </div>
+                                <div style="display:flex; justify-content:space-between; gap:8px; color:#7edbff;">
+                                    <span>${this.walletSessionToken ? 'AUTO CLOUD SAVE' : 'LOCAL SAVE'}</span>
+                                    <span>${saveStamp}</span>
+                                </div>
+                            </div>
                         </div>
                     </div>
 
-                    <div style="display: flex; flex-wrap: wrap;">
+                    <div style="display: flex; flex-wrap: wrap; flex: 0 0 auto;">
                         ${renderTabButton('MAP', 'MAP')}
                         ${renderTabButton('INVENTORY', 'INV')}
                         ${renderTabButton('SPORES', 'SPORES')}
                         ${renderTabButton('MAGIC', 'MAGIC')}
                         ${renderTabButton('LOG', 'LOG')}
-                        ${renderTabButton('ACCESSORIES', 'ROYAL')}
+                        ${renderTabButton('ACCESSORIES', 'BUILD')}
                         ${renderTabButton('SETTINGS', 'SET')}
                     </div>
 
-                    <div style="min-height: 450px; color: white;">
-                        ${this.activeInventoryTab === 'SETTINGS' ? this.getSettingsContent(settingsMode) : (this.activeInventoryTab === 'ACCESSORIES' ? this.getAccessoriesContent() : content)}
+                    <div style="flex: 1; min-height: 0; color: white; overflow: hidden;">
+                        <div style="height: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch;">
+                            ${this.activeInventoryTab === 'SETTINGS' ? this.getSettingsContent(settingsMode) : (this.activeInventoryTab === 'ACCESSORIES' ? this.getAccessoriesContent() : content)}
+                        </div>
                     </div>
 
-                    <div style="padding: 20px; border-top: 1px solid #222; display: flex; gap: 10px; flex-wrap: wrap;">
+                    <div style="padding: ${this.isMobile ? '14px 16px' : '20px'}; border-top: 1px solid #222; display: flex; gap: 10px; flex-wrap: wrap; flex: 0 0 auto; background: #050505;">
                         <button onclick="window.game.togglePause()" style="flex: 2; padding: 15px; background: #39FF14; border: none; font-family: inherit; cursor: pointer; color: black;">RESUME</button>
-                        <button onclick="window.game.saveGame()" style="flex: 1; padding: 15px; background: #00ffff; border: none; font-family: inherit; cursor: pointer; color: black;">SAVE</button>
+                        <button onclick="window.game.saveGame()" style="flex: 1; padding: 15px; background: #00ffff; border: none; font-family: inherit; cursor: pointer; color: black;">${this.walletSessionToken ? 'SAVE + CLOUD' : 'SAVE'}</button>
                         <button onclick="location.reload()" style="padding: 15px; background: #ff0000; border: none; font-family: inherit; cursor: pointer; color: white;">QUIT</button>
                     </div>
                 </div>
@@ -2423,6 +2541,7 @@ class Game3D {
 
         this.loadWalletConnection();
         this.loadWalletSession();
+        this.applyWalletTierRewards({ silent: true });
         this.setupStartScreen();
         void this.refreshLiveLeaderboard();
         void this.refreshLiveTerritory();
@@ -3218,6 +3337,8 @@ class Game3D {
         this.player.setAccessory('CROWN', equipped.crown);
         const territoryEffect = this.getTerritoryGameplayEffect(this.currentRegion?.id);
         this.player.territoryModifiers = territoryEffect.playerModifiers;
+        const walletTierEffect = this.getWalletTierGameplayEffect();
+        this.player.walletModifiers = walletTierEffect.playerModifiers;
         this.currentTerritoryEffect = territoryEffect;
         if (typeof this.player.applyLevelStats === 'function') this.player.applyLevelStats();
         if (typeof this.player.syncWeaponVisual === 'function') this.player.syncWeaponVisual();
@@ -5947,24 +6068,32 @@ class Game3D {
         location.reload(); // Simplest way to restore external state
     }
 
-    showDecorationShop() {
+    showDecorationShop(returnToPause = false) {
         const p = this.progression.data;
         this.uiOverlay.innerHTML = `
-            <div style="pointer-events: auto; background: rgba(0,0,0,0.95); padding: 30px; border: 2px solid #39FF14; width: 85%; max-width: 800px;">
-                <h2 style="color: #39FF14; margin-bottom: 20px; font-size: 18px;">INTERIOR DECORATIONS</h2>
-                <p style="color: #39FF14; font-size: 10px; margin-bottom: 10px;">BLUE: ${p.blueSpores} | GOLD: ${p.goldenSpores}</p>
-                <div style="max-height: 400px; overflow-y: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                    ${CONFIG.DECORATIONS.map(item => `
-                        <div style="background: #111; padding: 10px; border: 1px solid #333;">
-                            <p style="font-size: 10px; color: #00ffff;">${item.name}</p>
-                            <p style="font-size: 8px; color: #888; margin: 5px 0;">${item.desc}</p>
-                            <button onclick="window.buyDecoration('${item.id}')" style="font-size: 8px; background: #39FF14; color: black; padding: 5px 10px; border: none; width: 100%;">
-                                BUY (${item.costBlue} Blue, ${item.costGold} Gold)
-                            </button>
+            <div style="pointer-events: auto; background: rgba(0,0,0,0.95); width: 100%; height: 100%; display: flex; justify-content: center; align-items: ${this.isMobile ? 'flex-start' : 'center'}; padding: ${this.isMobile ? 'calc(10px + env(safe-area-inset-top, 0px)) calc(10px + env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px)) calc(10px + env(safe-area-inset-left, 0px))' : '18px'}; box-sizing: border-box; overflow-y: auto; -webkit-overflow-scrolling: touch; font-family: 'Press Start 2P', cursive;">
+                <div style="background: #050505; border: 2px solid #39FF14; width: min(100%, 800px); max-height: ${this.isMobile ? 'calc(100dvh - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px))' : 'min(90vh, 860px)'}; display: flex; flex-direction: column; overflow: hidden;">
+                    <div style="padding: 18px 20px; border-bottom: 1px solid rgba(57,255,20,0.24);">
+                        <h2 style="color: #39FF14; margin: 0 0 12px 0; font-size: 18px;">INTERIOR DECORATIONS</h2>
+                        <p style="color: #39FF14; font-size: 10px; margin: 0;">BLUE: ${p.blueSpores} | GOLD: ${p.goldenSpores}</p>
+                    </div>
+                    <div style="flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 18px 20px;">
+                        <div style="display: grid; grid-template-columns: ${this.isMobile ? '1fr' : '1fr 1fr'}; gap: 10px;">
+                            ${CONFIG.DECORATIONS.map(item => `
+                                <div style="background: #111; padding: 10px; border: 1px solid #333; display: flex; flex-direction: column; gap: 8px;">
+                                    <p style="font-size: 10px; color: #00ffff; margin: 0;">${item.name}</p>
+                                    <p style="font-size: 8px; color: #888; margin: 0; line-height: 1.6;">${item.desc}</p>
+                                    <button onclick="window.buyDecoration('${item.id}')" style="font-size: 8px; background: #39FF14; color: black; padding: 8px 10px; border: none; width: 100%;">
+                                        BUY (${item.costBlue} Blue, ${item.costGold} Gold)
+                                    </button>
+                                </div>
+                            `).join('')}
                         </div>
-                    `).join('')}
+                    </div>
+                    <div style="padding: 14px 20px 18px; border-top: 1px solid rgba(255,255,255,0.08);">
+                        <button onclick="window.closeDecorationShop()" style="padding: 10px; background: #ff0000; color: white; border: none; font-size: 10px; width: 100%;">${returnToPause ? 'BACK TO BUILD MENU' : 'CLOSE'}</button>
+                    </div>
                 </div>
-                <button onclick="window.closeDialogue()" style="margin-top: 20px; padding: 10px; background: #ff0000; color: white; border: none; font-size: 10px;">CLOSE</button>
             </div>
         `;
 
@@ -5976,10 +6105,18 @@ class Game3D {
                 p.home.decorations.push(id);
                 this.progression.save();
                 this.updateHud();
-                this.showDecorationShop();
+                this.showDecorationShop(returnToPause);
                 this.uiSynth.triggerAttackRelease("C5", "8n");
                 this.showFloatingText(`ACQUIRED ${item.name}!`, 0x39FF14);
             }
+        };
+
+        window.closeDecorationShop = () => {
+            if (returnToPause) {
+                this.showInventoryMenu();
+                return;
+            }
+            window.closeDialogue();
         };
     }
 
@@ -6642,6 +6779,9 @@ class Game3D {
     setupStartScreen() {
         const isConnected = !!this.walletAddress;
         const walletState = this.getWalletUxState();
+        const access = this.getGameplayAccessState();
+        const minimumMyco = access.minimum;
+        const holderTier = access.tier;
         if (this.audioUnlocked) this.playEpicMusic('START');
         const hasSave = !!this.progression.data.clanChosen;
         const cloudStatus = this.getCloudStatusCopy();
@@ -6668,27 +6808,38 @@ class Game3D {
         const subtitleHtml = isMobile
             ? 'EXPLORE • HARVEST<br>RECLAIM THE CROWN'
             : 'EXPLORE • HARVEST • RECLAIM THE CROWN';
-        const statusLine = hasSave
-            ? `${modeLabel} • LEVEL ${this.progression.data.level}`
-            : 'ACTION RPG • WALLET OPTIONAL';
+        const statusLine = access.eligible
+            ? (hasSave ? `${modeLabel} • LEVEL ${this.progression.data.level}` : `${modeLabel} • HOLDER ACCESS LIVE`)
+            : `LIVE ACCESS • ${minimumMyco.toLocaleString('en-US')} MYCO REQUIRED`;
+        const startButtonLabel = !access.walletConnected
+            ? 'CONNECT WALLET TO ENTER'
+            : !access.walletVerified
+                ? 'VERIFY WALLET TO ENTER'
+                : !access.eligible
+                    ? `HOLD ${minimumMyco.toLocaleString('en-US')} MYCO TO ENTER`
+                    : hasSave
+                        ? 'CONTINUE ADVENTURE'
+                        : 'START ADVENTURE';
+        const startButtonBg = access.eligible ? '#39FF14' : (!access.walletConnected ? '#6a0dad' : '#ffaa00');
+        const startButtonColor = access.eligible || !access.walletConnected ? 'black' : '#1d1100';
         const walletLabel = isConnected
             ? (this.walletSessionToken
-                ? `WALLET VERIFIED: ${this.shortWallet()} • ${this.formatMycoBalance()} MYCO`
-                : `WALLET LINKED: ${this.shortWallet()}`)
+                ? `${holderTier ? `${holderTier.badge || '🍄'} ${holderTier.name}` : 'WALLET VERIFIED'} • ${this.shortWallet()} • ${this.formatMycoBalance()} MYCO`
+                : `VERIFY CONNECTED WALLET • ${this.shortWallet()}`)
             : walletState.isIOS
-                ? 'OPEN IN PHANTOM (OPTIONAL)'
+                ? 'OPEN IN PHANTOM TO CONNECT'
                 : walletState.isMobile
-                    ? 'OPEN WALLET BROWSER (OPTIONAL)'
-                    : 'LINK PHANTOM (OPTIONAL)';
-        const walletHint = isConnected
-            ? (this.walletSessionToken
-                ? 'Cloud save, live balance, and cross-device progress are active for this wallet.'
-                : 'Wallet linked locally. Sign once to activate live cloud save and shared leaderboards.')
+                    ? 'OPEN PHANTOM BROWSER'
+                    : 'CONNECT PHANTOM';
+        const walletHint = access.walletVerified
+            ? access.eligible
+                ? `Verified holder access live. ${holderTier ? `${holderTier.badge || '🍄'} ${holderTier.name}` : 'Base tier'} perks, cloud save, and live balance are active.`
+                : `Verified wallet found, but you need ${minimumMyco.toLocaleString('en-US')} KING MYCO to enter. Current balance: ${this.formatMycoBalance(access.currentBalance)} MYCO.`
             : walletState.isIOS
-                ? "Wallet is optional. On iPhone and iPad, use Phantom's browser to connect. Safari play still works without a wallet."
+                ? `Use Phantom's in-app browser on iPhone or iPad to connect and verify a wallet holding at least ${minimumMyco.toLocaleString('en-US')} KING MYCO.`
                 : walletState.isMobile
-                    ? 'Wallet is optional. Open this page in Phantom to connect on mobile, or just play now.'
-                    : 'Wallet is optional. You can play the full game without connecting.';
+                    ? `Open this page inside Phantom on mobile, then verify a wallet holding at least ${minimumMyco.toLocaleString('en-US')} KING MYCO.`
+                    : `Connect Phantom and verify a wallet holding at least ${minimumMyco.toLocaleString('en-US')} KING MYCO to enter.`;
         const graphicsHelper = this.progression.data.settings.lowPerfMode === true
             ? (isMobile ? 'BATTERY SAVER · longer play' : 'BATTERY SAVER · longer sessions')
             : this.progression.data.settings.lowPerfMode === false
@@ -6703,8 +6854,8 @@ class Game3D {
                     <p style="font-size: ${lvlSz}px; margin: 0 0 ${isMobile ? 16 : 30}px 0; color: #b6c8c0; letter-spacing: 1px;">${statusLine}</p>
 
                     <div style="display: flex; flex-direction: column; gap: ${gapSz}px; width: 100%; margin-bottom: ${isMobile ? 18 : 30}px;">
-                        <button id="start-button" style="padding: 15px; font-size: ${startFs}px; background: #39FF14; border: none; color: black; font-family: inherit; cursor: pointer; ${tapBtn}">
-                            ${hasSave ? 'CONTINUE ADVENTURE' : 'START ADVENTURE'}
+                        <button id="start-button" style="padding: 15px; font-size: ${startFs}px; background: ${startButtonBg}; border: none; color: ${startButtonColor}; font-family: inherit; cursor: pointer; ${tapBtn}">
+                            ${startButtonLabel}
                         </button>
                         ${hasSave ? `<button id="new-game-button" style="padding: 12px; font-size: ${btnFs}px; background: #ff4400; border: none; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">NEW JOURNEY</button>` : ''}
                         ${hasSave ? `<button id="change-mode-button" style="padding: 10px; font-size: ${smFs}px; background: ${modeAccent}; border: none; color: ${this.getCurrentGameMode() === 'STORY' ? 'black' : 'white'}; font-family: inherit; cursor: pointer; ${tapBtn}">GAME MODE: ${modeLabel}</button>` : ''}
@@ -6725,6 +6876,9 @@ class Game3D {
                         <div style="width: 100%; padding: 10px 12px; background: rgba(0,0,0,0.28); border: 1px solid rgba(0,255,255,0.2); border-radius: 6px; text-align: left; box-sizing: border-box;">
                             <div style="font-size: 8px; color: #00ffff; letter-spacing: 1px; margin-bottom: 4px;">${cloudStatus.title}</div>
                             <div style="font-size: 8px; color: #8fa6a2; line-height: 1.5;">${cloudStatus.body}</div>
+                        </div>
+                        <div style="width: 100%; display:grid; grid-template-columns: 1fr; gap: 8px;">
+                            ${this.renderHolderTierLadder(access)}
                         </div>
                         ${isConnected ? `<button id="disconnect-wallet" style="font-size: 8px; color: #666; background: none; border: none; cursor: pointer; text-decoration: underline; ${tapBtn}">Disconnect</button>` : ''}
                     </div>
@@ -6760,6 +6914,8 @@ class Game3D {
 
         document.getElementById('start-button').addEventListener('click', async () => {
             await this.unlockAudio();
+            const unlocked = await this.ensureGameplayAccess();
+            if (!unlocked) return;
             if (hasSave) {
                 this.showLoadConfirmation();
             } else {
@@ -7491,6 +7647,204 @@ class Game3D {
         return `${Math.round(value)}`;
     }
 
+    getHolderTierCatalog() {
+        return Array.isArray(CONFIG.HOLDER_TIERS) ? CONFIG.HOLDER_TIERS : [];
+    }
+
+    getMinimumMycoToPlay() {
+        return Number(this.getHolderTierCatalog()?.[0]?.minBalance || 10000);
+    }
+
+    getHolderTier(balance = this.walletMycoBalance) {
+        const numericBalance = Number.isFinite(balance) ? Number(balance) : 0;
+        return this.getHolderTierCatalog().reduce((active, tier) => {
+            return numericBalance >= Number(tier.minBalance || 0) ? tier : active;
+        }, null);
+    }
+
+    getGameplayAccessState(balance = this.walletMycoBalance) {
+        const minimum = this.getMinimumMycoToPlay();
+        const currentBalance = Number.isFinite(balance) ? Math.max(0, Number(balance)) : 0;
+        const walletConnected = !!this.walletAddress;
+        const walletVerified = !!(this.walletSessionToken && Number.isFinite(balance));
+        let reason = null;
+
+        if (!walletConnected) {
+            reason = 'Connect a Solana wallet to enter Myco Kingdom.';
+        } else if (!walletVerified) {
+            reason = 'Verify your connected wallet before entering the live kingdom.';
+        } else if (currentBalance < minimum) {
+            reason = `Hold at least ${minimum.toLocaleString('en-US')} KING MYCO in the verified wallet to play.`;
+        }
+
+        return {
+            minimum,
+            currentBalance,
+            walletConnected,
+            walletVerified,
+            eligible: reason === null,
+            reason,
+            tier: this.getHolderTier(currentBalance)
+        };
+    }
+
+    getWalletTierGameplayEffect() {
+        const tier = this.getHolderTier();
+        return {
+            tier,
+            playerModifiers: {
+                speedMult: Number(tier?.rewards?.playerModifiers?.speedMult || 1),
+                cooldownMult: Number(tier?.rewards?.playerModifiers?.cooldownMult || 1),
+                goalRadiusMult: Number(tier?.rewards?.playerModifiers?.goalRadiusMult || 1),
+                projectileSpeedMult: Number(tier?.rewards?.playerModifiers?.projectileSpeedMult || 1),
+                projectileCountBonus: Number(tier?.rewards?.playerModifiers?.projectileCountBonus || 0),
+                damageBonusFlat: Number(tier?.rewards?.playerModifiers?.damageBonusFlat || 0),
+                damageBonusMult: Number(tier?.rewards?.playerModifiers?.damageBonusMult || 1),
+                wardBonusFlat: Number(tier?.rewards?.playerModifiers?.wardBonusFlat || 0),
+                regenBonus: Number(tier?.rewards?.playerModifiers?.regenBonus || 0),
+                critBonus: Number(tier?.rewards?.playerModifiers?.critBonus || 0)
+            }
+        };
+    }
+
+    syncWalletTierEffects() {
+        if (!this.player) return;
+        this.player.walletModifiers = this.getWalletTierGameplayEffect().playerModifiers;
+        if (typeof this.player.applyLevelStats === 'function') this.player.applyLevelStats();
+    }
+
+    renderHolderTierLadder(access = this.getGameplayAccessState()) {
+        return this.getHolderTierCatalog().map((tier, index) => {
+            const unlocked = access.currentBalance >= Number(tier.minBalance || 0);
+            const active = access.tier?.id === tier.id;
+            const accent = tier.accent || '#39FF14';
+            return `
+                <div style="padding:10px; border:1px solid ${active ? accent : 'rgba(255,255,255,0.08)'}; border-radius:10px; background:${active ? 'rgba(255,255,255,0.05)' : unlocked ? 'rgba(10,18,16,0.92)' : 'rgba(0,0,0,0.28)'}; opacity:${unlocked ? 1 : 0.62};">
+                    <div style="display:flex; justify-content:space-between; gap:8px; margin-bottom:5px; align-items:center;">
+                        <span style="font-size:9px; color:${accent};">${tier.badge || '🍄'} TIER ${index + 1}</span>
+                        <span style="font-size:8px; color:${active ? '#ffffff' : '#93a39e'};">${Number(tier.minBalance || 0).toLocaleString('en-US')} MYCO</span>
+                    </div>
+                    <div style="font-size:10px; color:#ffffff; margin-bottom:5px;">${tier.name}</div>
+                    <div style="font-size:8px; color:#9fb0aa; line-height:1.45;">${Array.isArray(tier.perks) ? tier.perks.join(' • ') : ''}</div>
+                    ${active ? '<div style="margin-top:6px; font-size:8px; color:#fff2a8;">ACTIVE HOLDER TIER</div>' : ''}
+                </div>
+            `;
+        }).join('');
+    }
+
+    applyWalletTierRewards(options = {}) {
+        const p = this.progression?.data;
+        if (!p) return [];
+        if (!p.walletTierClaims || typeof p.walletTierClaims !== 'object') p.walletTierClaims = {};
+        if (!Array.isArray(p.inventory)) p.inventory = [];
+        if (!Array.isArray(p.accessories)) p.accessories = [];
+        if (!p.equippedAccessories || typeof p.equippedAccessories !== 'object') p.equippedAccessories = { cape: null, crown: null };
+        if (!p.upgrades || typeof p.upgrades !== 'object') p.upgrades = {};
+
+        const currentBalance = Number.isFinite(this.walletMycoBalance) ? Number(this.walletMycoBalance) : 0;
+        const awarded = [];
+
+        this.getHolderTierCatalog().forEach(tier => {
+            if (currentBalance < Number(tier.minBalance || 0) || p.walletTierClaims[tier.id]) return;
+
+            const reward = tier.rewards || {};
+            const grantedLabels = [];
+
+            (reward.inventory || []).forEach(itemId => {
+                if (!p.inventory.includes(itemId)) {
+                    p.inventory.push(itemId);
+                    const cfg = CONFIG.SUPPLIES.find(item => item.id === itemId)
+                        || CONFIG.WEAPONS.find(item => item.id === itemId)
+                        || CONFIG.MAGIC.find(item => item.id === itemId);
+                    grantedLabels.push(cfg?.name || itemId);
+                }
+            });
+
+            (reward.accessories || []).forEach(accessoryId => {
+                if (!p.accessories.includes(accessoryId)) {
+                    p.accessories.push(accessoryId);
+                    const cfg = CONFIG.ACCESSORIES.find(item => item.id === accessoryId);
+                    if (cfg) {
+                        const slot = cfg.type === 'CAPE' ? 'cape' : 'crown';
+                        if (!p.equippedAccessories[slot]) p.equippedAccessories[slot] = accessoryId;
+                        grantedLabels.push(cfg.name);
+                    } else {
+                        grantedLabels.push(accessoryId);
+                    }
+                }
+            });
+
+            (reward.skills || []).forEach(skillId => {
+                if ((p.upgrades[skillId] || 0) < 1) {
+                    p.upgrades[skillId] = 1;
+                    const cfg = CONFIG.SKILLS.find(skill => skill.id === skillId);
+                    grantedLabels.push(cfg ? `${cfg.name} unlock` : skillId);
+                }
+            });
+
+            if (Number.isFinite(reward.skillPoints) && reward.skillPoints > 0) {
+                p.skillPoints = (p.skillPoints || 0) + Number(reward.skillPoints);
+                grantedLabels.push(`${reward.skillPoints} skill point${reward.skillPoints === 1 ? '' : 's'}`);
+            }
+
+            p.walletTierClaims[tier.id] = Date.now();
+            awarded.push({ tier, grantedLabels });
+        });
+
+        if (awarded.length) {
+            this.progression.save();
+            if (this.player) this.syncPlayerStats();
+            else this.syncWalletTierEffects();
+            if (!options.silent) {
+                const summary = awarded.map(entry => `${entry.tier.badge || '🍄'} ${entry.tier.name}`).join(' • ');
+                this.showGlobalNotification(`HOLDER REWARDS CLAIMED • ${summary}`, awarded[awarded.length - 1].tier.accent || '#39FF14');
+                this.showFloatingText('HOLDER TIER REWARDS UNLOCKED', 0xfff2a8, true);
+            }
+        } else {
+            this.syncWalletTierEffects();
+        }
+
+        return awarded;
+    }
+
+    async ensureGameplayAccess(options = {}) {
+        const initialAccess = this.getGameplayAccessState();
+        if (!initialAccess.walletConnected) {
+            this.showWalletConnectionHelp({ required: true, access: initialAccess });
+            return false;
+        }
+
+        const needsFreshVerification = options.forceFresh === true
+            || !initialAccess.walletVerified
+            || !Number.isFinite(this.walletMycoBalance)
+            || !this.cloudLastSyncedAt
+            || (Date.now() - this.cloudLastSyncedAt) > HOLDER_ACCESS_REFRESH_MS
+            || this.cloudSyncStatus === 'error';
+
+        if (needsFreshVerification) {
+            const verified = await this.verifyWalletSession({ quiet: !!options.quiet });
+            if (!verified) {
+                this.showWalletConnectionHelp({ required: true, access: this.getGameplayAccessState() });
+                return false;
+            }
+        }
+
+        const access = this.getGameplayAccessState();
+        if (!access.eligible) {
+            this.showWalletConnectionHelp({ required: true, access });
+            return false;
+        }
+
+        this.applyWalletTierRewards({ silent: !!options.quiet });
+        return true;
+    }
+
+    handleLocalProgressSaved(reason = 'auto') {
+        if (this.suspendAutoCloudSync) return;
+        if (!this.hasVerifiedWalletSession()) return;
+        this.queueCloudSync(reason === 'leaderboard' ? 'leaderboard auto-save' : 'wallet auto-save', reason === 'leaderboard' ? 500 : 1100);
+    }
+
     setCloudSyncState(status, message) {
         this.cloudSyncStatus = status;
         this.cloudSyncMessage = message;
@@ -7515,9 +7869,9 @@ class Game3D {
             case 'live':
                 return { title: `VERIFIED • ${this.formatMycoBalance()} MYCO`, body: syncedLabel };
             case 'error':
-                return { title: 'SYNC DEGRADED', body: this.cloudSyncMessage || 'Wallet linked, but the live archive needs another try.' };
+                return { title: 'ACCESS CHECK NEEDED', body: this.cloudSyncMessage || 'Re-verify the wallet and confirm the minimum MYCO balance.' };
             default:
-                return { title: 'LOCAL SAVE ONLY', body: 'Connect Phantom to unlock cloud save, live balance, and shared leaderboards.' };
+                return { title: 'WALLET REQUIRED', body: `Connect Phantom and verify at least ${this.getMinimumMycoToPlay().toLocaleString('en-US')} KING MYCO to enter the live kingdom.` };
         }
     }
 
@@ -7528,6 +7882,7 @@ class Game3D {
         else localStorage.removeItem(CLOUD_SESSION_KEY);
         if (this.walletMycoBalance != null) localStorage.setItem(CLOUD_BALANCE_KEY, String(this.walletMycoBalance));
         else localStorage.removeItem(CLOUD_BALANCE_KEY);
+        this.syncWalletTierEffects();
     }
 
     loadWalletSession() {
@@ -7541,6 +7896,7 @@ class Game3D {
             this.cloudSyncStatus = 'live';
             this.cloudSyncMessage = 'Verified wallet session restored';
         }
+        this.syncWalletTierEffects();
     }
 
     clearWalletSession() {
@@ -7552,6 +7908,7 @@ class Game3D {
         localStorage.removeItem(CLOUD_SESSION_KEY);
         localStorage.removeItem(CLOUD_BALANCE_KEY);
         localStorage.removeItem(CLOUD_LAST_SYNC_KEY);
+        this.syncWalletTierEffects();
     }
 
     hasVerifiedWalletSession() {
@@ -7593,6 +7950,7 @@ class Game3D {
             const message = data?.error || `${response.status} ${response.statusText}`;
             const error = new Error(message);
             error.status = response.status;
+            error.data = data;
             throw error;
         }
 
@@ -7611,62 +7969,74 @@ class Game3D {
     async applyCloudProfile(profile, options = {}) {
         if (!profile || !profile.progression) return false;
 
-        this.cloudProfile = profile;
-        if (Number.isFinite(profile.myco_balance)) this.walletMycoBalance = Number(profile.myco_balance);
-        if (profile.player_name && this.walletAddress) this.saveWalletConnection();
+        const previousSuspend = this.suspendAutoCloudSync;
+        this.suspendAutoCloudSync = true;
 
-        let patchedLocal = false;
-        if (Number.isFinite(profile.total_burned)) {
-            this.progression.data.totalBurned = Number(profile.total_burned);
-            patchedLocal = true;
-        }
-        if (Number.isFinite(profile.weekly_burned)) {
-            this.progression.data.weeklyBurned = Number(profile.weekly_burned);
-            patchedLocal = true;
-        }
-        if (Number.isFinite(profile.today_burned)) {
-            this.progression.data.dailyBurnedAmount = Number(profile.today_burned);
-            patchedLocal = true;
-        }
-        if (Number.isFinite(profile.best_score)) {
-            this.progression.data.bestScore = Math.max(this.progression.data.bestScore || 0, Number(profile.best_score));
-            patchedLocal = true;
-        }
-        if (Number.isFinite(profile.best_thronecap_time_seconds) && Number(profile.best_thronecap_time_seconds) > 0) {
-            const currentBest = Number(this.progression.data.bestThronecapTime || 0);
-            const serverBest = Number(profile.best_thronecap_time_seconds);
-            this.progression.data.bestThronecapTime = !currentBest || serverBest < currentBest ? serverBest : currentBest;
-            patchedLocal = true;
-        }
-        if (profile.clan_id && !this.progression.data.clanChosen) {
-            this.progression.data.clanChosen = profile.clan_id;
-            patchedLocal = true;
-        }
-        if (patchedLocal) {
-            this.progression.save();
-        }
+        try {
+            this.cloudProfile = profile;
+            if (Number.isFinite(profile.myco_balance)) this.walletMycoBalance = Number(profile.myco_balance);
+            if (profile.player_name && this.walletAddress) this.saveWalletConnection();
 
-        const localStamp = Number(this.progression?.data?.lastSavedAt || 0);
-        const cloudStamp = Date.parse(profile.local_updated_at || profile.updated_at || '') || 0;
-        const shouldImport = options.force === true
-            || !this.progression.data.clanChosen
-            || (options.preferCloud === true)
-            || cloudStamp > (localStamp + 5000);
+            let patchedLocal = false;
+            if (Number.isFinite(profile.total_burned)) {
+                this.progression.data.totalBurned = Number(profile.total_burned);
+                patchedLocal = true;
+            }
+            if (Number.isFinite(profile.weekly_burned)) {
+                this.progression.data.weeklyBurned = Number(profile.weekly_burned);
+                patchedLocal = true;
+            }
+            if (Number.isFinite(profile.today_burned)) {
+                this.progression.data.dailyBurnedAmount = Number(profile.today_burned);
+                patchedLocal = true;
+            }
+            if (Number.isFinite(profile.best_score)) {
+                this.progression.data.bestScore = Math.max(this.progression.data.bestScore || 0, Number(profile.best_score));
+                patchedLocal = true;
+            }
+            if (Number.isFinite(profile.best_thronecap_time_seconds) && Number(profile.best_thronecap_time_seconds) > 0) {
+                const currentBest = Number(this.progression.data.bestThronecapTime || 0);
+                const serverBest = Number(profile.best_thronecap_time_seconds);
+                this.progression.data.bestThronecapTime = !currentBest || serverBest < currentBest ? serverBest : currentBest;
+                patchedLocal = true;
+            }
+            if (profile.clan_id && !this.progression.data.clanChosen) {
+                this.progression.data.clanChosen = profile.clan_id;
+                patchedLocal = true;
+            }
+            if (patchedLocal) {
+                this.progression.save();
+            }
 
-        if (!shouldImport) return false;
+            const localStamp = Number(this.progression?.data?.lastSavedAt || 0);
+            const cloudStamp = Date.parse(profile.local_updated_at || profile.updated_at || '') || 0;
+            const shouldImport = options.force === true
+                || !this.progression.data.clanChosen
+                || (options.preferCloud === true)
+                || cloudStamp > (localStamp + 5000);
 
-        this.progression.data = JSON.parse(JSON.stringify(profile.progression || {}));
-        this.leaderboard.data = JSON.parse(JSON.stringify(profile.leaderboard || this.leaderboard.data || {}));
-        if (this.progression.data.clanChoiceLocked === undefined) {
-            this.progression.data.clanChoiceLocked = !!this.progression.data.clanChosen;
+            if (!shouldImport) {
+                this.applyWalletTierRewards({ silent: true });
+                return false;
+            }
+
+            this.progression.data = JSON.parse(JSON.stringify(profile.progression || {}));
+            this.leaderboard.data = JSON.parse(JSON.stringify(profile.leaderboard || this.leaderboard.data || {}));
+            if (this.progression.data.clanChoiceLocked === undefined) {
+                this.progression.data.clanChoiceLocked = !!this.progression.data.clanChosen;
+            }
+            localStorage.setItem(this.progression.storageKey, JSON.stringify(this.progression.data));
+            localStorage.setItem(this.leaderboard.storageKey, JSON.stringify(this.leaderboard.data));
+            this.selectedClan = this.progression.data.clanChosen || this.selectedClan || 'myco';
+
+            this.applyWalletTierRewards({ silent: true });
+            if (this.gameState === 'START_SCREEN') this.setupStartScreen();
+            if (!options.silent) this.showGlobalNotification('CLOUD ADVENTURE RESTORED', '#00ffff');
+            return true;
+        } finally {
+            this.suspendAutoCloudSync = previousSuspend;
+            this.syncWalletTierEffects();
         }
-        localStorage.setItem(this.progression.storageKey, JSON.stringify(this.progression.data));
-        localStorage.setItem(this.leaderboard.storageKey, JSON.stringify(this.leaderboard.data));
-        this.selectedClan = this.progression.data.clanChosen || this.selectedClan || 'myco';
-
-        if (this.gameState === 'START_SCREEN') this.setupStartScreen();
-        if (!options.silent) this.showGlobalNotification('CLOUD ADVENTURE RESTORED', '#00ffff');
-        return true;
     }
 
     async verifyWalletSession(options = {}) {
@@ -7702,12 +8072,16 @@ class Game3D {
             if (verify.profile) {
                 await this.applyCloudProfile(verify.profile, { preferCloud: !this.progression.data.clanChosen });
             }
+            this.applyWalletTierRewards({ silent: !!options.quiet });
             if (!options.quiet) this.showFloatingText('WALLET VERIFIED', 0x39FF14, true);
             void this.refreshLiveLeaderboard();
             return true;
         } catch (error) {
             console.error('wallet verification failed', error);
-            this.setCloudSyncState('error', error?.message || 'Wallet verification failed');
+            if (Number.isFinite(error?.data?.balance)) {
+                this.saveWalletSession(null, Number(error.data.balance));
+            }
+            this.setCloudSyncState('error', error?.data?.access?.reason || error?.message || 'Wallet verification failed');
             if (!options.quiet) this.showFloatingText('WEB3 VERIFY FAILED', 0xff0000, true);
             return false;
         }
@@ -7722,6 +8096,7 @@ class Game3D {
                 await this.applyCloudProfile(result.profile, { preferCloud: options.preferCloud === true });
             }
             this.setCloudSyncState('live', 'Cloud profile loaded');
+            this.applyWalletTierRewards({ silent: true });
             return true;
         } catch (error) {
             if (error?.status === 401) {
@@ -8103,15 +8478,20 @@ class Game3D {
                 const resp = await provider.connect();
                 this.walletAddress = resp.publicKey.toString();
                 this.saveWalletConnection();
-                await this.verifyWalletSession({ quiet: true });
+                const verified = await this.verifyWalletSession({ quiet: true });
                 this.setupStartScreen();
-                this.showFloatingText("WALLET CONNECTED!", 0x39FF14);
+                if (verified && this.getGameplayAccessState().eligible) {
+                    this.showFloatingText("WALLET VERIFIED!", 0x39FF14);
+                } else {
+                    this.showFloatingText("VERIFY TO ENTER", 0xffaa00);
+                    this.showWalletConnectionHelp({ required: true, access: this.getGameplayAccessState() });
+                }
             } catch (err) {
                 console.error("User rejected connection", err);
                 this.showFloatingText("CONNECTION REJECTED", 0xff0000);
             }
         } else {
-            this.showWalletConnectionHelp();
+            this.showWalletConnectionHelp({ required: true, access: this.getGameplayAccessState() });
         }
     }
 
@@ -8140,14 +8520,21 @@ class Game3D {
         this.showFloatingText("WALLET DISCONNECTED", 0x888888);
     }
 
-    showWalletConnectionHelp() {
+    showWalletConnectionHelp(options = {}) {
+        const access = options.access || this.getGameplayAccessState();
+        const required = options.required !== false;
         const walletState = this.getWalletUxState();
-        const primaryLabel = walletState.isMobile ? 'OPEN IN PHANTOM' : 'GET PHANTOM';
-        const primaryCopy = walletState.isIOS
-            ? "On iPhone and iPad, wallet connections work inside Phantom's in-app browser. Safari can still play the game without a wallet."
-            : walletState.isMobile
-                ? "On mobile, wallet connections work best inside Phantom's in-app browser. You can keep playing without a wallet."
-                : 'Install Phantom in this browser to connect your account. You can keep playing without a wallet for now.';
+        const minimum = access.minimum || this.getMinimumMycoToPlay();
+        const primaryLabel = walletState.provider
+            ? (access.walletConnected ? (access.walletVerified ? 'REFRESH HOLDINGS' : 'VERIFY WALLET') : 'CONNECT WALLET')
+            : (walletState.isMobile ? 'OPEN IN PHANTOM' : 'GET PHANTOM');
+        const primaryCopy = access.walletVerified && !access.eligible
+            ? `Your verified wallet currently shows ${this.formatMycoBalance(access.currentBalance)} MYCO. Hold at least ${minimum.toLocaleString('en-US')} KING MYCO to enter the live kingdom.`
+            : walletState.isIOS
+                ? `A verified wallet with ${minimum.toLocaleString('en-US')} KING MYCO is required. On iPhone and iPad, open the game inside Phantom's in-app browser to connect.`
+                : walletState.isMobile
+                    ? `A verified wallet with ${minimum.toLocaleString('en-US')} KING MYCO is required. On mobile, the smoothest connection flow is inside Phantom's in-app browser.`
+                    : `Install or open Phantom, connect your Solana wallet, then verify at least ${minimum.toLocaleString('en-US')} KING MYCO to enter.`;
 
         const overlay = document.createElement('div');
         overlay.style.position = 'absolute';
@@ -8169,27 +8556,28 @@ class Game3D {
             <div style="background: #101312; width: min(100%, 360px); border-radius: 14px; font-family: sans-serif; overflow: hidden; box-shadow: 0 18px 42px rgba(0,0,0,0.55); border: 1px solid rgba(57,255,20,0.18);">
                 <div style="background: linear-gradient(180deg, #1c1f1d, #121514); padding: 20px; text-align: center; border-bottom: 1px solid rgba(255,255,255,0.08);">
                     <img src="https://phantom.app/img/logo.png" style="width: 64px; height: 64px; margin-bottom: 15px; border-radius: 15px;">
-                    <div style="color: white; font-size: 18px; font-weight: bold;">Wallet Not Detected</div>
+                    <div style="color: white; font-size: 18px; font-weight: bold;">${required ? 'Wallet Access Required' : 'Wallet Not Detected'}</div>
                     <div style="color: #8ea39a; font-size: 13px; margin-top: 5px;">Myco Kingdom</div>
                 </div>
                 <div style="padding: 20px;">
                     <p style="color: #d0d8d4; font-size: 13px; text-align: center; margin: 0 0 18px 0; line-height: 1.65;">
                         ${primaryCopy}
                     </p>
+                    ${required ? `<div style="margin: 0 0 18px 0; padding: 12px; border-radius: 10px; border: 1px solid rgba(57,255,20,0.24); background: rgba(57,255,20,0.06); color: #c7f8c0; font-size: 12px; line-height: 1.6; text-align: left;">• Wallet required to enter<br>• Minimum balance: ${minimum.toLocaleString('en-US')} KING MYCO<br>• Current tier: ${access.tier ? `${access.tier.badge || '🍄'} ${access.tier.name}` : 'Not unlocked yet'}</div>` : ''}
                     <div style="display: flex; flex-direction: column; gap: 10px;">
                         <button id="wallet-help-primary" style="min-height: 46px; padding: 12px; border-radius: 10px; border: none; background: #6a0dad; color: white; font-weight: bold; cursor: pointer;">${primaryLabel}</button>
                         ${walletState.isMobile ? '<button id="wallet-help-copy" style="min-height: 46px; padding: 12px; border-radius: 10px; border: 1px solid #3b4a43; background: transparent; color: white; font-weight: bold; cursor: pointer;">COPY GAME LINK</button>' : ''}
-                        <div style="display: flex; gap: 10px;">
-                            <button id="wallet-help-close" style="flex: 1; min-height: 44px; padding: 12px; border-radius: 10px; border: 1px solid #3b4a43; background: transparent; color: white; font-weight: bold; cursor: pointer;">Not Now</button>
-                            <button id="wallet-help-continue" style="flex: 1; min-height: 44px; padding: 12px; border-radius: 10px; border: none; background: #39FF14; color: #081007; font-weight: bold; cursor: pointer;">Keep Playing</button>
-                        </div>
+                        <button id="wallet-help-close" style="min-height: 44px; padding: 12px; border-radius: 10px; border: 1px solid #3b4a43; background: transparent; color: white; font-weight: bold; cursor: pointer;">CLOSE</button>
                     </div>
                 </div>
             </div>
         `;
 
         overlay.querySelector('#wallet-help-primary').onclick = () => {
-            if (walletState.isMobile) {
+            if (walletState.provider && access.walletConnected) {
+                overlay.remove();
+                this.verifyWalletSession();
+            } else if (walletState.isMobile) {
                 this.openInPhantomBrowser();
             } else {
                 window.open('https://phantom.app/download', '_blank', 'noopener');
@@ -8203,10 +8591,6 @@ class Game3D {
             };
         }
         overlay.querySelector('#wallet-help-close').onclick = () => overlay.remove();
-        overlay.querySelector('#wallet-help-continue').onclick = () => {
-            overlay.remove();
-            this.showFloatingText("PLAYING WITHOUT WALLET", 0x888888);
-        };
     }
 
     showLeaderboard(refresh = true) {
@@ -8501,21 +8885,116 @@ class Game3D {
     getAccessoriesContent() {
         const p = this.progression.data;
         const clanColor = this.getClanColor(this.selectedClan);
+        const kingdom = this.progression.getKingdomState();
+        const summary = this.progression.getKingdomSummary();
         const owned = p.accessories || [];
         const equipped = p.equippedAccessories || { cape: null, crown: null };
+        const toCssColor = (color) => typeof color === 'number' ? `#${color.toString(16).padStart(6, '0')}` : color;
+        const cardColumns = this.isMobile ? '1fr' : 'repeat(2, minmax(0, 1fr))';
+        const summaryColumns = this.isMobile ? 'repeat(2, minmax(0, 1fr))' : 'repeat(6, minmax(0, 1fr))';
+        const decorCount = (p.home?.decorations || []).length;
+        const forgeCount = (p.home?.decorations || []).filter(id => id === 'forge').length;
+        const storageCount = (p.home?.decorations || []).filter(id => id === 'storage_chest').length;
+        const nextDwelling = (CONFIG.DWELLING_UPGRADES || []).find(upgrade => upgrade.tier === (summary.dwellingTier + 1));
+        const canAffordDwelling = nextDwelling
+            ? p.blueSpores >= (nextDwelling.costBlue || 0) && p.goldenSpores >= (nextDwelling.costGold || 0)
+            : false;
+
+        const renderBuilderCards = (items, bucketKey, accent) => items.map(item => {
+            const count = Number(kingdom[bucketKey]?.[item.id] || 0);
+            const canAfford = p.blueSpores >= (item.costBlue || 0) && p.goldenSpores >= (item.costGold || 0);
+            return `
+                <div style="background: #111; border: 1px solid ${accent}; padding: 14px; display: flex; flex-direction: column; gap: 8px; min-width: 0;">
+                    <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
+                        <span style="color:${accent}; font-size:10px; line-height:1.4;">${item.name.toUpperCase()}</span>
+                        <span style="color:#888; font-size:8px; white-space:nowrap;">x${count}</span>
+                    </div>
+                    <p style="font-size:7px; color:#888; line-height:1.7; margin:0; flex:1;">${item.desc}</p>
+                    <div style="font-size:7px; color:#cfc;">+${item.capBonus || 0} DAILY CAP</div>
+                    <button onclick="window.game.purchaseKingdomAsset('${bucketKey}', '${item.id}')" style="width:100%; padding:8px; background:${canAfford ? accent : '#333'}; color:${canAfford ? '#050505' : '#777'}; border:none; font-family:inherit; font-size:8px; cursor:${canAfford ? 'pointer' : 'not-allowed'}; opacity:${canAfford ? 1 : 0.7};">
+                        BUILD (${item.costBlue || 0} BLUE${item.costGold ? `, ${item.costGold} GOLD` : ''})
+                    </button>
+                </div>
+            `;
+        }).join('');
 
         return `
-            <div style="padding: 20px;">
-                <h3 style="color: ${clanColor}; font-size: 12px; margin-bottom: 20px;">ROYAL TREASURY: CLOAKS & CROWNS</h3>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; max-height: 350px; overflow-y: auto;">
+            <div style="padding: 20px; display: flex; flex-direction: column; gap: 16px;">
+                <div style="background: rgba(255,255,255,0.04); border: 1px solid ${clanColor}; padding: 16px; display:flex; flex-direction:column; gap:12px;">
+                    <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start; flex-wrap:wrap;">
+                        <div>
+                            <h3 style="color: ${clanColor}; font-size: 12px; margin: 0 0 10px 0;">KINGDOM BUILDER</h3>
+                            <p style="font-size: 8px; color: #aaa; margin: 0; line-height: 1.8;">Turn Spore Collector into a grind loop. Build houses, castles, huts, stores, NPC lanes, enemy outskirts, and a custom royal dwelling with the spores you harvest.</p>
+                        </div>
+                        <div style="font-size: 8px; color: #7effa1; line-height: 1.8;">
+                            <div>BLUE ${p.blueSpores}</div>
+                            <div>GOLD ${p.goldenSpores}</div>
+                        </div>
+                    </div>
+                    <div style="display:grid; grid-template-columns:${summaryColumns}; gap:10px;">
+                        <div style="background:#111; border:1px solid #233; padding:10px;"><div style="font-size:7px; color:#888; margin-bottom:4px;">BUILDINGS</div><div style="font-size:12px; color:#39FF14;">${summary.structures}</div></div>
+                        <div style="background:#111; border:1px solid #233; padding:10px;"><div style="font-size:7px; color:#888; margin-bottom:4px;">NPCS</div><div style="font-size:12px; color:#00ffff;">${summary.residents}</div></div>
+                        <div style="background:#111; border:1px solid #233; padding:10px;"><div style="font-size:7px; color:#888; margin-bottom:4px;">ENEMIES</div><div style="font-size:12px; color:#ff8844;">${summary.threats}</div></div>
+                        <div style="background:#111; border:1px solid #233; padding:10px;"><div style="font-size:7px; color:#888; margin-bottom:4px;">DWELLING</div><div style="font-size:12px; color:#fff2a8;">T${summary.dwellingTier}</div></div>
+                        <div style="background:#111; border:1px solid #233; padding:10px;"><div style="font-size:7px; color:#888; margin-bottom:4px;">DAILY CAP</div><div style="font-size:12px; color:#c6a6ff;">${summary.collectorCap}</div></div>
+                        <div style="background:#111; border:1px solid #233; padding:10px;"><div style="font-size:7px; color:#888; margin-bottom:4px;">BONUS CAP</div><div style="font-size:12px; color:#ffaa00;">+${summary.collectorBonus}</div></div>
+                    </div>
+                </div>
+
+                <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(57,255,20,0.2); padding: 16px;">
+                    <h4 style="color:#39FF14; font-size:10px; margin:0 0 12px 0;">BUILDINGS, HOUSES, CASTLES, STORES, HUTS</h4>
+                    <div style="display:grid; grid-template-columns:${cardColumns}; gap:12px;">
+                        ${renderBuilderCards(CONFIG.KINGDOM_BLUEPRINTS, 'structures', '#39FF14')}
+                    </div>
+                </div>
+
+                <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(0,255,255,0.18); padding: 16px;">
+                    <h4 style="color:#00ffff; font-size:10px; margin:0 0 12px 0;">NPC RESIDENTS</h4>
+                    <div style="display:grid; grid-template-columns:${cardColumns}; gap:12px;">
+                        ${renderBuilderCards(CONFIG.KINGDOM_RESIDENTS, 'residents', '#00ffff')}
+                    </div>
+                </div>
+
+                <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,136,68,0.22); padding: 16px;">
+                    <h4 style="color:#ff8844; font-size:10px; margin:0 0 12px 0;">OUTSKIRTS, ENEMIES, RAID DENS</h4>
+                    <div style="display:grid; grid-template-columns:${cardColumns}; gap:12px;">
+                        ${renderBuilderCards(CONFIG.KINGDOM_THREATS, 'threats', '#ff8844')}
+                    </div>
+                </div>
+
+                <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,242,168,0.2); padding: 16px; display:flex; flex-direction:column; gap:12px;">
+                    <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start; flex-wrap:wrap;">
+                        <div>
+                            <h4 style="color:#fff2a8; font-size:10px; margin:0 0 8px 0;">PERSONAL DWELLING</h4>
+                            <p style="font-size:8px; color:#aaa; margin:0; line-height:1.8;">Decorate the inside of your home, expand the floorplan, and turn the royal tower into your own space.</p>
+                        </div>
+                        <div style="font-size:8px; color:#ddd; line-height:1.8; text-align:right;">
+                            <div>TIER ${summary.dwellingTier}</div>
+                            <div>${decorCount} DECOR</div>
+                            <div>${storageCount} CHESTS • ${forgeCount} FORGES</div>
+                        </div>
+                    </div>
+                    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                        <button onclick="window.game.showDecorationShop(true)" style="flex:1; min-width:180px; padding:10px; background:#39FF14; color:black; border:none; font-family:inherit; font-size:8px; cursor:pointer;">DECORATE INTERIOR</button>
+                        <button onclick="window.game.upgradeDwelling()" style="flex:1; min-width:180px; padding:10px; background:${canAffordDwelling ? '#fff2a8' : '#333'}; color:${canAffordDwelling ? '#050505' : '#777'}; border:none; font-family:inherit; font-size:8px; cursor:${canAffordDwelling ? 'pointer' : 'not-allowed'}; opacity:${nextDwelling ? 1 : 0.7};">
+                            ${nextDwelling ? `EXPAND (${nextDwelling.costBlue} BLUE${nextDwelling.costGold ? `, ${nextDwelling.costGold} GOLD` : ''})` : 'MAX DWELLING'}
+                        </button>
+                    </div>
+                    ${nextDwelling ? `<p style="font-size:7px; color:#888; margin:0; line-height:1.7;">NEXT: ${nextDwelling.name.toUpperCase()} • ${nextDwelling.desc} • +${nextDwelling.capBonus || 0} daily collector cap.</p>` : '<p style="font-size:7px; color:#39FF14; margin:0;">Your royal dwelling is fully upgraded.</p>'}
+                </div>
+
+                <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(170,102,255,0.2); padding: 16px;">
+                    <h4 style="color:#aa66ff; font-size:10px; margin:0 0 12px 0;">ROYAL LOOKS</h4>
+                    <div style="display: grid; grid-template-columns: ${cardColumns}; gap: 15px;">
                     ${CONFIG.ACCESSORIES.map(acc => {
+                        const accColor = toCssColor(acc.color);
                         const isOwned = owned.includes(acc.id);
                         const isEquipped = equipped.cape === acc.id || equipped.crown === acc.id;
 
                         return `
-                            <div style="background: #111; border: 2px solid ${isOwned ? acc.color : '#333'}; padding: 15px; display: flex; flex-direction: column; gap: 10px;">
+                            <div style="background: #111; border: 2px solid ${isOwned ? accColor : '#333'}; padding: 15px; display: flex; flex-direction: column; gap: 10px;">
                                 <div style="display: flex; justify-content: space-between; align-items: start;">
-                                    <span style="color: ${acc.color}; font-size: 10px;">${acc.name.toUpperCase()}</span>
+                                    <span style="color: ${accColor}; font-size: 10px;">${acc.name.toUpperCase()}</span>
                                     <span style="color: #666; font-size: 8px;">${acc.type}</span>
                                 </div>
                                 <p style="font-size: 7px; color: #888; flex-grow: 1;">${acc.desc}</p>
@@ -8523,9 +9002,9 @@ class Game3D {
                                     <button onclick="window.game.equipAccessory('${acc.id}')" style="
                                         width: 100%;
                                         padding: 8px;
-                                        background: ${isEquipped ? acc.color : '#222'};
+                                        background: ${isEquipped ? accColor : '#222'};
                                         color: ${isEquipped ? 'black' : 'white'};
-                                        border: 1px solid ${acc.color};
+                                        border: 1px solid ${accColor};
                                         font-family: inherit;
                                         font-size: 8px;
                                         cursor: pointer;
@@ -8552,6 +9031,61 @@ class Game3D {
                 </div>
             </div>
         `;
+    }
+
+    purchaseKingdomAsset(bucketKey, id) {
+        const catalogs = {
+            structures: CONFIG.KINGDOM_BLUEPRINTS,
+            residents: CONFIG.KINGDOM_RESIDENTS,
+            threats: CONFIG.KINGDOM_THREATS
+        };
+        const catalog = catalogs[bucketKey];
+        const item = catalog?.find(entry => entry.id === id);
+        if (!item) return;
+
+        const p = this.progression.data;
+        const kingdom = this.progression.getKingdomState();
+        if (p.blueSpores < (item.costBlue || 0) || p.goldenSpores < (item.costGold || 0)) {
+            this.showGlobalNotification('NOT ENOUGH SPORES', '#ff0000');
+            this.uiSynth.triggerAttackRelease("C3", "8n");
+            return;
+        }
+
+        p.blueSpores -= item.costBlue || 0;
+        p.goldenSpores -= item.costGold || 0;
+        kingdom[bucketKey][id] = Number(kingdom[bucketKey][id] || 0) + 1;
+        p.home.level = Math.max(Number(p.home.level) || 1, Number(kingdom.dwellingTier) || 1);
+        this.progression.save();
+        this.updateHud();
+        this.showInventoryMenu();
+        this.showGlobalNotification(`${item.name.toUpperCase()} BUILT`, '#39FF14');
+        this.uiSynth.triggerAttackRelease("C5", "8n");
+    }
+
+    upgradeDwelling() {
+        const p = this.progression.data;
+        const kingdom = this.progression.getKingdomState();
+        const nextUpgrade = (CONFIG.DWELLING_UPGRADES || []).find(upgrade => upgrade.tier === ((kingdom.dwellingTier || 1) + 1));
+        if (!nextUpgrade) {
+            this.showGlobalNotification('DWELLING AT MAX TIER', '#fff2a8');
+            this.uiSynth.triggerAttackRelease("E4", "16n");
+            return;
+        }
+        if (p.blueSpores < (nextUpgrade.costBlue || 0) || p.goldenSpores < (nextUpgrade.costGold || 0)) {
+            this.showGlobalNotification('NOT ENOUGH SPORES', '#ff0000');
+            this.uiSynth.triggerAttackRelease("C3", "8n");
+            return;
+        }
+
+        p.blueSpores -= nextUpgrade.costBlue || 0;
+        p.goldenSpores -= nextUpgrade.costGold || 0;
+        kingdom.dwellingTier = nextUpgrade.tier;
+        p.home.level = Math.max(Number(p.home.level) || 1, nextUpgrade.tier);
+        this.progression.save();
+        this.updateHud();
+        this.showInventoryMenu();
+        this.showGlobalNotification(`${nextUpgrade.name.toUpperCase()} UNLOCKED`, '#fff2a8');
+        this.uiSynth.triggerAttackRelease("G4", "8n");
     }
 
     purchaseAccessory(id) {
@@ -9381,6 +9915,8 @@ class Game3D {
                         ? `${this.currentTerritoryEffect.territory.ownerClan.toUpperCase()} controls this front`
                         : 'Fight to claim this front')
                     : `${shardCount}/7 crown shards reclaimed`;
+            const access = this.getGameplayAccessState();
+            const holderTier = access.tier;
             const bossAccent = this.getBossAccentHex(this.boss);
             const bossPercent = this.boss ? Math.max(0, Math.min(100, (this.boss.hp / Math.max(1, this.boss.maxHp || 1)) * 100)) : 0;
             const bossPhase = this.boss ? Math.max(1, this.boss.phase || 1) : 0;
@@ -9476,6 +10012,10 @@ class Game3D {
                         </div>
                         <div style="color: white; font-size: 11px; font-weight: bold; margin-bottom: 3px;">${statusTitle}</div>
                         <div style="color: #c2d1d6; font-size: 9px; line-height: 1.5;">${statusDetail}</div>
+                        <div style="display:flex; justify-content:space-between; gap:8px; margin-top:6px; font-size:8px; line-height:1.4;">
+                            <span style="color:${holderTier?.accent || '#ffaa66'};">${holderTier ? `${holderTier.badge || '🍄'} ${holderTier.name}` : 'ACCESS LOCKED'}</span>
+                            <span style="color:${access.walletVerified ? '#fff2a8' : '#8ea39a'};">${access.walletVerified ? `${this.formatMycoBalance(access.currentBalance)} MYCO` : `${access.minimum.toLocaleString('en-US')} MYCO MIN`}</span>
+                        </div>
                         ${isMobileHud ? `
                             <div style="display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:8px; margin-top:8px;">
                                 <div style="padding:7px 8px; background:rgba(0,0,0,0.32); border:1px solid rgba(255,255,255,0.08); border-radius:8px;">
@@ -9559,7 +10099,7 @@ class Game3D {
                             // V1.9.21 - In Spore Collector mode the rot/light-pool panel is
                             // replaced by a collector dashboard: mode badge + daily cap meter.
                             if (this.progression.isCollectorMode()) {
-                                const cap = this.progression.data.collectorDailyCap || 1000;
+                                const cap = this.progression.getCollectorDailyCap();
                                 const remaining = this.progression.getCollectorRemainingToday();
                                 const collected = cap - remaining;
                                 const pct = Math.round((collected / cap) * 100);
@@ -9989,6 +10529,15 @@ class Game3D {
     }
 
     startGameplay() {
+        const access = this.getGameplayAccessState();
+        if (!access.eligible) {
+            this.isPaused = false;
+            this.gameState = 'START_SCREEN';
+            this.setupStartScreen();
+            this.showWalletConnectionHelp({ required: true, access });
+            return;
+        }
+
         this.gameState = 'PLAYING';
         this.startTime = Date.now();
         this.spawnCollectibles(); // Refresh with correct clan colors
@@ -11476,12 +12025,15 @@ class Game3D {
             } else if (opt.action === 'enter_tower') {
                 this.enterTowerInterior();
                 window.closeDialogue();
+            } else if (opt.action === 'show_decorations') {
+                this.showDecorationShop();
             } else if (opt.action === 'show_burn_pit') {
                 this.showBurnPitMenu();
             } else if (opt.action === 'upgrade_home') {
                 if (this.progression.data.goldenSpores >= 10) {
                     this.progression.data.goldenSpores -= 10;
                     this.progression.data.home.level++;
+                    this.progression.getKingdomState().dwellingTier = Math.max(this.progression.getKingdomState().dwellingTier || 1, this.progression.data.home.level);
                     this.progression.save();
                     this.showFloatingText("TOWER EXPANDED!", 0xffff00, true);
                     location.reload(); // Reload to see new tower

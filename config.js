@@ -90,6 +90,28 @@ export const CONFIG = {
         { id: 'weapon_rack', name: 'Elder Weapon Rack', costBlue: 20, costGold: 1, desc: 'Display and store your melee arms.' },
         { id: 'forge', name: 'Mycelial Forge', costBlue: 40, costGold: 4, desc: 'Upgrade your melee weapons and armor stats.' }
     ],
+    KINGDOM_BLUEPRINTS: [
+        { id: 'forager_hut', name: 'Forager Hut', costBlue: 18, costGold: 0, capBonus: 35, prosperity: 1, desc: 'A tiny hut for spore gatherers. Raises your daily collector cap by 35.' },
+        { id: 'spore_house', name: 'Spore House', costBlue: 36, costGold: 1, capBonus: 70, prosperity: 2, desc: 'A proper fungal home for settlers and scouts. +70 daily collector cap.' },
+        { id: 'moss_market', name: 'Moss Market', costBlue: 54, costGold: 2, capBonus: 95, prosperity: 3, desc: 'A living storefront where merchants trade spores and relics. +95 daily collector cap.' },
+        { id: 'watch_castle', name: 'Watch Castle', costBlue: 120, costGold: 6, capBonus: 180, prosperity: 5, desc: 'A towering castle that makes your kingdom feel real. +180 daily collector cap.' }
+    ],
+    KINGDOM_RESIDENTS: [
+        { id: 'sprig_merchant', name: 'Sprig Merchant', costBlue: 22, costGold: 1, capBonus: 30, prosperity: 1, desc: 'Opens a merchant lane and keeps your kingdom stocked.' },
+        { id: 'crown_guard', name: 'Crown Guard', costBlue: 28, costGold: 1, capBonus: 28, defense: 2, desc: 'Protects the roads and patrols your growing capital.' },
+        { id: 'lorekeeper', name: 'Lorekeeper NPC', costBlue: 26, costGold: 1, capBonus: 24, prosperity: 1, desc: 'Keeps a record of your kingdom and attracts new citizens.' },
+        { id: 'spore_smith', name: 'Spore Smith', costBlue: 34, costGold: 2, capBonus: 40, defense: 1, prosperity: 1, desc: 'Maintains huts, shops, and castle walls while boosting productivity.' }
+    ],
+    KINGDOM_THREATS: [
+        { id: 'rotling_nest', name: 'Rotling Nest', costBlue: 20, costGold: 1, capBonus: 26, danger: 2, desc: 'A controlled enemy pocket outside the walls that lures richer spore drops.' },
+        { id: 'bog_beast_den', name: 'Bog Beast Den', costBlue: 38, costGold: 2, capBonus: 44, danger: 3, desc: 'A foul den of roaming enemies. Riskier outskirts, stronger spoils.' },
+        { id: 'void_gate', name: 'Void Gate', costBlue: 68, costGold: 4, capBonus: 80, danger: 5, desc: 'A crackling enemy gate that turns your kingdom into a true grinder zone.' }
+    ],
+    DWELLING_UPGRADES: [
+        { tier: 2, name: 'Expanded Dwelling', costBlue: 42, costGold: 2, capBonus: 40, desc: 'Adds more room for decor, trophies, and storage.' },
+        { tier: 3, name: 'Royal Dwelling', costBlue: 80, costGold: 4, capBonus: 70, desc: 'Turns your home into a decorated royal suite.' },
+        { tier: 4, name: 'Citadel Residence', costBlue: 140, costGold: 8, capBonus: 110, desc: 'A fully customized inner sanctum worthy of King Myco.' }
+    ],
     FORGE_UPGRADES: {
         weapons: [
             { level: 1, damageBonus: 2, costBlue: 10, costIngredients: 5, desc: 'Sharpened edges (+2 DMG)' },
@@ -123,6 +145,80 @@ export const CONFIG = {
         { id: 'blue_cape', name: 'Cobalt Cloak', costGold: 5, type: 'CAPE', color: 0x0000ff, desc: 'A flowing azure cloak.' },
         { id: 'gold_crown', name: 'Golden Crown', costGold: 10, type: 'CROWN', color: 0xffff00, desc: 'A crown made of pure solar gold.' },
         { id: 'emerald_crown', name: 'Emerald Circlet', costGold: 10, type: 'CROWN', color: 0x39FF14, desc: 'A circlet pulsing with forest energy.' }
+    ],
+    HOLDER_TIERS: [
+        {
+            id: 'spore_guard',
+            name: 'Spore Guard',
+            badge: '🍄',
+            minBalance: 10000,
+            accent: '#39FF14',
+            perks: ['Live kingdom access', '+3% move speed', '+1 flat spell damage'],
+            rewards: {
+                accessories: ['red_cape'],
+                inventory: ['capPotion'],
+                playerModifiers: {
+                    speedMult: 1.03,
+                    damageBonusFlat: 1
+                }
+            }
+        },
+        {
+            id: 'crown_guard',
+            name: 'Crown Guard',
+            badge: '🛡️',
+            minBalance: 25000,
+            accent: '#00ffff',
+            perks: ['+6% move speed', '+6% spell cooldown recovery', '+4% crit chance'],
+            rewards: {
+                accessories: ['emerald_crown'],
+                inventory: ['rotSalve'],
+                playerModifiers: {
+                    speedMult: 1.06,
+                    cooldownMult: 0.94,
+                    critBonus: 0.04
+                }
+            }
+        },
+        {
+            id: 'mycelial_knight',
+            name: 'Mycelial Knight',
+            badge: '⚔️',
+            minBalance: 50000,
+            accent: '#ffaa00',
+            perks: ['+2 ward', '+1 projectile', 'Unlock Fungal Shield'],
+            rewards: {
+                inventory: ['sporeBomb'],
+                skills: ['fungalShield'],
+                playerModifiers: {
+                    wardBonusFlat: 2,
+                    projectileCountBonus: 1,
+                    damageBonusFlat: 2
+                }
+            }
+        },
+        {
+            id: 'throne_ascendant',
+            name: 'Throne Ascendant',
+            badge: '👑',
+            minBalance: 100000,
+            accent: '#ff55aa',
+            perks: ['Unlock Royal Spore + Fire Trail', '+10% speed', '+12% cooldown recovery', '+3 ward'],
+            rewards: {
+                accessories: ['gold_crown'],
+                skills: ['royalSpore', 'fireTrail'],
+                skillPoints: 2,
+                playerModifiers: {
+                    speedMult: 1.1,
+                    cooldownMult: 0.88,
+                    wardBonusFlat: 3,
+                    regenBonus: 0.08,
+                    critBonus: 0.08,
+                    damageBonusFlat: 4,
+                    projectileSpeedMult: 1.12
+                }
+            }
+        }
     ],
     CLAN_REWARDS: {
         winner: { goldSpores: 10, skillPoints: 3, ingredients: 20, desc: 'Champion of the Great Burn' },

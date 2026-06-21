@@ -3852,6 +3852,7 @@ export class Player3D {
             critChance: 0
         };
         this.territoryModifiers = null;
+        this.walletModifiers = null;
 
         // Character Model (Roblox R6 style)
         this.group = new THREE.Group();
@@ -4427,6 +4428,17 @@ export class Player3D {
         this.modifiers.wardBonus += territory.wardBonusFlat || 0;
         this.modifiers.regenRate += territory.regenBonus || 0;
         this.modifiers.critChance += territory.critBonus || 0;
+
+        const wallet = this.walletModifiers || {};
+        this.modifiers.speedMult *= wallet.speedMult || 1;
+        this.modifiers.cooldownMult *= wallet.cooldownMult || 1;
+        this.modifiers.goalRadiusMult *= wallet.goalRadiusMult || 1;
+        this.modifiers.projectileSpeedMult *= wallet.projectileSpeedMult || 1;
+        this.modifiers.projectileCount += wallet.projectileCountBonus || 0;
+        this.modifiers.damageBonus = (this.modifiers.damageBonus + (wallet.damageBonusFlat || 0)) * (wallet.damageBonusMult || 1);
+        this.modifiers.wardBonus += wallet.wardBonusFlat || 0;
+        this.modifiers.regenRate += wallet.regenBonus || 0;
+        this.modifiers.critChance += wallet.critBonus || 0;
 
         this.updateModelVisuals();
     }
