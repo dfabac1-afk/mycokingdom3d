@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -150,13 +150,15 @@
       }
     </script>
     <style>
-      html, body, #game-container { width: 100%; height: 100%; min-height: 100dvh; margin: 0; padding: 0; background-color: black; overflow: hidden; }
-      /* V1.9.31 - Scoped touch-action. Previously `body { touch-action: none }`
-         disabled all native tap/scroll behavior page-wide, which broke menu
-         buttons and prevented scrollable content (story crawl, settings) from
-         working on phones. We now disable native gestures only on the canvas
-         and the joystick/button overlay; HTML menus get normal behavior. */
-      #game-container, canvas { touch-action: none; }
+      html, body { width: 100%; height: 100%; min-height: 100dvh; margin: 0; padding: 0; background-color: black; overflow: hidden; }
+      #game-container { width: 100%; height: 100%; min-height: 100dvh; margin: 0; padding: 0; position: relative; background-color: black; overflow: hidden; touch-action: manipulation; }
+      /* V1.9.40 - Real mobile scroll fix.
+         `touch-action: none` on #game-container blocked native vertical panning
+         for every in-game HTML overlay because the browser intersects the touched
+         element with its ancestors before deciding whether scrolling is allowed.
+         Keep gesture suppression on the WebGL canvas only, and let menu/overlay
+         DOM nodes opt into pan-y scrolling normally. */
+      canvas { display: block; touch-action: none; }
       
       .neon-text {
         color: #fff;

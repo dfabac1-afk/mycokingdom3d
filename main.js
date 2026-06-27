@@ -23,16 +23,26 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
-import { Player3D, Enemy3D, RotInfectedEnemy3D, LightPool3D, Boss3D, MossfangSentinel3D, ShardcapWarden3D, DarkMycelius3D, GrandRotBoss3D, BogbellyMyconid3D, WidowcapWeaver3D, Collectible3D, NPC3D, Portal3D, Chest3D, NetTrap3D, Hazard3D, PuzzlePillar3D, SporeBomb3D, VoxelCorruptedHazard3D, InteractiveBuilding3D, RotCluster3D, CitadelGate3D } from './entities_3d.js';
+import { Player3D, Enemy3D, RotInfectedEnemy3D, LightPool3D, Boss3D, MossfangSentinel3D, ShardcapWarden3D, DarkMycelius3D, GrandRotBoss3D, BogbellyMyconid3D, WidowcapWeaver3D, Collectible3D, NPC3D, Portal3D, Chest3D, NetTrap3D, Hazard3D, PuzzlePillar3D, SporeBomb3D, VoxelCorruptedHazard3D, InteractiveBuilding3D, RotCluster3D, CitadelGate3D, TerritoryFlag3D, RemoteClanPlayer3D } from './entities_3d.js';
 import { CONFIG } from './config.js';
 
-const LIVE_BUILD = '1.9.50';
+const LIVE_BUILD = '1.9.62';
 const CLOUD_SESSION_KEY = 'myco_quest_wallet_session_v1';
 const CLOUD_BALANCE_KEY = 'myco_quest_wallet_balance_v1';
 const CLOUD_LAST_SYNC_KEY = 'myco_quest_wallet_last_sync_v1';
+const GUEST_INSTALL_KEY = 'myco_quest_guest_install_v1';
+const GUEST_SESSION_KEY = 'myco_quest_guest_session_v1';
 const LIVE_LEADERBOARD_TTL_MS = 60 * 1000;
-const LIVE_TERRITORY_TTL_MS = 45 * 1000;
+const LIVE_TERRITORY_TTL_MS = 12 * 1000;
+const LIVE_TERRITORY_WAR_TTL_MS = 4 * 1000;
 const HOLDER_ACCESS_REFRESH_MS = 15 * 60 * 1000;
+const TERRITORY_CAPTURE_MS = 20 * 1000;
+const TERRITORY_PRESSURE_TICK_MS = 5 * 1000;
+const TERRITORY_PRESENCE_SYNC_MS = 12 * 1000;
+const TERRITORY_PRESENCE_STALE_MS = 90 * 1000;
+const TERRITORY_REFRESH_LOOP_MS = 5 * 1000;
+const TERRITORY_RESPAWN_INVULN_MS = 6 * 1000;
+const TERRITORY_HIT_RECEIPT_TTL_MS = 5 * 60 * 1000;
 
 function resolveMycoApiBase() {
     const override = localStorage.getItem('myco_api_base');
@@ -62,6 +72,38 @@ const SILENT_AUDIO_NODE = Object.freeze({
     toDestination() { return this; },
     dispose() {}
 });
+
+function extractSignatureBytes(signed) {
+    if (signed instanceof Uint8Array) return signed;
+    if (signed?.signature instanceof Uint8Array) return signed.signature;
+    if (Array.isArray(signed?.signature)) return Uint8Array.from(signed.signature);
+    if (Array.isArray(signed)) return Uint8Array.from(signed);
+    throw new Error('wallet_signature_unreadable');
+}
+
+const EQUIPPABLE_SKILL_IDS = new Set([
+    'royalSpore',
+    'mycelialNet',
+    'spore_blast',
+    'shroom_shield',
+    'mycelial_dash',
+    'ember_strike',
+    'void_step',
+    'crown_aegis'
+]);
+
+function isEquipableSkillId(skillId) {
+    return typeof skillId === 'string' && EQUIPPABLE_SKILL_IDS.has(skillId);
+}
+
+function sanitizeEquippedSkillId(data) {
+    if (!data || typeof data !== 'object') return null;
+    const skillId = typeof data.equippedSkillId === 'string'
+        ? data.equippedSkillId
+        : (typeof data.equippedSkill === 'string' ? data.equippedSkill : null);
+    if (!isEquipableSkillId(skillId)) return null;
+    return Number(data.upgrades?.[skillId] || 0) > 0 ? skillId : null;
+}
 
 class LeaderboardManager {
     constructor() {
@@ -384,6 +426,7 @@ class ProgressionManager {
                 xp: 0,
                 nextLevelXp: 1000,
                 skillPoints: 0,
+                equippedSkillId: null,
                 upgrades: {
                     magicDamage: 0,
                     projectileCount: 0,
@@ -394,7 +437,13 @@ class ProgressionManager {
                     fireTrail: 0,
                     royalSpore: 0,
                     fungalShield: 0,
-                    mycelialNet: 0
+                    mycelialNet: 0,
+                    spore_blast: 0,
+                    shroom_shield: 0,
+                    mycelial_dash: 0,
+                    ember_strike: 0,
+                    void_step: 0,
+                    crown_aegis: 0
                 },
                 blueSpores: 0,
                 goldenSpores: 0,
@@ -597,6 +646,11 @@ class ProgressionManager {
             data.kingdom.dwellingTier = Math.max(1, Number(data.home.level) || 1);
         }
         data.home.level = Math.max(Number(data.home.level) || 1, data.kingdom.dwellingTier || 1);
+        if (!data.upgrades || typeof data.upgrades !== 'object') data.upgrades = {};
+        (CONFIG.SKILLS || []).forEach(skill => {
+            if (!Number.isFinite(data.upgrades[skill.id])) data.upgrades[skill.id] = 0;
+        });
+        data.equippedSkillId = sanitizeEquippedSkillId(data);
         if (data.ingredients === undefined) data.ingredients = 0;
         if (data.dailyBurnedAmount === undefined) data.dailyBurnedAmount = 0;
         if (data.totalBurned === undefined) data.totalBurned = 0;
@@ -1015,6 +1069,7 @@ class Game3D {
         this.apiBase = resolveMycoApiBase();
         this.walletSessionToken = null;
         this.walletMycoBalance = null;
+        this.walletAccessSnapshot = null;
         this.cloudProfile = null;
         this.cloudSyncStatus = 'local';
         this.cloudSyncMessage = 'Local save only';
@@ -1027,9 +1082,42 @@ class Game3D {
         this.liveTerritoryLoading = false;
         this.nextTerritoryRefreshAt = 0;
         this.territoryLabels = [];
+        this.territoryFlags = [];
+        this.activeTerritoryFlag = null;
+        this.remotePlayers = [];
+        this.remotePlayerMap = new Map();
+        this.territoryFeedSeenIds = new Map();
+        this.territoryProcessedHitKeys = new Map();
+        this.territoryRespawnLockUntil = 0;
+        this.territoryIgnoreHitsBefore = 0;
+        this.territoryDamageHud = {
+            angleRad: 0,
+            sourceClan: 'enemy',
+            damage: 0,
+            attackKind: 'STRIKE',
+            activeUntil: 0,
+            flashUntil: 0
+        };
+        this.nextTerritoryPresenceSyncAt = 0;
+        this.territoryPresenceLoading = false;
+        this.activePowerups = [];
+        this.territoryCapture = {
+            regionId: null,
+            startedAt: 0,
+            progressMs: 0,
+            lastPressureAt: 0,
+            blockedReason: null,
+            localOccupant: false,
+            completing: false
+        };
         this.pendingCloudSyncTimer = null;
         this.suspendAutoCloudSync = false;
         this.liveProgressionEvents = new Set();
+        this.telemetryInstallId = null;
+        this.telemetrySessionId = null;
+        this.telemetrySessionStartedAt = Date.now();
+        this.telemetryEventKeys = new Set();
+        this.initTelemetrySession();
         this.enemies = [];
         this.enemyProjectiles = [];
         this.collectibles = [];
@@ -1336,10 +1424,160 @@ class Game3D {
             this.clockUI.style.display = showWorldHud ? 'flex' : 'none';
             this._worldHudVisible = showWorldHud;
         }
+        if (this.isMobile && this.setMobileControlsVisible) {
+            this.setMobileControlsVisible(this.gameState === 'PLAYING');
+        }
         if (this.restorationHUD && this._restorationHudVisible !== false) {
             this.restorationHUD.style.display = 'none';
             this._restorationHudVisible = false;
         }
+    }
+
+    getMobileSafeOverlayPadding(compact = false) {
+        return compact
+            ? 'calc(8px + env(safe-area-inset-top, 0px)) calc(8px + env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) calc(8px + env(safe-area-inset-left, 0px))'
+            : 'calc(10px + env(safe-area-inset-top, 0px)) calc(10px + env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px)) calc(10px + env(safe-area-inset-left, 0px))';
+    }
+
+    getMobileSafeOverlayMaxHeight(offsetPx = 24) {
+        return `calc(100dvh - ${offsetPx}px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px))`;
+    }
+
+    installMobileUiAccessibilityGuards() {
+        if (this._mobileUiAccessibilityObserver || typeof MutationObserver !== 'function') return;
+
+        const observer = new MutationObserver(() => this.queueMobileUiAccessibilityPass());
+        observer.observe(this.uiOverlay, { childList: true, subtree: true });
+        observer.observe(document.body, { childList: true });
+        this._mobileUiAccessibilityObserver = observer;
+        this.queueMobileUiAccessibilityPass();
+    }
+
+    queueMobileUiAccessibilityPass() {
+        if (!this.isMobile) return;
+        if (this._mobileUiAccessibilityFrame) return;
+
+        this._mobileUiAccessibilityFrame = requestAnimationFrame(() => {
+            this._mobileUiAccessibilityFrame = null;
+            this.applyMobileUiAccessibility();
+        });
+    }
+
+    isFullscreenUiShell(element) {
+        if (!(element instanceof HTMLElement)) return false;
+        if (element === this.uiOverlay) return true;
+        if (element.id === 'burn-fx-layer' || element.id === 'boot-error-panel') return false;
+
+        const style = getComputedStyle(element);
+        if (style.pointerEvents === 'none') return false;
+        if (!['absolute', 'fixed'].includes(style.position)) return false;
+
+        const rect = element.getBoundingClientRect();
+        return rect.width >= window.innerWidth * 0.85 && rect.height >= window.innerHeight * 0.85;
+    }
+
+    applyMobileUiAccessibility() {
+        if (!this.isMobile) return;
+
+        const shells = [this.uiOverlay];
+        Array.from(document.body.children).forEach(child => {
+            if (child !== this.uiOverlay && this.isFullscreenUiShell(child)) shells.push(child);
+        });
+
+        const maxWidth = 'calc(100vw - 20px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px))';
+        const maxHeight = this.getMobileSafeOverlayMaxHeight(24);
+
+        shells.forEach(shell => {
+            if (!(shell instanceof HTMLElement)) return;
+
+            shell.style.setProperty('overflow-y', 'auto', 'important');
+            shell.style.setProperty('overflow-x', 'hidden', 'important');
+            shell.style.setProperty('-webkit-overflow-scrolling', 'touch');
+            shell.style.setProperty('touch-action', 'pan-y pinch-zoom', 'important');
+            shell.style.setProperty('overscroll-behavior', 'contain');
+
+            if (shell !== this.uiOverlay) {
+                shell.style.setProperty('display', 'flex', 'important');
+                shell.style.setProperty('flex-direction', 'column', 'important');
+                shell.style.setProperty('align-items', 'center', 'important');
+                shell.style.setProperty('justify-content', 'flex-start', 'important');
+                shell.style.setProperty('padding', this.getMobileSafeOverlayPadding(), 'important');
+                shell.style.setProperty('box-sizing', 'border-box', 'important');
+            }
+
+            const all = [shell, ...shell.querySelectorAll('*')];
+            all.forEach(node => {
+                if (!(node instanceof HTMLElement)) return;
+
+                if (node.tagName === 'BUTTON') {
+                    node.style.setProperty('min-height', '44px', 'important');
+                    node.style.setProperty('touch-action', 'manipulation', 'important');
+                    node.style.setProperty('-webkit-tap-highlight-color', 'transparent');
+                    node.style.setProperty('white-space', 'normal', 'important');
+                    node.style.setProperty('line-height', '1.45', 'important');
+                }
+
+                if (node.tagName === 'TABLE') {
+                    node.style.setProperty('display', 'block', 'important');
+                    node.style.setProperty('width', '100%', 'important');
+                    node.style.setProperty('overflow-x', 'auto', 'important');
+                    node.style.setProperty('-webkit-overflow-scrolling', 'touch');
+                    node.style.setProperty('box-sizing', 'border-box', 'important');
+                }
+
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                const hasVisualChrome = style.backgroundColor !== 'rgba(0, 0, 0, 0)'
+                    || style.boxShadow !== 'none'
+                    || parseFloat(style.borderTopWidth || '0') > 0
+                    || parseFloat(style.borderLeftWidth || '0') > 0;
+                const gridColumns = String(style.gridTemplateColumns || '').trim().split(/\s+/).filter(Boolean).length;
+                const wideGrid = ['grid', 'inline-grid'].includes(style.display)
+                    && rect.width > 240
+                    && rect.width >= window.innerWidth - 48
+                    && gridColumns > 1;
+                const flexRow = style.display === 'flex'
+                    && style.flexDirection.startsWith('row')
+                    && rect.width >= window.innerWidth - 48
+                    && node.children.length > 1;
+                const buttonRow = flexRow && Array.from(node.children).every(child => child instanceof HTMLElement && child.tagName === 'BUTTON');
+                const oversizedPanel = node !== shell && hasVisualChrome && rect.width > 140
+                    && (rect.width > window.innerWidth - 20 || rect.height > window.innerHeight * 0.72);
+
+                if (wideGrid) {
+                    node.style.setProperty('grid-template-columns', '1fr', 'important');
+                }
+
+                if (flexRow) {
+                    node.style.setProperty('flex-wrap', 'wrap', 'important');
+                    if (buttonRow) {
+                        node.style.setProperty('flex-direction', 'column', 'important');
+                        node.style.setProperty('align-items', 'stretch', 'important');
+                    }
+                }
+
+                if (oversizedPanel) {
+                    node.style.setProperty('max-width', maxWidth, 'important');
+                    node.style.setProperty('max-height', maxHeight, 'important');
+                    node.style.setProperty('overflow-y', 'auto', 'important');
+                    node.style.setProperty('overflow-x', 'hidden', 'important');
+                    node.style.setProperty('-webkit-overflow-scrolling', 'touch');
+                    node.style.setProperty('touch-action', 'pan-y pinch-zoom', 'important');
+                    node.style.setProperty('overscroll-behavior', 'contain');
+                    node.style.setProperty('box-sizing', 'border-box', 'important');
+                    if (rect.width > window.innerWidth - 20) {
+                        node.style.setProperty('width', '100%', 'important');
+                    }
+                }
+
+                if (style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflow === 'auto' || style.overflow === 'scroll') {
+                    node.style.setProperty('-webkit-overflow-scrolling', 'touch');
+                    node.style.setProperty('touch-action', 'pan-y pinch-zoom', 'important');
+                    node.style.setProperty('overscroll-behavior', 'contain');
+                    node.style.setProperty('max-width', '100%', 'important');
+                }
+            });
+        });
     }
 
     getWorldTimeState() {
@@ -1364,8 +1602,20 @@ class Game3D {
             xpFill: document.getElementById('xp-fill'),
             xpLabel: document.getElementById('xp-label'),
             levelLabel: document.getElementById('hud-level-label'),
+            skillLabel: document.getElementById('equipped-skill-label'),
             cooldownBar: document.getElementById('cooldown-bar'),
             cooldownText: document.getElementById('cooldown-percent'),
+            territoryCaptureWrap: document.getElementById('territory-capture-wrap'),
+            territoryCaptureFill: document.getElementById('territory-capture-fill'),
+            territoryCaptureText: document.getElementById('territory-capture-text'),
+            territoryPowerups: document.getElementById('territory-powerups'),
+            territoryFrontlineText: document.getElementById('territory-frontline-text'),
+            territoryWarStandings: document.getElementById('territory-war-standings'),
+            territoryWarFeed: document.getElementById('territory-war-feed'),
+            territoryRespawnText: document.getElementById('territory-respawn-text'),
+            territoryDamageCompass: document.getElementById('territory-damage-compass'),
+            territoryDamageArrow: document.getElementById('territory-damage-arrow'),
+            territoryDamageText: document.getElementById('territory-damage-text'),
             bossFill: document.getElementById('boss-fill'),
             bossName: document.getElementById('boss-name'),
             bossState: document.getElementById('boss-state'),
@@ -1871,29 +2121,46 @@ class Game3D {
         const saveStamp = p.lastSavedAt
             ? new Date(p.lastSavedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
             : 'JUST NOW';
+        const skillPointCount = Math.max(0, Number(p.skillPoints || 0));
+        const currentXp = Math.max(0, Number(p.xp || 0));
+        const nextXp = Math.max(1, Number(p.nextLevelXp || 1));
+        const xpProgress = this.progression.isCollectorMode() ? 0 : Math.max(0, Math.min(100, (currentXp / nextXp) * 100));
+        const skillPointEarnCopy = this.progression.isCollectorMode()
+            ? 'Skill points come from holder rewards and weekly burn victories in this mode.'
+            : 'Earn 1 skill point every time you level up. Weekly burn rewards and some holder tiers can add more.';
         const pauseLayoutColumns = this.isMobile ? '1fr' : 'minmax(0, 1.35fr) minmax(240px, 0.85fr)';
         const pauseOverlayPadding = this.isMobile
             ? 'calc(10px + env(safe-area-inset-top, 0px)) calc(10px + env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px)) calc(10px + env(safe-area-inset-left, 0px))'
             : '18px';
         const pausePanelMaxHeight = this.isMobile
-            ? 'calc(100dvh - 24px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px))'
+            ? 'none'
             : 'min(92vh, 940px)';
         const validTabs = new Set(['MAP', 'INVENTORY', 'SPORES', 'MAGIC', 'LOG', 'ACCESSORIES', 'SETTINGS']);
         if (!validTabs.has(this.activeInventoryTab)) this.activeInventoryTab = 'MAP';
 
-        const renderTabButton = (id, label) => `
-            <button onclick="window.setInventoryTab('${id}')" style="
+        const inventorySections = [
+            { id: 'MAP', label: 'MAP', shortLabel: 'MAP', hint: 'World map and live clan war telemetry.' },
+            { id: 'INVENTORY', label: 'INVENTORY', shortLabel: 'INV', hint: 'Supplies and carried loot.' },
+            { id: 'SPORES', label: 'SPORES', shortLabel: 'SPORES', hint: 'Blue and golden spore totals.' },
+            { id: 'MAGIC', label: 'SKILLS + MAGIC', shortLabel: 'SKILLS', hint: 'Spend skill points, unlock sigils, and review spells.' },
+            { id: 'LOG', label: 'LOG', shortLabel: 'LOG', hint: 'Lore, discoveries, and activity.' },
+            { id: 'ACCESSORIES', label: 'BUILD', shortLabel: 'BUILD', hint: 'Accessories, upgrades, and kingdom style.' },
+            { id: 'SETTINGS', label: 'SETTINGS', shortLabel: 'SET', hint: 'Graphics, controls, and game settings.' }
+        ];
+
+        const renderTabButton = (section) => `
+            <button onclick="window.setInventoryTab('${section.id}')" style="
                 flex: 1;
                 padding: 10px;
-                background: ${this.activeInventoryTab === id ? clanColor : '#222'};
-                color: ${this.activeInventoryTab === id ? 'black' : 'white'};
+                background: ${this.activeInventoryTab === section.id ? clanColor : '#222'};
+                color: ${this.activeInventoryTab === section.id ? 'black' : 'white'};
                 border: none;
                 font-family: inherit;
                 font-size: 10px;
                 cursor: pointer;
                 border-top: 2px solid ${clanColor};
             ">
-                ${label}
+                ${section.shortLabel}
             </button>
         `;
 
@@ -1901,6 +2168,7 @@ class Game3D {
         const territoryData = Array.isArray(this.liveTerritory?.regions) ? this.liveTerritory.regions : [];
         const territoryByRegion = new Map(territoryData.map(entry => [entry.id, entry]));
         const territoryStandings = Array.isArray(this.liveTerritory?.clanStandings) ? this.liveTerritory.clanStandings : [];
+        const territoryKillFeed = Array.isArray(this.liveTerritory?.killFeed) ? this.liveTerritory.killFeed : [];
         if (this.activeInventoryTab === 'MAP') {
             content = `
                 <div style="padding: 20px; text-align: center;">
@@ -1941,14 +2209,11 @@ class Game3D {
                             <p style="font-size: 9px; color: #00ffff; margin:0;">LIVE CLAN WAR</p>
                             <p style="font-size: 7px; color: #777; margin:0;">${this.liveTerritoryLoading ? 'SCANNING THE MYCELIAL GRID...' : (this.liveTerritory?.updatedAt ? `UPDATED ${new Date(this.liveTerritory.updatedAt).toLocaleTimeString()}` : 'AWAITING WAR TELEMETRY')}</p>
                         </div>
-                        ${territoryStandings.length ? territoryStandings.slice(0, 4).map((entry, index) => `
-                            <div style="display:grid; grid-template-columns: 24px 1fr auto auto; gap:8px; align-items:center; padding:6px 0; border-bottom:1px solid #141414; font-size:7px; color:#ddd;">
-                                <span style="color:#666;">#${index + 1}</span>
-                                <span style="color:${this.getClanColor(entry.clanId)};">${entry.clanId.toUpperCase()}</span>
-                                <span>${entry.controlledRegions} REG</span>
-                                <span>${entry.weeklyBurned} WB</span>
-                            </div>
-                        `).join('') : '<p style="font-size: 8px; color: #666; margin: 0;">No live territory signals yet.</p>'}
+                        ${this.renderTerritoryStandingsMarkup(territoryStandings, { limit: 4 })}
+                        <div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #141414; text-align: left;">
+                            <p style="font-size: 8px; color: #ffb48a; margin: 0 0 6px 0;">RECENT DOWNS</p>
+                            ${this.renderTerritoryKillFeedMarkup(territoryKillFeed, { limit: 5 })}
+                        </div>
                     </div>
                 </div>
             `;
@@ -1988,19 +2253,137 @@ class Game3D {
             `;
         } else if (this.activeInventoryTab === 'MAGIC') {
             const learnedMagic = p.inventory.filter(id => CONFIG.MAGIC.some(m => m.id === id));
+            const magicSkillCatalog = (CONFIG.SKILLS || []).filter(skill => skill.isMagicSkill);
+            const upgradeSkillCatalog = (CONFIG.SKILLS || []).filter(skill => !skill.isMagicSkill);
+            const unlockedSigils = magicSkillCatalog.filter(skill => (p.upgrades?.[skill.id] || 0) > 0);
+            const unlockedAbilities = upgradeSkillCatalog.filter(skill => skill.isAbility && (p.upgrades?.[skill.id] || 0) > 0);
+            const equippedSkillId = this.getEquippedSkillId();
+            const equippedSkill = equippedSkillId ? this.getSkillConfig(equippedSkillId) : null;
             content = `
                 <div style="padding: 20px;">
-                    <h3 style="color: #00ffff; font-size: 12px; margin-bottom: 20px;">KNOWN SPELLS</h3>
-                    <div style="display: grid; gap: 10px;">
-                        ${learnedMagic.length > 0 ? learnedMagic.map(id => {
-                            const m = CONFIG.MAGIC.find(item => item.id === id);
-                            return `
-                                <div style="background: rgba(0,255,255,0.05); border-left: 4px solid #00ffff; padding: 15px;">
-                                    <p style="font-size: 12px; color: #00ffff; margin-bottom: 5px;">${m.name.toUpperCase()}</p>
-                                    <p style="font-size: 8px; color: #888;">${m.desc}</p>
+                    <div style="background: rgba(57,255,20,0.08); border: 1px solid rgba(57,255,20,0.28); border-radius: 10px; padding: 14px 16px; margin-bottom: 18px;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
+                            <h3 style="color: #39FF14; font-size: 12px; margin: 0;">SKILLS + MAGIC</h3>
+                            <span style="font-size: 9px; color: #ffffff;">${skillPointCount} SP READY</span>
+                        </div>
+                        <p style="font-size: 8px; color: #c7ffd4; line-height: 1.6; margin: 0 0 10px 0;">${skillPointEarnCopy}</p>
+                        ${this.progression.isCollectorMode() ? `
+                            <div style="font-size: 8px; color: #fff2a8;">Collector mode skips XP level-ups, so weekly burn rewards and holder perks are your best path to more skill points.</div>
+                        ` : `
+                            <div style="display:grid; gap:6px;">
+                                <div style="display:flex; justify-content:space-between; gap:8px; font-size:7px; color:#b8f7c8;">
+                                    <span>LEVEL ${p.level}</span>
+                                    <span>${currentXp}/${nextXp} XP</span>
                                 </div>
-                            `;
-                        }).join('') : '<p style="font-size: 10px; color: #444; text-align: center;">No magic learned yet.</p>'}
+                                <div style="height:10px; background:rgba(0,0,0,0.55); border:1px solid rgba(57,255,20,0.26); border-radius:999px; overflow:hidden;">
+                                    <div style="width:${xpProgress}%; height:100%; background:linear-gradient(90deg, #39FF14, #00ffff);"></div>
+                                </div>
+                                <div style="font-size:7px; color:#9bd9ff;">${Math.max(0, nextXp - currentXp)} XP until your next skill point.</div>
+                            </div>
+                        `}
+                    </div>
+
+                    <div style="margin-bottom: 18px;">
+                        <h3 style="color: #00ffff; font-size: 12px; margin-bottom: 10px;">MAGIC SIGILS</h3>
+                        <div style="display: grid; grid-template-columns: ${this.isMobile ? '1fr' : '1fr 1fr'}; gap: 10px;">
+                            ${magicSkillCatalog.map(skill => {
+                                const learned = (p.upgrades?.[skill.id] || 0) > 0;
+                                const disabled = learned || skillPointCount < 1;
+                                const equipped = equippedSkillId === skill.id;
+                                return `
+                                    <div style="background: rgba(0,255,255,0.05); border: 1px solid ${learned ? '#39FF14' : 'rgba(0,255,255,0.22)'}; padding: 12px; display:flex; flex-direction:column; gap:8px;">
+                                        <div>
+                                            <div style="display:flex; justify-content:space-between; gap:8px; align-items:flex-start; margin-bottom:6px;">
+                                                <span style="font-size: 10px; color: ${learned ? '#39FF14' : '#00ffff'};">${skill.name.toUpperCase()}</span>
+                                                <span style="font-size: 7px; color: ${learned ? '#b8ffb8' : '#fff2a8'};">${learned ? 'LEARNED' : '1 SP'}</span>
+                                            </div>
+                                            <p style="font-size: 7px; color: #9fb7bb; line-height: 1.55; margin: 0;">${skill.desc}</p>
+                                        </div>
+                                        ${learned ? `
+                                            <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+                                                <button style="padding: 8px; background: #114d19; color: #39FF14; border: none; font-family: inherit; font-size: 8px; opacity: 0.9;">SIGIL READY</button>
+                                                <button onclick="window.equipPauseSkill('${skill.id}')" style="padding: 8px; background: ${equipped ? '#00ffff' : '#0b2230'}; color: ${equipped ? 'black' : '#8fefff'}; border: 1px solid ${equipped ? '#00ffff' : '#1a6378'}; font-family: inherit; font-size: 8px; cursor: pointer;">
+                                                    ${equipped ? 'EQUIPPED' : 'EQUIP'}
+                                                </button>
+                                            </div>
+                                        ` : `
+                                            <button onclick="window.learnPauseSkill('${skill.id}')" style="padding: 8px; background: ${skillPointCount >= 1 ? '#39FF14' : '#333'}; color: ${skillPointCount >= 1 ? 'black' : '#888'}; border: none; font-family: inherit; font-size: 8px; cursor: ${disabled ? 'default' : 'pointer'}; opacity: ${disabled ? 0.75 : 1};">
+                                                ${skillPointCount >= 1 ? 'LEARN MAGIC' : 'NEED 1 SP'}
+                                            </button>
+                                        `}
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+
+                    <div style="margin-bottom: 18px;">
+                        <h3 style="color: #ffaa00; font-size: 12px; margin-bottom: 10px;">KING'S UPGRADES</h3>
+                        <div style="display: grid; grid-template-columns: ${this.isMobile ? '1fr' : '1fr 1fr'}; gap: 10px;">
+                            ${upgradeSkillCatalog.map(skill => {
+                                const level = p.upgrades?.[skill.id] || 0;
+                                const learned = skill.isAbility ? level > 0 : false;
+                                const disabled = (skill.isAbility && learned) || skillPointCount < 1;
+                                const equipable = skill.isAbility && this.isSkillEquipable(skill.id);
+                                const equipped = equippedSkillId === skill.id;
+                                return `
+                                    <div style="background: rgba(255,170,0,0.05); border: 1px solid rgba(255,170,0,0.22); padding: 12px; display:flex; flex-direction:column; gap:8px;">
+                                        <div>
+                                            <div style="display:flex; justify-content:space-between; gap:8px; align-items:flex-start; margin-bottom:6px;">
+                                                <span style="font-size: 10px; color: #ffaa00;">${skill.name.toUpperCase()}</span>
+                                                <span style="font-size: 7px; color: #fff2a8;">${skill.isAbility ? (learned ? 'LEARNED' : '1 SP') : `LV ${level}`}</span>
+                                            </div>
+                                            <p style="font-size: 7px; color: #b8aaa1; line-height: 1.55; margin: 0;">${skill.desc}</p>
+                                        </div>
+                                        ${equipable && learned ? `
+                                            <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+                                                <button style="padding: 8px; background: #5a3a00; color: #ffd480; border: none; font-family: inherit; font-size: 8px; opacity: 0.9;">READY</button>
+                                                <button onclick="window.equipPauseSkill('${skill.id}')" style="padding: 8px; background: ${equipped ? '#39FF14' : '#271600'}; color: ${equipped ? 'black' : '#ffd480'}; border: 1px solid ${equipped ? '#39FF14' : '#7a4d00'}; font-family: inherit; font-size: 8px; cursor: pointer;">
+                                                    ${equipped ? 'EQUIPPED' : 'EQUIP'}
+                                                </button>
+                                            </div>
+                                        ` : `
+                                            <button onclick="window.learnPauseSkill('${skill.id}')" style="padding: 8px; background: ${skill.isAbility ? (learned ? '#5a3a00' : (skillPointCount >= 1 ? '#ffaa00' : '#333')) : (skillPointCount >= 1 ? '#ffaa00' : '#333')}; color: ${skillPointCount >= 1 || learned ? 'black' : '#888'}; border: none; font-family: inherit; font-size: 8px; cursor: ${disabled ? 'default' : 'pointer'}; opacity: ${disabled ? 0.75 : 1};">
+                                                ${skill.isAbility ? (learned ? 'ALREADY LEARNED' : (skillPointCount >= 1 ? 'LEARN (1 SP)' : 'NEED 1 SP')) : (skillPointCount >= 1 ? 'UPGRADE (1 SP)' : 'NEED 1 SP')}
+                                            </button>
+                                        `}
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+
+                    <div>
+                        <h3 style="color: #7edbff; font-size: 12px; margin-bottom: 10px;">KNOWN SPELLS</h3>
+                        <div style="display: grid; gap: 10px;">
+                            ${equippedSkill ? `
+                                <div style="background: rgba(255,255,255,0.04); border-left: 4px solid ${equippedSkill.isMagicSkill ? '#00ffff' : '#39FF14'}; padding: 12px;">
+                                    <p style="font-size: 10px; color: ${equippedSkill.isMagicSkill ? '#00ffff' : '#39FF14'}; margin-bottom: 5px;">EQUIPPED SKILL</p>
+                                    <p style="font-size: 8px; color: #ffffff; margin: 0 0 4px 0;">${equippedSkill.name.toUpperCase()}</p>
+                                    <p style="font-size: 7px; color: #96aab1; line-height: 1.5; margin: 0;">Tap the new MAGIC button or press Q / gamepad B to fire it.</p>
+                                </div>
+                            ` : `
+                                <div style="background: rgba(255,255,255,0.04); border-left: 4px solid #666; padding: 12px;">
+                                    <p style="font-size: 10px; color: #cccccc; margin-bottom: 5px;">NO SKILL EQUIPPED</p>
+                                    <p style="font-size: 7px; color: #8a8a8a; line-height: 1.5; margin: 0;">Learn a skill, then tap EQUIP to bind your active magic button.</p>
+                                </div>
+                            `}
+                            ${learnedMagic.length > 0 ? learnedMagic.map(id => {
+                                const m = CONFIG.MAGIC.find(item => item.id === id);
+                                return `
+                                    <div style="background: rgba(0,255,255,0.05); border-left: 4px solid #00ffff; padding: 12px;">
+                                        <p style="font-size: 10px; color: #00ffff; margin-bottom: 5px;">${m.name.toUpperCase()}</p>
+                                        <p style="font-size: 7px; color: #8fa7aa; line-height: 1.5; margin: 0;">${m.desc}</p>
+                                    </div>
+                                `;
+                            }).join('') : '<p style="font-size: 9px; color: #666; text-align: center; margin: 0;">No elemental spells learned from the world yet.</p>'}
+                            ${(unlockedSigils.length || unlockedAbilities.length) ? `
+                                <div style="background: rgba(57,255,20,0.05); border-left: 4px solid #39FF14; padding: 12px;">
+                                    <p style="font-size: 10px; color: #39FF14; margin-bottom: 6px;">LEARNED SKILL MAGIC</p>
+                                    <p style="font-size: 7px; color: #a4c8ad; line-height: 1.6; margin: 0;">${[...unlockedSigils.map(skill => skill.name), ...unlockedAbilities.map(skill => skill.name)].join(' • ')}</p>
+                                </div>
+                            ` : ''}
+                        </div>
                     </div>
                 </div>
             `;
@@ -2029,9 +2412,28 @@ class Game3D {
             `;
         }
 
+        const currentPanelContent = this.activeInventoryTab === 'SETTINGS'
+            ? this.getSettingsContent(settingsMode)
+            : (this.activeInventoryTab === 'ACCESSORIES' ? this.getAccessoriesContent() : content);
+        const renderAccordionSection = (section) => {
+            const isOpen = this.activeInventoryTab === section.id;
+            return `
+                <div style="border:1px solid ${isOpen ? clanColor : '#2b2b2b'}; background:${isOpen ? 'rgba(255,255,255,0.04)' : '#161616'};">
+                    <button onclick="window.setInventoryTab('${section.id}')" aria-expanded="${isOpen ? 'true' : 'false'}" style="width:100%; padding:14px 16px; background:${isOpen ? clanColor : '#222'}; color:${isOpen ? 'black' : 'white'}; border:none; font-family:inherit; cursor:pointer; text-align:left; display:flex; justify-content:space-between; align-items:center; gap:12px;">
+                        <span style="display:flex; flex-direction:column; gap:4px; align-items:flex-start; min-width:0;">
+                            <span style="font-size:11px; line-height:1.2;">${section.label}</span>
+                            <span style="font-size:7px; line-height:1.5; color:${isOpen ? 'rgba(0,0,0,0.72)' : '#9ca3af'}; white-space:normal;">${section.hint}</span>
+                        </span>
+                        <span style="font-size:14px; flex:0 0 auto;">${isOpen ? '−' : '+'}</span>
+                    </button>
+                    ${isOpen ? `<div style="border-top:1px solid rgba(255,255,255,0.08); background:#080808;">${currentPanelContent}</div>` : ''}
+                </div>
+            `;
+        };
+
         this.uiOverlay.innerHTML = `
             <div style="pointer-events: auto; background: rgba(0,0,0,0.95); width: 100%; height: 100%; display: flex; justify-content: center; align-items: ${this.isMobile ? 'flex-start' : 'center'}; font-family: 'Press Start 2P', cursive; box-sizing: border-box; padding: ${pauseOverlayPadding}; overflow-y: auto; -webkit-overflow-scrolling: touch;">
-                <div style="background: #050505; border: 4px solid ${clanColor}; width: min(100%, 900px); box-shadow: 0 0 30px ${clanColor}; max-height: ${pausePanelMaxHeight}; overflow: hidden; display: flex; flex-direction: column; margin: auto;">
+                <div style="background: #050505; border: 4px solid ${clanColor}; width: min(100%, 900px); box-shadow: 0 0 30px ${clanColor}; max-height: ${pausePanelMaxHeight}; overflow: ${this.isMobile ? 'visible' : 'hidden'}; display: flex; flex-direction: column; margin: auto;">
                     <div style="padding: ${this.isMobile ? '16px' : '20px'}; background: ${clanColor}; color: black; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
                         <h2 style="font-size: 18px; margin: 0;">PAUSED</h2>
                         <span style="font-size: 10px;">KING MYCO'S JOURNEY</span>
@@ -2085,6 +2487,14 @@ class Game3D {
                                     <div style="font-size:7px; color:#fff2a8; margin-bottom:4px;">GOLD SPORES</div>
                                     <div style="font-size:12px; color:#ffff00;">${p.goldenSpores}</div>
                                 </div>
+                                <div style="padding:8px; background:rgba(57,255,20,0.08); border:1px solid rgba(57,255,20,0.3); border-radius:8px;">
+                                    <div style="font-size:7px; color:#a8ffbd; margin-bottom:4px;">SKILL POINTS</div>
+                                    <div style="font-size:12px; color:#39FF14;">${skillPointCount}</div>
+                                </div>
+                                <div style="padding:8px; background:rgba(170,120,255,0.08); border:1px solid rgba(170,120,255,0.28); border-radius:8px;">
+                                    <div style="font-size:7px; color:#d2b8ff; margin-bottom:4px;">NEXT SKILL POINT</div>
+                                    <div style="font-size:11px; color:#f1e8ff;">${this.progression.isCollectorMode() ? 'BURN REWARD' : `${currentXp}/${nextXp} XP`}</div>
+                                </div>
                             </div>
                             ${this.progression.isCollectorMode() ? `
                                 <div style="margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.08); display:flex; justify-content:space-between; gap:8px; font-size:7px; color:#c6a6ff;">
@@ -2105,25 +2515,29 @@ class Game3D {
                                     <span>${this.walletSessionToken ? 'AUTO CLOUD SAVE' : 'LOCAL SAVE'}</span>
                                     <span>${saveStamp}</span>
                                 </div>
+                                <div style="display:flex; justify-content:space-between; gap:8px; color:#a8ffbd;">
+                                    <span>SKILL GROWTH</span>
+                                    <span>${this.progression.isCollectorMode() ? 'WEEKLY' : `${Math.max(0, nextXp - currentXp)} XP LEFT`}</span>
+                                </div>
                             </div>
                         </div>
                     </div>
 
-                    <div style="display: flex; flex-wrap: wrap; flex: 0 0 auto;">
-                        ${renderTabButton('MAP', 'MAP')}
-                        ${renderTabButton('INVENTORY', 'INV')}
-                        ${renderTabButton('SPORES', 'SPORES')}
-                        ${renderTabButton('MAGIC', 'MAGIC')}
-                        ${renderTabButton('LOG', 'LOG')}
-                        ${renderTabButton('ACCESSORIES', 'BUILD')}
-                        ${renderTabButton('SETTINGS', 'SET')}
-                    </div>
-
-                    <div style="flex: 1; min-height: 0; color: white; overflow: hidden;">
-                        <div style="height: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch;">
-                            ${this.activeInventoryTab === 'SETTINGS' ? this.getSettingsContent(settingsMode) : (this.activeInventoryTab === 'ACCESSORIES' ? this.getAccessoriesContent() : content)}
+                    ${this.isMobile ? `
+                        <div style="padding: 12px 12px 0 12px; display:grid; gap:10px; flex:0 0 auto;">
+                            ${inventorySections.map(section => renderAccordionSection(section)).join('')}
                         </div>
-                    </div>
+                    ` : `
+                        <div style="display: flex; flex-wrap: wrap; flex: 0 0 auto;">
+                            ${inventorySections.map(section => renderTabButton(section)).join('')}
+                        </div>
+
+                        <div style="flex: 1; min-height: 0; color: white; overflow: hidden;">
+                            <div style="height: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch;">
+                                ${currentPanelContent}
+                            </div>
+                        </div>
+                    `}
 
                     <div style="padding: ${this.isMobile ? '14px 16px' : '20px'}; border-top: 1px solid #222; display: flex; gap: 10px; flex-wrap: wrap; flex: 0 0 auto; background: #050505;">
                         <button onclick="window.game.togglePause()" style="flex: 2; padding: 15px; background: #39FF14; border: none; font-family: inherit; cursor: pointer; color: black;">RESUME</button>
@@ -2136,9 +2550,49 @@ class Game3D {
 
         this.attachSettingsHandlers(settingsMode);
 
+        window.learnPauseSkill = (skillId) => {
+            const skill = (CONFIG.SKILLS || []).find(entry => entry.id === skillId);
+            if (!skill) return;
+
+            if ((p.skillPoints || 0) < 1) {
+                this.showFloatingText('NEED 1 SKILL POINT', 0xffaa00, true);
+                return;
+            }
+
+            if (skill.isAbility && (p.upgrades?.[skillId] || 0) > 0) {
+                this.showFloatingText('ALREADY LEARNED', 0x00ffff, true);
+                return;
+            }
+
+            p.skillPoints = Math.max(0, Number(p.skillPoints || 0) - 1);
+            p.upgrades[skillId] = Number(p.upgrades?.[skillId] || 0) + 1;
+            this.progression.save();
+            const autoEquipped = this.isSkillEquipable(skillId) && !this.getEquippedSkillId() && this.equipSkill(skillId, { silent: true });
+            this.player.applyLevelStats();
+            this.showInventoryMenu(settingsMode);
+            this.updateHud();
+            try {
+                const synth = new TONE.Synth().toDestination();
+                synth.triggerAttackRelease('C5', '8n');
+            } catch (_) {}
+            const learnedLabel = skill.isAbility ? `LEARNED ${skill.name.toUpperCase()}!` : `${skill.name.toUpperCase()} +1`;
+            this.showFloatingText(autoEquipped ? `${learnedLabel} AUTO-EQUIPPED` : learnedLabel, skill.isMagicSkill ? 0x00ffff : 0xffff00, true);
+        };
+
+        window.equipPauseSkill = (skillId) => {
+            const skill = (CONFIG.SKILLS || []).find(entry => entry.id === skillId);
+            if (!skill || !this.isSkillEquipable(skillId)) return;
+            if ((p.upgrades?.[skillId] || 0) <= 0) {
+                this.showFloatingText('LEARN IT FIRST', 0xffaa00, true);
+                return;
+            }
+            this.equipSkill(skillId);
+            this.showInventoryMenu(settingsMode);
+        };
+
         window.setInventoryTab = (tab) => {
             this.activeInventoryTab = tab;
-            this.showInventoryMenu();
+            this.showInventoryMenu(settingsMode);
             if (tab === 'MAP') void this.refreshLiveTerritory('map');
             this.uiSynth.triggerAttackRelease("D4", "16n");
         };
@@ -2458,11 +2912,14 @@ class Game3D {
         this.uiOverlay.style.overflowY = 'auto';
         this.uiOverlay.style.overflowX = 'hidden';
         this.uiOverlay.style.webkitOverflowScrolling = 'touch';
+        this.uiOverlay.style.touchAction = 'pan-y pinch-zoom';
+        this.uiOverlay.style.overscrollBehavior = 'contain';
         this.uiOverlay.style.fontFamily = '"Press Start 2P", cursive';
         this.uiOverlay.style.color = '#ffffff';
         this.uiOverlay.style.textShadow = '2px 2px 4px #000000';
         this.uiOverlay.style.boxSizing = 'border-box';
         document.getElementById('game-container').appendChild(this.uiOverlay);
+        this.installMobileUiAccessibilityGuards();
 
         // Time of Day Clock UI
         this.clockUI = document.createElement('div');
@@ -2784,6 +3241,13 @@ class Game3D {
                     border-color: #ff9999;
                     box-shadow: 0 0 14px rgba(255,60,60,0.55), 0 4px 10px rgba(0,0,0,0.45);
                 }
+                .mobile-action-btn.magic {
+                    width: 88px; height: 88px;
+                    font-size: 13px;
+                    background: radial-gradient(circle at 30% 30%, rgba(110,220,255,0.9), rgba(0,80,200,0.9));
+                    border-color: #aee8ff;
+                    box-shadow: 0 0 14px rgba(0,200,255,0.45), 0 4px 10px rgba(0,0,0,0.45);
+                }
                 .mobile-action-btn.jump {
                     background: radial-gradient(circle at 30% 30%, rgba(120,200,255,0.85), rgba(20,80,160,0.85));
                     border-color: #aaddff;
@@ -2839,6 +3303,7 @@ class Game3D {
             return b;
         };
         const attackBtn = makeBtn('ATTACK', 'attack');
+        const magicBtn = makeBtn('MAGIC', 'magic');
         const jumpBtn   = makeBtn('JUMP',   'jump');
         const interactBtn = makeBtn('INTERACT', 'interact');
 
@@ -2858,14 +3323,16 @@ class Game3D {
 
             // Action buttons stacked on the right.
             // ATTACK (biggest) at the bottom-right thumb rest.
-            // INTERACT sits left of ATTACK for quick object/NPC use.
-            // JUMP stacks above ATTACK.
+            // MAGIC sits just left of ATTACK so combat has separate fire/cast inputs.
+            // JUMP stacks above ATTACK and INTERACT floats above-left for quick object use.
             attackBtn.style.right = `calc(28px + ${safeR})`;
             attackBtn.style.bottom = `calc(120px + ${safeB})`;
+            magicBtn.style.right = `calc(136px + ${safeR})`;
+            magicBtn.style.bottom = `calc(126px + ${safeB})`;
             jumpBtn.style.right = `calc(54px + ${safeR})`;
             jumpBtn.style.bottom = `calc(232px + ${safeB})`;
-            interactBtn.style.right = `calc(142px + ${safeR})`;
-            interactBtn.style.bottom = `calc(136px + ${safeB})`;
+            interactBtn.style.right = `calc(162px + ${safeR})`;
+            interactBtn.style.bottom = `calc(232px + ${safeB})`;
         };
         layout();
         window.addEventListener('resize', layout);
@@ -2958,6 +3425,13 @@ class Game3D {
                     tapInteract();
                     this.triggerHaptic('tap');
                 }
+            },
+            {
+                el: magicBtn, id: null,
+                onPress: () => {
+                    this.useEquippedSkill({ source: 'touch' });
+                },
+                onInitialPress: () => this.triggerHaptic('medium')
             },
             // ATTACK auto-repeats while held (combat must feel responsive).
             // Haptic only fires on the initial press to avoid buzzy spam.
@@ -3111,6 +3585,10 @@ class Game3D {
             const isHidden = root.classList.contains('hidden');
             if (shouldShow && isHidden) root.classList.remove('hidden');
             else if (!shouldShow && !isHidden) root.classList.add('hidden');
+
+            const equippedSkill = this.getEquippedSkill();
+            magicBtn.textContent = equippedSkill ? 'MAGIC' : 'EQUIP';
+            magicBtn.style.opacity = equippedSkill ? '1' : '0.72';
 
             requestAnimationFrame(tickRepeat);
         };
@@ -3315,6 +3793,7 @@ class Game3D {
     }
 
     syncPlayerStats() {
+        this.progression.data.equippedSkillId = sanitizeEquippedSkillId(this.progression.data);
         this.player.level = this.progression.data.level;
         this.player.xp = this.progression.data.xp;
         this.player.nextLevelXp = this.progression.data.nextLevelXp;
@@ -3339,9 +3818,247 @@ class Game3D {
         this.player.territoryModifiers = territoryEffect.playerModifiers;
         const walletTierEffect = this.getWalletTierGameplayEffect();
         this.player.walletModifiers = walletTierEffect.playerModifiers;
+        this.player.powerupModifiers = this.player.powerupModifiers || {
+            speedMult: 1,
+            cooldownMult: 1,
+            goalRadiusMult: 1,
+            projectileSpeedMult: 1,
+            projectileCountBonus: 0,
+            damageBonusFlat: 0,
+            damageBonusMult: 1,
+            wardBonusFlat: 0,
+            regenBonus: 0,
+            critBonus: 0
+        };
+        this.player._lastReadySkillCueId = this.getEquippedSkillId();
         this.currentTerritoryEffect = territoryEffect;
         if (typeof this.player.applyLevelStats === 'function') this.player.applyLevelStats();
         if (typeof this.player.syncWeaponVisual === 'function') this.player.syncWeaponVisual();
+    }
+
+    getSkillConfig(skillId) {
+        return (CONFIG.SKILLS || []).find(skill => skill.id === skillId) || null;
+    }
+
+    getSkillDisplayName(skillId) {
+        const skill = this.getSkillConfig(skillId);
+        return skill?.name || String(skillId || '').replace(/_/g, ' ');
+    }
+
+    isSkillEquipable(skillId) {
+        return isEquipableSkillId(skillId);
+    }
+
+    getEquippedSkillId() {
+        const equippedSkillId = sanitizeEquippedSkillId(this.progression?.data || {});
+        if (this.progression?.data) this.progression.data.equippedSkillId = equippedSkillId;
+        return equippedSkillId;
+    }
+
+    getEquippedSkill() {
+        const equippedSkillId = this.getEquippedSkillId();
+        return equippedSkillId ? this.getSkillConfig(equippedSkillId) : null;
+    }
+
+    getEquippedSkillHudState() {
+        const skill = this.getEquippedSkill();
+        if (!skill || !this.player) {
+            return {
+                skill: null,
+                label: 'NO SKILL',
+                progress: 0,
+                remainingMs: 0,
+                cooldownMs: 1,
+                ready: false
+            };
+        }
+
+        const cooldownMs = Math.max(1, Number(this.player.getEquippedSkillCooldownMs?.(skill.id) || 1));
+        const remainingMs = Math.max(0, Number(this.player.getEquippedSkillCooldownRemaining?.(skill.id) || 0));
+        const progress = Math.max(0, Math.min(1, 1 - (remainingMs / cooldownMs)));
+
+        return {
+            skill,
+            label: skill.name.toUpperCase(),
+            progress,
+            remainingMs,
+            cooldownMs,
+            ready: remainingMs <= 0
+        };
+    }
+
+    equipSkill(skillId, options = {}) {
+        const skill = this.getSkillConfig(skillId);
+        if (!skill || !this.isSkillEquipable(skillId)) return false;
+
+        const learned = Number(this.progression?.data?.upgrades?.[skillId] || 0) > 0;
+        if (!learned) {
+            if (!options.silent) this.showFloatingText('LEARN IT FIRST', 0xffaa00, true);
+            return false;
+        }
+
+        const currentSkillId = this.getEquippedSkillId();
+        if (currentSkillId === skillId) {
+            if (!options.silent) this.showFloatingText(`${skill.name.toUpperCase()} EQUIPPED`, skill.isMagicSkill ? 0x00ffff : 0x39FF14, true);
+            return true;
+        }
+
+        this.progression.data.equippedSkillId = skillId;
+        this.progression.save();
+        if (this.player) this.player._lastReadySkillCueId = skillId;
+        this.updateHud();
+
+        if (!options.silent) {
+            this.showFloatingText(`EQUIPPED ${skill.name.toUpperCase()}`, skill.isMagicSkill ? 0x00ffff : 0x39FF14, true);
+        }
+        return true;
+    }
+
+    useEquippedSkill(options = {}) {
+        const skill = this.getEquippedSkill();
+        if (!this.player || !skill) {
+            if (!options.silent) this.showFloatingText('EQUIP A SKILL (U)', 0x888888, true);
+            return false;
+        }
+        return !!this.player.useEquippedSkill?.(skill.id, skill, options);
+    }
+
+    destroyHazard(hazard) {
+        if (!hazard) return false;
+        const idx = (this.hazards || []).indexOf(hazard);
+        if (idx !== -1) this.hazards.splice(idx, 1);
+        try { hazard.destroy?.(); } catch (_) {}
+        return idx !== -1;
+    }
+
+    clearHazardsNear(position, radius, predicate = null) {
+        if (!position || !Array.isArray(this.hazards) || !this.hazards.length) return 0;
+        const keep = [];
+        let cleared = 0;
+        for (const hazard of this.hazards) {
+            if (!hazard?.mesh) continue;
+            const matches = (!predicate || predicate(hazard)) && hazard.mesh.position.distanceTo(position) <= radius;
+            if (matches) {
+                cleared++;
+                try { hazard.destroy?.(); } catch (_) {}
+            } else {
+                keep.push(hazard);
+            }
+        }
+        this.hazards = keep;
+        return cleared;
+    }
+
+    unlockCitadelGateWithMagic(label = 'CROWN MAGIC') {
+        if (!this.citadelGate || this.citadelGate.state !== 'MAGIC' || this.citadelGate.isUnlocked) return false;
+        this.citadelGate.advanceState();
+        this.showFloatingText(`THRONE GATE OPENED BY ${label}!`, 0x39FF14, true);
+        this.showBossDefeatEffect(this.citadelGate.position);
+
+        try {
+            this.gateActivationSynth.triggerAttackRelease(["C4", "E4", "G4", "C5"], "2n");
+        } catch (_) {}
+
+        const portal = new Portal3D(this.scene, this.citadelGate.position.clone().add(new THREE.Vector3(0,0,5)), 'thronecap', false);
+        portal.label.visible = false;
+        portal.ring.scale.setScalar(2);
+        this.portals.push(portal);
+        return true;
+    }
+
+    handleEquippedSkillWorldCast(skillId, context = {}) {
+        const position = context.position || this.player?.group?.position || null;
+        const startPos = context.startPos || position;
+        const endPos = context.endPos || position;
+        const boss = this.boss;
+        const regionId = this.currentRegion?.id || boss?.regionConfig?.id || null;
+        if (!position) return false;
+
+        if (skillId === 'spore_blast' && boss && regionId === 'crystalcap') {
+            let shattered = 0;
+            (this.bossHitTargets || []).forEach(target => {
+                if (shattered >= 3 || !target || target.dead || !target.mesh) return;
+                if (target.mesh.position.distanceTo(position) <= 11) {
+                    target.takeDamage?.(99);
+                    shattered++;
+                }
+            });
+            if (shattered > 0) {
+                this.showFloatingText(`SHARDS SHATTERED x${shattered}!`, 0x66eeff, true);
+            }
+            if (!boss.shielded && boss.mesh?.position?.distanceTo(position) <= 10) {
+                boss.takeDamage?.(8);
+                this.updateHud();
+            }
+        }
+
+        if (skillId === 'shroom_shield') {
+            const purified = this.clearHazardsNear(position, 12, hazard => hazard.type === 'ROT_POOL');
+            if (purified > 0) {
+                this.showFloatingText('MARSH PURIFIED!', 0x80ffaa, true);
+                this.spawnExplosionParticles(position, 0x80ffaa);
+            }
+            if (boss && regionId === 'ambermycel') {
+                boss.applySlow?.(0.45);
+            }
+        }
+
+        if (skillId === 'mycelial_dash') {
+            let cutCount = 0;
+            (this.bossHitTargets || []).forEach(target => {
+                if (!target || target.dead || !target.mesh) return;
+                const nearStart = startPos && target.mesh.position.distanceTo(startPos) <= 7;
+                const nearEnd = endPos && target.mesh.position.distanceTo(endPos) <= 7;
+                if (nearStart || nearEnd) {
+                    target.takeDamage?.(99);
+                    cutCount++;
+                }
+            });
+            const websCleared = this.clearHazardsNear(position, 9, hazard => hazard.type === 'WEB_TRAP');
+            if ((cutCount + websCleared) > 0) {
+                this.showFloatingText('SILK CUT!', 0xffffff, true);
+            }
+        }
+
+        if (skillId === 'ember_strike' && boss && regionId === 'emberstem' && boss.mesh?.position?.distanceTo(position) <= 16) {
+            boss.takeDamage?.(14);
+            this.showFloatingText('LAVA VEINS EXPOSED!', 0xff8800, true);
+            this.updateHud();
+        }
+
+        if (skillId === 'void_step') {
+            let dispelled = 0;
+            (this.enemies || []).slice().forEach(enemy => {
+                if (!enemy || enemy === boss || !enemy.mesh) return;
+                if (enemy.mesh.position.distanceTo(position) > 6) return;
+                if (enemy.takeDamage?.(999) && typeof this.handleEnemyDeath === 'function') {
+                    dispelled++;
+                    this.handleEnemyDeath(enemy);
+                }
+            });
+            if (dispelled > 0) {
+                this.showFloatingText('VOID COPIES DISPERSED!', 0xaa66ff, true);
+            }
+            if (boss && regionId === 'voidlichen' && boss.mesh?.position?.distanceTo(position) <= 12) {
+                boss.takeDamage?.(12);
+                this.showFloatingText('VOID PATTERN BROKEN!', 0xaa66ff, true);
+                this.updateHud();
+            }
+        }
+
+        if (skillId === 'crown_aegis') {
+            if (this.citadelGate && !this.citadelGate.isUnlocked && this.citadelGate.state === 'MAGIC' && this.citadelGate.position.distanceTo(position) <= 9) {
+                this.unlockCitadelGateWithMagic('CROWN AEGIS');
+            }
+            if (boss?.isDarkMycelius && boss.shielded && boss.shieldReason === 'void-crown' && boss.mesh?.position?.distanceTo(position) <= 12) {
+                boss.dropShield?.();
+                boss.takeDamage?.(10);
+                this.showFloatingText('CROWN BEAM NULLIFIED!', 0xffdd55, true);
+                this.updateHud();
+            }
+        }
+
+        return true;
     }
 
     getCurrentGameMode() {
@@ -3360,15 +4077,696 @@ class Game3D {
         return '#39FF14';
     }
 
+    isLiveOpsMode(mode = this.getCurrentGameMode()) {
+        return mode === 'TERRITORY';
+    }
+
+    canEnterMode(mode = this.getCurrentGameMode(), access = this.getGameplayAccessState()) {
+        return this.isLiveOpsMode(mode) ? !!access?.eligible : true;
+    }
+
     getTerritoryApiPath() {
         return this.progression?.isTerritoryWarMode?.()
             ? '/api/game3d/territory?mode=TERRITORY'
             : '/api/game3d/territory';
     }
 
+    shouldOpenAllPortals(mode = this.getCurrentGameMode()) {
+        return mode === 'COLLECTOR' || mode === 'TERRITORY';
+    }
+
+    ensureTerritoryWarLoadout() {
+        if (!this.progression?.isTerritoryWarMode?.()) return false;
+        const p = this.progression.data;
+        if (!Array.isArray(p.inventory)) p.inventory = [];
+        let changed = false;
+        ['fungal_blade', 'sparkSpore'].forEach(itemId => {
+            if (!p.inventory.includes(itemId)) {
+                p.inventory.push(itemId);
+                changed = true;
+            }
+        });
+        if (!Number.isFinite(p.skillPoints)) p.skillPoints = 0;
+        if (!p.territoryWarStarterKitClaimed) {
+            p.skillPoints += 2;
+            p.territoryWarStarterKitClaimed = true;
+            changed = true;
+        }
+        if (changed) this.progression.save();
+        return changed;
+    }
+
+    clearTerritoryFlags() {
+        if (!Array.isArray(this.territoryFlags)) this.territoryFlags = [];
+        this.territoryFlags.forEach(flag => {
+            try { flag.destroy(); } catch (_) {}
+        });
+        this.territoryFlags = [];
+        this.activeTerritoryFlag = null;
+    }
+
+    getTerritoryFlagPosition(regionId = this.currentRegion?.id) {
+        if (regionId === 'region8') return new THREE.Vector3(0, 0, 0);
+        if (regionId === 'mushroomKingdom') return new THREE.Vector3(0, 0, 10);
+        return new THREE.Vector3(0, 0, 0);
+    }
+
+    spawnTerritoryFlagForCurrentRegion() {
+        this.clearTerritoryFlags();
+        if (!this.currentRegion) return null;
+        const flag = new TerritoryFlag3D(this.scene, this.getTerritoryFlagPosition(this.currentRegion.id), { regionId: this.currentRegion.id });
+        this.territoryFlags.push(flag);
+        this.activeTerritoryFlag = flag;
+        return flag;
+    }
+
+    clearRemotePlayers() {
+        if (!Array.isArray(this.remotePlayers)) this.remotePlayers = [];
+        this.remotePlayers.forEach(player => {
+            try { player.destroy(); } catch (_) {}
+        });
+        this.remotePlayers = [];
+        this.remotePlayerMap = new Map();
+    }
+
+    syncRemoteTerritoryPlayers(regionState = this.getRegionTerritoryState(this.currentRegion?.id)) {
+        if (!this.progression?.isTerritoryWarMode?.() || !this.currentRegion) {
+            this.clearRemotePlayers();
+            return;
+        }
+
+        const freshPlayers = Array.isArray(regionState?.players)
+            ? regionState.players.filter(player => player?.walletAddress && player.walletAddress !== this.walletAddress)
+            : [];
+        const keep = new Set();
+
+        freshPlayers.forEach(presence => {
+            const wallet = presence.walletAddress;
+            keep.add(wallet);
+            let remote = this.remotePlayerMap.get(wallet);
+            if (!remote) {
+                remote = new RemoteClanPlayer3D(this.scene);
+                this.remotePlayerMap.set(wallet, remote);
+                this.remotePlayers.push(remote);
+            }
+            remote.applyPresence(presence);
+        });
+
+        [...this.remotePlayerMap.entries()].forEach(([wallet, remote]) => {
+            if (keep.has(wallet)) return;
+            try { remote.destroy(); } catch (_) {}
+            this.remotePlayerMap.delete(wallet);
+            this.remotePlayers = this.remotePlayers.filter(entry => entry !== remote);
+        });
+    }
+
+    getLiveTerritoryTtlMs() {
+        return this.progression?.isTerritoryWarMode?.() ? LIVE_TERRITORY_WAR_TTL_MS : LIVE_TERRITORY_TTL_MS;
+    }
+
+    pruneProcessedTerritoryHits(now = Date.now()) {
+        if (!(this.territoryProcessedHitKeys instanceof Map)) this.territoryProcessedHitKeys = new Map();
+        for (const [key, ts] of this.territoryProcessedHitKeys.entries()) {
+            if ((now - Number(ts || 0)) > TERRITORY_HIT_RECEIPT_TTL_MS) this.territoryProcessedHitKeys.delete(key);
+        }
+        if (this.territoryProcessedHitKeys.size <= 320) return;
+        const extra = this.territoryProcessedHitKeys.size - 320;
+        let removed = 0;
+        for (const key of this.territoryProcessedHitKeys.keys()) {
+            this.territoryProcessedHitKeys.delete(key);
+            removed += 1;
+            if (removed >= extra) break;
+        }
+    }
+
+    canTargetRemoteClanPlayer(presence = null) {
+        if (!this.progression?.isTerritoryWarMode?.() || !presence || !this.player || !this.currentRegion) return false;
+        if (this.getRegionTerritoryState(this.currentRegion.id)?.sanctuary) return false;
+        if (!presence.walletAddress || presence.walletAddress === this.walletAddress) return false;
+        if ((presence.clanId || 'myco') === (this.selectedClan || 'myco')) return false;
+        if (Number(presence.invulnerableUntil || 0) > Date.now()) return false;
+        return presence.regionId === this.currentRegion.id;
+    }
+
+    async submitTerritoryPlayerHit(targetPresence, { damage = 1, attackKind = 'magic', hitId = 'hit', impactPosition = null } = {}) {
+        if (!this.canTargetRemoteClanPlayer(targetPresence)) return false;
+        const normalizedDamage = Math.max(1, Math.min(12, Math.round(Number(damage) || 0)));
+        const eventKey = `territory_player_hit:${this.walletAddress || 'anon'}:${targetPresence.walletAddress}:${hitId}`;
+        return this.submitProgressionEvent('territory_player_hit', {
+            eventKey,
+            regionId: this.currentRegion?.id || null,
+            metadata: {
+                targetWalletAddress: targetPresence.walletAddress,
+                targetPlayerName: targetPresence.playerName || 'Wanderer',
+                targetClanId: targetPresence.clanId || 'myco',
+                attackKind,
+                damage: normalizedDamage,
+                sourceWeaponId: this.player?.currentWeaponId || 'none',
+                sourceMagicId: (() => {
+                    const learnedMagic = Array.isArray(this.player?.inventory)
+                        ? this.player.inventory.filter(id => CONFIG.MAGIC.some(m => m.id === id))
+                        : [];
+                    return learnedMagic[this.player?.currentMagicIdx || 0] || null;
+                })(),
+                sourcePosition: {
+                    x: Number(this.player?.group?.position?.x || 0),
+                    y: Number(this.player?.group?.position?.y || 0),
+                    z: Number(this.player?.group?.position?.z || 0)
+                },
+                targetPosition: impactPosition ? {
+                    x: Number(impactPosition.x || 0),
+                    y: Number(impactPosition.y || 0),
+                    z: Number(impactPosition.z || 0)
+                } : null,
+                playerName: this.getPlayerName()
+            }
+        });
+    }
+
+    tryTerritoryMeleeHit({ playerPos = null, forward = null, weaponCfg = null, baseDamage = 1, critChance = 0 } = {}) {
+        const regionState = this.getRegionTerritoryState(this.currentRegion?.id);
+        const players = Array.isArray(regionState?.players) ? regionState.players : [];
+        if (!this.progression?.isTerritoryWarMode?.() || !players.length || !playerPos || !forward) return { hitAny: false, hitCrit: false };
+
+        let hitAny = false;
+        let hitCrit = false;
+        const meleeRange = (weaponCfg && weaponCfg.range) || 3.5;
+        const meleeArc = (weaponCfg && weaponCfg.arc) || Math.PI / 1.5;
+
+        players.forEach((presence) => {
+            if (!this.canTargetRemoteClanPlayer(presence)) return;
+            const remote = this.remotePlayerMap.get(presence.walletAddress);
+            const remotePos = remote?.group?.position || new THREE.Vector3(Number(presence.position?.x || 0), 0, Number(presence.position?.z || 0));
+            const toEnemy = new THREE.Vector3().subVectors(remotePos, playerPos);
+            const dist = toEnemy.length();
+            if (!Number.isFinite(dist) || dist <= 0.001) return;
+            toEnemy.normalize();
+            const dot = THREE.MathUtils.clamp(toEnemy.dot(forward), -1, 1);
+            const angle = Math.acos(dot);
+            if (dist >= meleeRange || angle >= (meleeArc / 2)) return;
+
+            const isCrit = Math.random() < Number(critChance || 0);
+            const damage = Math.max(1, Math.round(baseDamage * (isCrit ? 2 : 1)));
+            const hitId = `melee:${this.player?.lastMeleeTime || Date.now()}:${presence.walletAddress}`;
+            void this.submitTerritoryPlayerHit(presence, { damage, attackKind: 'melee', hitId, impactPosition: remotePos });
+            if (remote?.flashHit) remote.flashHit();
+            this.showFloatingText(isCrit ? 'CLAN CRIT!' : 'CLAN HIT!', isCrit ? 0xffaa00 : 0xffddaa);
+            hitAny = true;
+            if (isCrit) hitCrit = true;
+        });
+
+        return { hitAny, hitCrit };
+    }
+
+    processTerritoryProjectileHits() {
+        const regionState = this.getRegionTerritoryState(this.currentRegion?.id);
+        const players = Array.isArray(regionState?.players) ? regionState.players : [];
+        if (!this.progression?.isTerritoryWarMode?.() || !players.length || !Array.isArray(this.player?.projectiles)) return;
+
+        this.player.projectiles.forEach((proj) => {
+            proj.remoteHitWallets = proj.remoteHitWallets instanceof Set ? proj.remoteHitWallets : new Set();
+            if (!proj.remoteCombatId) proj.remoteCombatId = `proj:${this.walletAddress || 'anon'}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+
+            players.forEach((presence) => {
+                if (!this.canTargetRemoteClanPlayer(presence) || proj.remoteHitWallets.has(presence.walletAddress)) return;
+                const remote = this.remotePlayerMap.get(presence.walletAddress);
+                const remotePos = remote?.group?.position || new THREE.Vector3(Number(presence.position?.x || 0), 0, Number(presence.position?.z || 0));
+                const bodyPos = remotePos.clone().add(new THREE.Vector3(0, 1, 0));
+
+                if (proj.coreActive && proj.mesh.position.distanceTo(bodyPos) < 1.45) {
+                    proj.remoteHitWallets.add(presence.walletAddress);
+                    proj.deactivateCore();
+                    void this.submitTerritoryPlayerHit(presence, {
+                        damage: Math.max(1, Math.round(proj.damage || 1)),
+                        attackKind: 'projectile',
+                        hitId: `${proj.remoteCombatId}:${presence.walletAddress}`,
+                        impactPosition: bodyPos
+                    });
+                    if (remote?.flashHit) remote.flashHit();
+                    this.showCriticalImpact(bodyPos);
+                    return;
+                }
+
+                proj.trailParticles?.forEach((particle, index) => {
+                    if (proj.remoteHitWallets.has(presence.walletAddress)) return;
+                    if (!particle?.material || particle.material.opacity <= 0.1) return;
+                    if (particle.position.distanceTo(bodyPos) >= 1.1) return;
+                    proj.remoteHitWallets.add(presence.walletAddress);
+                    particle.scale.set(1.5, 1.5, 1.5);
+                    particle.material.color.setHex(0xffffff);
+                    void this.submitTerritoryPlayerHit(presence, {
+                        damage: Math.max(1, Math.round(particle.userData?.damage || 1)),
+                        attackKind: 'projectile_trail',
+                        hitId: `${proj.remoteCombatId}:trail:${index}:${presence.walletAddress}`,
+                        impactPosition: bodyPos
+                    });
+                    if (remote?.flashHit) remote.flashHit();
+                });
+            });
+        });
+    }
+
+    async applyIncomingTerritoryHits(regionState = this.getRegionTerritoryState(this.currentRegion?.id)) {
+        if (!this.progression?.isTerritoryWarMode?.() || !this.player || !this.walletAddress) return;
+        if (Date.now() < (this.territoryRespawnLockUntil || 0)) return;
+        const selfPresence = Array.isArray(regionState?.players)
+            ? regionState.players.find(player => player?.walletAddress === this.walletAddress)
+            : null;
+        const hits = Array.isArray(selfPresence?.incomingHits) ? selfPresence.incomingHits : [];
+        if (!hits.length) return;
+
+        this.pruneProcessedTerritoryHits();
+        let appliedAny = false;
+        const orderedHits = [...hits].sort((a, b) => new Date(a?.createdAt || 0).getTime() - new Date(b?.createdAt || 0).getTime());
+        for (const hit of orderedHits) {
+            const key = hit?.id || hit?.eventKey;
+            if (!key || this.territoryProcessedHitKeys.has(key)) continue;
+            if (hit?.sourceWalletAddress && hit.sourceWalletAddress === this.walletAddress) continue;
+            if (hit?.sourceClanId && hit.sourceClanId === this.selectedClan) continue;
+            const createdTs = new Date(hit?.createdAt || 0).getTime();
+            if (Number.isFinite(createdTs) && createdTs > 0 && createdTs <= Number(this.territoryIgnoreHitsBefore || 0)) {
+                this.territoryProcessedHitKeys.set(key, Date.now());
+                continue;
+            }
+            this.territoryProcessedHitKeys.set(key, Date.now());
+            const damage = Math.max(1, Math.round(Number(hit?.damage) || 0));
+            if (!damage) continue;
+            this.recordTerritoryDamageEvent(hit, damage);
+            this.player.takeDamage(damage);
+            const sourceClan = String(hit?.sourceClanId || hit?.sourceClan || 'enemy').toUpperCase();
+            const attackKind = String(hit?.attackKind || 'strike').replace(/_/g, ' ').toUpperCase();
+            this.showFloatingText(`${sourceClan} ${attackKind}!`, 0xff6666);
+            appliedAny = true;
+            if (this.player.hp <= 0) break;
+        }
+
+        if (appliedAny && this.player.hp > 0) {
+            void this.syncTerritoryPresence(true);
+        }
+    }
+
+    async handleTerritoryPlayerDown() {
+        if (!this.progression?.isTerritoryWarMode?.() || !this.player) return;
+        this.territoryRespawnLockUntil = Date.now() + TERRITORY_RESPAWN_INVULN_MS;
+        this.territoryIgnoreHitsBefore = this.territoryRespawnLockUntil;
+        this.resetTerritoryCapture('RESPAWNING');
+        const respawn = this.getTerritoryFlagPosition(this.currentRegion?.id || this.progression?.data?.currentRegionId || 'region8') || new THREE.Vector3();
+        const angle = Math.random() * Math.PI * 2;
+        const radius = 6;
+        this.player.group.position.set(respawn.x + Math.cos(angle) * radius, 0.4, respawn.z + Math.sin(angle) * radius);
+        this.player.velocity?.set?.(0, 0, 0);
+        this.player.hp = this.player.maxHp;
+        this.player.magic = Math.max(20, Math.round((this.player.maxMagic || 100) * 0.65));
+        this.territoryDamageHud.activeUntil = 0;
+        this.territoryDamageHud.flashUntil = 0;
+        if (typeof this.player._updateHpBar === 'function') this.player._updateHpBar();
+        this.updateHud();
+        this.showGlobalNotification('Banner respawn locked in, ward raised', '#ff9e66');
+        this.showFloatingText(`SPAWN SHIELD ${Math.ceil(TERRITORY_RESPAWN_INVULN_MS / 1000)}S`, 0x66ffee, true);
+        void this.submitProgressionEvent('territory_player_down', {
+            eventKey: `territory_player_down:${this.walletAddress || 'anon'}:${Math.floor(Date.now() / 3000)}`,
+            regionId: this.currentRegion?.id || null,
+            metadata: {
+                playerName: this.getPlayerName(),
+                clanId: this.selectedClan || 'myco',
+                respawnShieldUntil: this.territoryRespawnLockUntil
+            }
+        });
+        void this.syncTerritoryPresence(true);
+    }
+
+    pruneActivePowerups() {
+        const now = Date.now();
+        const before = (this.activePowerups || []).length;
+        this.activePowerups = (this.activePowerups || []).filter(effect => Number(effect.expiresAt || 0) > now);
+        if (before !== this.activePowerups.length) this.refreshPowerupModifiers();
+    }
+
+    refreshPowerupModifiers() {
+        const combined = {
+            speedMult: 1,
+            cooldownMult: 1,
+            goalRadiusMult: 1,
+            projectileSpeedMult: 1,
+            projectileCountBonus: 0,
+            damageBonusFlat: 0,
+            damageBonusMult: 1,
+            wardBonusFlat: 0,
+            regenBonus: 0,
+            critBonus: 0
+        };
+
+        (this.activePowerups || []).forEach(effect => {
+            const mods = effect.modifiers || {};
+            combined.speedMult *= mods.speedMult || 1;
+            combined.cooldownMult *= mods.cooldownMult || 1;
+            combined.goalRadiusMult *= mods.goalRadiusMult || 1;
+            combined.projectileSpeedMult *= mods.projectileSpeedMult || 1;
+            combined.projectileCountBonus += mods.projectileCountBonus || 0;
+            combined.damageBonusFlat += mods.damageBonusFlat || 0;
+            combined.damageBonusMult *= mods.damageBonusMult || 1;
+            combined.wardBonusFlat += mods.wardBonusFlat || 0;
+            combined.regenBonus += mods.regenBonus || 0;
+            combined.critBonus += mods.critBonus || 0;
+        });
+
+        if (this.player) {
+            this.player.powerupModifiers = combined;
+            if (typeof this.player.applyLevelStats === 'function') this.player.applyLevelStats();
+        }
+    }
+
+    grantTimedPowerup(id, label, modifiers, durationMs, color = 0xffffff) {
+        const scale = this.getHolderTierPowerupScale();
+        const scaled = {
+            ...modifiers,
+            speedMult: modifiers.speedMult ? 1 + ((modifiers.speedMult - 1) * scale) : 1,
+            cooldownMult: modifiers.cooldownMult ? Math.max(0.65, 1 - ((1 - modifiers.cooldownMult) * scale)) : 1,
+            goalRadiusMult: modifiers.goalRadiusMult ? 1 + ((modifiers.goalRadiusMult - 1) * scale) : 1,
+            projectileSpeedMult: modifiers.projectileSpeedMult ? 1 + ((modifiers.projectileSpeedMult - 1) * scale) : 1,
+            projectileCountBonus: Math.round((modifiers.projectileCountBonus || 0) * scale),
+            damageBonusFlat: Math.round((modifiers.damageBonusFlat || 0) * scale),
+            damageBonusMult: modifiers.damageBonusMult ? 1 + ((modifiers.damageBonusMult - 1) * scale) : 1,
+            wardBonusFlat: Math.round((modifiers.wardBonusFlat || 0) * scale),
+            regenBonus: Number((modifiers.regenBonus || 0) * scale),
+            critBonus: Number((modifiers.critBonus || 0) * scale)
+        };
+
+        this.activePowerups = (this.activePowerups || []).filter(effect => effect.id !== id);
+        this.activePowerups.push({
+            id,
+            label,
+            modifiers: scaled,
+            expiresAt: Date.now() + Math.round(durationMs * Math.max(1, scale))
+        });
+        this.refreshPowerupModifiers();
+        this.showFloatingText(`${label.toUpperCase()}!`, color, true);
+        this.showGlobalNotification(`${label} infused your war form`, `#${color.toString(16).padStart(6, '0')}`);
+    }
+
+    getTerritoryCaptureState() {
+        const region = this.getRegionTerritoryState(this.currentRegion?.id);
+        const state = this.territoryCapture || {};
+        const ratio = TERRITORY_CAPTURE_MS > 0 ? Math.max(0, Math.min(1, Number(state.progressMs || 0) / TERRITORY_CAPTURE_MS)) : 0;
+        let text = 'SECURE THE FLAG';
+        if (region?.sanctuary) text = 'SANCTUARY FLAG';
+        else if (state.blockedReason) text = state.blockedReason;
+        else if (state.localOccupant) text = `${Math.ceil(Math.max(0, TERRITORY_CAPTURE_MS - Number(state.progressMs || 0)) / 1000)}s TO CLAIM`;
+        else if (region?.ownerClan && region.ownerClan === this.selectedClan) text = `${region.ownerClan.toUpperCase()} HOLDS THIS FLAG`;
+        else if (region?.ownerClan) text = `CAPTURE FROM ${region.ownerClan.toUpperCase()}`;
+        return { ratio, text, active: !!state.localOccupant && !state.blockedReason && !region?.sanctuary };
+    }
+
+    resetTerritoryCapture(reason = null) {
+        this.territoryCapture = {
+            regionId: this.currentRegion?.id || null,
+            startedAt: 0,
+            progressMs: 0,
+            lastPressureAt: 0,
+            blockedReason: reason,
+            localOccupant: false,
+            completing: false
+        };
+    }
+
+    async completeTerritoryCapture(regionId) {
+        if (this.territoryCapture.completing) return;
+        this.territoryCapture.completing = true;
+        const bucket = Math.floor(Date.now() / TERRITORY_CAPTURE_MS);
+        const result = await this.submitProgressionEvent('territory_claimed', {
+            eventKey: `territory_claimed:${regionId}:${this.selectedClan}:${bucket}`,
+            regionId,
+            metadata: {
+                ownerClan: this.selectedClan,
+                captureMs: TERRITORY_CAPTURE_MS,
+                playerName: this.getPlayerName()
+            }
+        });
+        this.territoryCapture.completing = false;
+        this.resetTerritoryCapture(null);
+        if (result) {
+            this.showGlobalNotification(`${(this.currentRegion?.name || regionId)} claimed for ${this.selectedClan.toUpperCase()}`, this.getClanColor(this.selectedClan));
+            void this.syncTerritoryPresence(true);
+            void this.refreshLiveTerritory('map', { force: true });
+        }
+    }
+
+    async tickTerritoryCapture(now = Date.now()) {
+        if (!this.progression?.isTerritoryWarMode?.() || !this.player || !this.activeTerritoryFlag || this.gameState !== 'PLAYING' || this.isPaused) {
+            this.resetTerritoryCapture(null);
+            return;
+        }
+        const region = this.getRegionTerritoryState(this.currentRegion?.id);
+        const capture = this.territoryCapture || {};
+
+        if (region?.sanctuary) {
+            this.resetTerritoryCapture('SANCTUARY FRONT');
+            return;
+        }
+        if (!this.selectedClan) {
+            this.resetTerritoryCapture('PLEDGE A CLAN');
+            return;
+        }
+        if (!this.hasVerifiedWalletSession()) {
+            this.resetTerritoryCapture('VERIFY WALLET TO CLAIM');
+            return;
+        }
+        if (region?.ownerClan && region.ownerClan === this.selectedClan) {
+            this.resetTerritoryCapture('YOUR CLAN HOLDS THIS');
+            return;
+        }
+
+        const radius = 4.2 * (this.player?.modifiers?.goalRadiusMult || 1);
+        const flagPos = this.activeTerritoryFlag.mesh.position;
+        const playerPos = this.player.group.position;
+        const distSq = flagPos.distanceToSquared(playerPos);
+        if (distSq > (radius * radius)) {
+            this.resetTerritoryCapture('HOLD THE CENTER');
+            return;
+        }
+
+        if (!capture.localOccupant || capture.regionId !== this.currentRegion?.id) {
+            this.territoryCapture = {
+                regionId: this.currentRegion?.id || null,
+                startedAt: now,
+                progressMs: 0,
+                lastPressureAt: 0,
+                blockedReason: null,
+                localOccupant: true,
+                completing: false
+            };
+        }
+
+        const progressMs = Math.max(0, now - this.territoryCapture.startedAt);
+        this.territoryCapture.progressMs = progressMs;
+        this.territoryCapture.blockedReason = null;
+        this.territoryCapture.localOccupant = true;
+
+        if ((now - Number(this.territoryCapture.lastPressureAt || 0)) >= TERRITORY_PRESSURE_TICK_MS) {
+            this.territoryCapture.lastPressureAt = now;
+            void this.submitProgressionEvent('territory_pressure', {
+                eventKey: `territory_pressure:${this.currentRegion?.id || 'unknown'}:${this.selectedClan}:${Math.floor(now / TERRITORY_PRESSURE_TICK_MS)}`,
+                regionId: this.currentRegion?.id || null,
+                metadata: {
+                    points: 10,
+                    holdSeconds: Math.round(progressMs / 1000),
+                    ownerClan: region?.ownerClan || null
+                }
+            });
+            void this.syncTerritoryPresence(true);
+        }
+
+        if (progressMs >= TERRITORY_CAPTURE_MS) {
+            await this.completeTerritoryCapture(this.currentRegion?.id || 'unknown');
+        }
+    }
+
+    async syncTerritoryPresence(force = false) {
+        if (!this.progression?.isTerritoryWarMode?.() || !this.hasVerifiedWalletSession() || !this.player) return false;
+        const now = Date.now();
+        if (!force && (this.territoryPresenceLoading || now < (this.nextTerritoryPresenceSyncAt || 0))) return false;
+        this.territoryPresenceLoading = true;
+        this.nextTerritoryPresenceSyncAt = now + TERRITORY_PRESENCE_SYNC_MS;
+        try {
+            const result = await this.apiRequest('/api/game3d/profile', {
+                method: 'POST',
+                auth: true,
+                body: JSON.stringify(this.getCloudPayload())
+            });
+            if (result?.profile) this.cloudProfile = result.profile;
+            return true;
+        } catch (error) {
+            console.error('territory presence sync failed', error);
+            if (error?.status === 401) this.clearWalletSession();
+            return false;
+        } finally {
+            this.territoryPresenceLoading = false;
+        }
+    }
+
     getRegionTerritoryState(regionId = this.currentRegion?.id) {
         if (!regionId || !Array.isArray(this.liveTerritory?.regions)) return null;
         return this.liveTerritory.regions.find(region => region?.id === regionId) || null;
+    }
+
+    escapeUiText(value) {
+        return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        }[char] || char));
+    }
+
+    getTerritoryFrontlineText(regionState = this.getRegionTerritoryState(this.currentRegion?.id)) {
+        if (!regionState) return 'WAR GRID OFFLINE';
+        const regionName = String(regionState.name || this.currentRegion?.name || 'Unknown Front').toUpperCase();
+        const activePlayers = Math.max(0, Number(regionState.activePlayers || 0));
+        const status = regionState.sanctuary
+            ? 'SANCTUARY'
+            : (regionState.ownerClan
+                ? `${String(regionState.ownerClan).toUpperCase()} ${String(regionState.statusLabel || 'HOLD').toUpperCase()}`
+                : String(regionState.statusLabel || 'WILD').toUpperCase());
+        const pressureLead = Array.isArray(regionState.pressure) ? regionState.pressure[0] : null;
+        const pressureLabel = pressureLead?.clanId
+            ? `${String(pressureLead.clanId).toUpperCase()} ${Math.round(Number(pressureLead.score || 0))}`
+            : 'NO PRESSURE';
+        return `${regionName} • ${status} • ${activePlayers} ACTIVE • ${pressureLabel}`;
+    }
+
+    getTerritoryFeedActorLabel(entry, role = 'killer') {
+        const walletKey = role === 'killer' ? 'killerWalletAddress' : 'victimWalletAddress';
+        const nameKey = role === 'killer' ? 'killerPlayerName' : 'victimPlayerName';
+        const clanKey = role === 'killer' ? 'killerClanId' : 'victimClanId';
+        const fallback = role === 'killer' ? 'THE ROT' : 'WANDERER';
+        const selfLabel = role === 'killer' ? 'You' : 'you';
+        if (entry?.[walletKey] && entry[walletKey] === this.walletAddress) return selfLabel;
+        return entry?.[nameKey] || (entry?.[clanKey] ? String(entry[clanKey]).toUpperCase() : fallback);
+    }
+
+    renderTerritoryStandingsMarkup(entries = [], { limit = 4, compact = false } = {}) {
+        const rows = Array.isArray(entries) ? entries.slice(0, limit) : [];
+        if (!rows.length) {
+            return `<p style="font-size:${compact ? '7px' : '8px'}; color:#666; margin:0;">No live territory signals yet.</p>`;
+        }
+
+        return rows.map((entry, index) => {
+            const clanLabel = this.escapeUiText(String(entry.clanId || 'myco').toUpperCase());
+            const warPower = Math.round(Number(entry.warPower || 0));
+            const controlled = Math.max(0, Number(entry.controlledRegions || 0));
+            const active = Math.max(0, Number(entry.activePlayers || 0));
+            const kills = Math.max(0, Number(entry.kills || 0));
+            const deaths = Math.max(0, Number(entry.deaths || 0));
+            const weeklyBurned = Math.round(Number(entry.weeklyBurned || 0));
+            return `
+                <div style="padding:${compact ? '5px' : '6px'} 0; border-bottom:1px solid #141414;">
+                    <div style="display:grid; grid-template-columns:24px 1fr auto auto; gap:${compact ? '6px' : '8px'}; align-items:center; font-size:7px; color:#ddd;">
+                        <span style="color:#666;">#${index + 1}</span>
+                        <span style="color:${this.getClanColor(entry.clanId)};">${clanLabel}</span>
+                        <span>${warPower} WP</span>
+                        <span>${kills}K/${deaths}D</span>
+                    </div>
+                    <div style="padding-left:30px; margin-top:3px; font-size:6px; color:#7f8c91; letter-spacing:0.3px;">
+                        ${controlled} REG • ${active} ACTIVE • ${weeklyBurned} WEEKLY
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    renderTerritoryKillFeedMarkup(entries = [], { limit = 5, compact = false, relevantOnly = false } = {}) {
+        let rows = Array.isArray(entries) ? [...entries] : [];
+        if (relevantOnly) {
+            rows = rows.filter((entry) => (
+                entry?.regionId === this.currentRegion?.id
+                || entry?.killerClanId === this.selectedClan
+                || entry?.victimClanId === this.selectedClan
+                || entry?.killerWalletAddress === this.walletAddress
+                || entry?.victimWalletAddress === this.walletAddress
+            ));
+        }
+        rows = rows.slice(0, limit);
+        if (!rows.length) {
+            return `<p style="font-size:${compact ? '6px' : '7px'}; color:#666; margin:0;">No recent downs.</p>`;
+        }
+
+        return rows.map((entry) => {
+            const killerClanId = entry?.killerClanId || entry?.victimClanId || 'myco';
+            const victimClanId = entry?.victimClanId || 'myco';
+            const killer = this.escapeUiText(this.getTerritoryFeedActorLabel(entry, 'killer'));
+            const victim = this.escapeUiText(this.getTerritoryFeedActorLabel(entry, 'victim'));
+            const attackKind = this.escapeUiText(String(entry?.attackKind || 'strike').replace(/_/g, ' ').toUpperCase());
+            const createdTs = new Date(entry?.createdAt || 0).getTime();
+            const ageLabel = Number.isFinite(createdTs) && createdTs > 0
+                ? `${Math.max(1, Math.round((Date.now() - createdTs) / 1000))}S`
+                : 'NOW';
+            return `
+                <div style="display:grid; grid-template-columns:1fr auto; gap:8px; align-items:center; padding:${compact ? '4px' : '5px'} 0; border-bottom:1px solid #101010; font-size:${compact ? '6px' : '7px'}; color:#cfd7da;">
+                    <span><span style="color:${this.getClanColor(killerClanId)};">${killer}</span> downed <span style="color:${this.getClanColor(victimClanId)};">${victim}</span></span>
+                    <span style="color:#777;">${compact ? `${attackKind} • ${ageLabel}` : attackKind}</span>
+                </div>
+            `;
+        }).join('');
+    }
+
+    getTerritoryHitVector(hit = null) {
+        const candidate = hit?.impactPosition || hit?.metadata?.impactPosition || hit?.sourcePosition || hit?.metadata?.sourcePosition || null;
+        if (!candidate) return null;
+        if (Array.isArray(candidate) && candidate.length >= 3) {
+            return new THREE.Vector3(Number(candidate[0]) || 0, Number(candidate[1]) || 0, Number(candidate[2]) || 0);
+        }
+        if (typeof candidate === 'object') {
+            return new THREE.Vector3(Number(candidate.x) || 0, Number(candidate.y) || 0, Number(candidate.z) || 0);
+        }
+        return null;
+    }
+
+    getTerritoryHitRelativeAngle(hit = null) {
+        if (!this.player?.group || !this.camera) return 0;
+        let source = this.getTerritoryHitVector(hit);
+        if (!source && hit?.sourceWalletAddress && this.remotePlayerMap?.has(hit.sourceWalletAddress)) {
+            const remote = this.remotePlayerMap.get(hit.sourceWalletAddress);
+            source = remote?.group?.position?.clone?.() || null;
+        }
+        if (!source) return 0;
+
+        const dx = Number(source.x) - Number(this.player.group.position.x || 0);
+        const dz = Number(source.z) - Number(this.player.group.position.z || 0);
+        if (!Number.isFinite(dx) || !Number.isFinite(dz) || (Math.abs(dx) + Math.abs(dz) < 0.001)) return 0;
+
+        const worldAngle = Math.atan2(dx, dz);
+        const cameraDir = new THREE.Vector3();
+        this.camera.getWorldDirection(cameraDir);
+        const cameraAngle = Math.atan2(cameraDir.x, cameraDir.z);
+        let relative = worldAngle - cameraAngle;
+        while (relative > Math.PI) relative -= Math.PI * 2;
+        while (relative < -Math.PI) relative += Math.PI * 2;
+        return relative;
+    }
+
+    recordTerritoryDamageEvent(hit = null, damage = 0) {
+        const sourceClan = String(hit?.sourceClanId || hit?.sourceClan || hit?.killerClanId || 'enemy');
+        const attackKind = String(hit?.attackKind || 'strike').replace(/_/g, ' ').toUpperCase();
+        const now = Date.now();
+        this.territoryDamageHud = {
+            angleRad: this.getTerritoryHitRelativeAngle(hit),
+            sourceClan,
+            damage: Math.max(1, Math.round(Number(damage) || 0)),
+            attackKind,
+            activeUntil: now + 2200,
+            flashUntil: now + 280
+        };
+    }
+
+    getTerritoryRespawnStatusText() {
+        const shieldSeconds = Math.max(0, Math.ceil(((this.territoryRespawnLockUntil || 0) - Date.now()) / 1000));
+        if (shieldSeconds > 0) return `BANNER WARD ${shieldSeconds}S • PUSH OUT WHEN READY`;
+
+        const regionState = this.getRegionTerritoryState(this.currentRegion?.id);
+        if (regionState?.status === 'contested') return 'FRONTLINE CONTESTED • HOLD THE FLAG TO FLIP CONTROL';
+        if (regionState?.ownerClan && regionState.ownerClan === this.selectedClan) return 'HOME FRONT • DEFEND THE BANNER AND KEEP PRESSURE UP';
+        return 'WAR FORM ACTIVE • TAKE SPACE AND FEED YOUR CLAN';
     }
 
     getTerritoryGameplayEffect(regionId = this.currentRegion?.id) {
@@ -3757,7 +5155,7 @@ class Game3D {
                 const angle = (i / (CONFIG.REGIONS.length - 1)) * Math.PI * 2;
                 const dist = reg.id === 'mushroomKingdom' ? 25 : 70;
                 const pos = new THREE.Vector3(Math.cos(angle) * dist, 0, Math.sin(angle) * dist);
-                const isLocked = this.progression.isCollectorMode()
+                const isLocked = this.shouldOpenAllPortals(this.getCurrentGameMode())
                     ? false
                     : !this.progression.data.unlockedRegions.includes(reg.id);
                 const portal = new Portal3D(this.scene, pos, reg.id, isLocked);
@@ -3784,6 +5182,7 @@ class Game3D {
 
         // Add Restoration Landmarks for Sporewood
         this.spawnRestorationLandmarks();
+        this.spawnTerritoryFlagForCurrentRegion();
 
         // V1.9.14 - Boss Dungeon door + Sage NPC for non-hub regions.
         this.buildBossDungeon();
@@ -4111,7 +5510,7 @@ class Game3D {
                     ]
                 },
                 gate: {
-                    text: `The seal will not break for the unworthy. You must arrive bearing the ${dCfg.keyItem ? (CONFIG.PORTAL_KEYS[Object.keys(CONFIG.PORTAL_KEYS).find(k => CONFIG.PORTAL_KEYS[k].id === dCfg.keyItem)] || {}).name || 'key' : 'tokens of mastery'}, no fewer than ${dCfg.minShards} Crown Shards, ${dCfg.minSpores} Blue Spores, and the magic of ${dCfg.requireMagic ? dCfg.requireMagic.replace(/_/g, ' ').toUpperCase() : 'your own resolve'}. Reach level ${dCfg.minLevel} or higher, or the gate will sear you.`,
+                    text: `The seal will not break for the unworthy. You must arrive bearing the ${dCfg.keyItem ? (CONFIG.PORTAL_KEYS[Object.keys(CONFIG.PORTAL_KEYS).find(k => CONFIG.PORTAL_KEYS[k].id === dCfg.keyItem)] || {}).name || 'key' : 'tokens of mastery'}, no fewer than ${dCfg.minShards} Crown Shards, ${dCfg.minSpores} Blue Spores, and the magic of ${dCfg.requireMagic ? this.getSkillDisplayName(dCfg.requireMagic).toUpperCase() : 'your own resolve'}. Reach level ${dCfg.minLevel} or higher, or the gate will sear you.${dCfg.requireMagic ? ` And do not merely learn it, King Myco. Bind ${this.getSkillDisplayName(dCfg.requireMagic).toUpperCase()} to your active MAGIC slot before you step through.` : ''}`,
                     options: [{ label: "AND THE TACTIC?", next: 'tactic' }, { label: "I UNDERSTAND.", next: null }]
                 },
                 tactic: {
@@ -4205,14 +5604,20 @@ class Game3D {
         });
 
         if (cfg.requireMagic) {
-            const skill = (CONFIG.SKILLS || []).find(s => s.id === cfg.requireMagic);
-            const name = skill ? skill.name : cfg.requireMagic.replace(/_/g, ' ');
+            const name = this.getSkillDisplayName(cfg.requireMagic);
             const learned = (upgrades[cfg.requireMagic] || 0) > 0;
+            const equipped = this.getEquippedSkillId() === cfg.requireMagic;
             rows.push({
                 label: `Learn the magic of ${name}`,
-                hint: 'Spend a skill point in the Skill Menu',
+                hint: 'Spend a skill point in the pause Skills + Magic menu',
                 met: learned,
                 progress: learned ? 'Learned' : 'Unknown'
+            });
+            rows.push({
+                label: `Equip ${name} to your MAGIC slot`,
+                hint: 'Use EQUIP in the pause Skills + Magic menu',
+                met: learned && equipped,
+                progress: learned ? (equipped ? 'Ready' : 'Not equipped') : 'Locked'
             });
         }
 
@@ -4722,6 +6127,10 @@ class Game3D {
             this.collectibles.push(col);
         }
 
+        if (this.progression.isTerritoryWarMode()) {
+            this.spawnTerritoryPowerups();
+        }
+
         // Scatter Chests
         const chestCount = 3 + Math.floor(Math.random() * 5);
         for (let i = 0; i < chestCount; i++) {
@@ -4733,6 +6142,20 @@ class Game3D {
         }
 
         this.spawnPendingBossRewardsForCurrentRegion();
+    }
+
+    spawnTerritoryPowerups() {
+        const holderScale = this.getHolderTierPowerupScale();
+        const count = Math.max(3, Math.min(8, Math.round(3 + holderScale * 2 + Math.random() * 2)));
+        const pool = ['POWERUP_FURY', 'POWERUP_WARD', 'POWERUP_REGEN', 'SKILL_POINT'];
+        for (let i = 0; i < count; i++) {
+            const x = (Math.random() - 0.5) * 220;
+            const z = (Math.random() - 0.5) * 220;
+            const roll = Math.random();
+            const type = roll > 0.82 ? 'SKILL_POINT' : pool[Math.floor(Math.random() * 3)];
+            const collectible = new Collectible3D(this.scene, new THREE.Vector3(x, 0, z), type);
+            this.collectibles.push(collectible);
+        }
     }
 
     createTowerInterior() {
@@ -6773,6 +8196,7 @@ class Game3D {
             this.camera.updateProjectionMatrix();
             this.renderer.setSize(w, h);
             if (this.composer) this.composer.setSize(w, h);
+            this.queueMobileUiAccessibilityPass();
         });
     }
 
@@ -6782,9 +8206,18 @@ class Game3D {
         const access = this.getGameplayAccessState();
         const minimumMyco = access.minimum;
         const holderTier = access.tier;
+        const currentMode = this.getCurrentGameMode();
+        const canEnterCurrentMode = this.canEnterMode(currentMode, access);
         if (this.audioUnlocked) this.playEpicMusic('START');
         const hasSave = !!this.progression.data.clanChosen;
         const cloudStatus = this.getCloudStatusCopy();
+        void this.trackTelemetryEvent('landing_view', {
+            metadata: {
+                screen: 'start',
+                currentMode,
+                canEnterCurrentMode
+            }
+        }, { eventKey: `landing_view:${this.getGameBuild()}` });
 
         // V1.9.33 - Mobile-aware Start Screen sizing. The old fixed 48px title + 50px
         // padding produced a card taller than the iPhone Safari viewport, which the
@@ -6808,23 +8241,19 @@ class Game3D {
         const subtitleHtml = isMobile
             ? 'EXPLORE • HARVEST<br>RECLAIM THE CROWN'
             : 'EXPLORE • HARVEST • RECLAIM THE CROWN';
-        const statusLine = access.eligible
+        const statusLine = canEnterCurrentMode
             ? (hasSave ? `${modeLabel} • LEVEL ${this.progression.data.level}` : `${modeLabel} • HOLDER ACCESS LIVE`)
-            : `LIVE ACCESS • ${minimumMyco.toLocaleString('en-US')} MYCO REQUIRED`;
-        const startButtonLabel = !access.walletConnected
-            ? 'CONNECT WALLET TO ENTER'
-            : !access.walletVerified
-                ? 'VERIFY WALLET TO ENTER'
-                : !access.eligible
-                    ? `HOLD ${minimumMyco.toLocaleString('en-US')} MYCO TO ENTER`
-                    : hasSave
-                        ? 'CONTINUE ADVENTURE'
-                        : 'START ADVENTURE';
-        const startButtonBg = access.eligible ? '#39FF14' : (!access.walletConnected ? '#6a0dad' : '#ffaa00');
-        const startButtonColor = access.eligible || !access.walletConnected ? 'black' : '#1d1100';
+            : this.isLiveOpsMode(currentMode)
+                ? `TERRITORY WAR • ${minimumMyco.toLocaleString('en-US')} MYCO TO DEPLOY`
+                : 'GUEST MODE READY • LIVE WAR LOCKED';
+        const startButtonLabel = hasSave
+            ? (canEnterCurrentMode ? 'CONTINUE ADVENTURE' : 'CHOOSE GUEST MODE')
+            : 'START ADVENTURE';
+        const startButtonBg = canEnterCurrentMode ? '#39FF14' : '#ffaa00';
+        const startButtonColor = canEnterCurrentMode ? 'black' : '#1d1100';
         const walletLabel = isConnected
-            ? (this.walletSessionToken
-                ? `${holderTier ? `${holderTier.badge || '🍄'} ${holderTier.name}` : 'WALLET VERIFIED'} • ${this.shortWallet()} • ${this.formatMycoBalance()} MYCO`
+            ? (access.walletVerified
+                ? `${holderTier ? `${holderTier.badge || '🍄'} ${holderTier.name}` : 'WALLET VERIFIED'} • ${this.shortWallet()} • ${this.formatMycoBalance(access.currentBalance)} MYCO`
                 : `VERIFY CONNECTED WALLET • ${this.shortWallet()}`)
             : walletState.isIOS
                 ? 'OPEN IN PHANTOM TO CONNECT'
@@ -6834,12 +8263,12 @@ class Game3D {
         const walletHint = access.walletVerified
             ? access.eligible
                 ? `Verified holder access live. ${holderTier ? `${holderTier.badge || '🍄'} ${holderTier.name}` : 'Base tier'} perks, cloud save, and live balance are active.`
-                : `Verified wallet found, but you need ${minimumMyco.toLocaleString('en-US')} KING MYCO to enter. Current balance: ${this.formatMycoBalance(access.currentBalance)} MYCO.`
+                : `Guest play is open. Hold ${minimumMyco.toLocaleString('en-US')} KING MYCO to unlock Territory War, cloud save, and holder perks. Current balance: ${this.formatMycoBalance(access.currentBalance)} MYCO.`
             : walletState.isIOS
-                ? `Use Phantom's in-app browser on iPhone or iPad to connect and verify a wallet holding at least ${minimumMyco.toLocaleString('en-US')} KING MYCO.`
+                ? `You can start as a guest now. Use Phantom's in-app browser on iPhone or iPad to later unlock live Territory War with ${minimumMyco.toLocaleString('en-US')} KING MYCO.`
                 : walletState.isMobile
-                    ? `Open this page inside Phantom on mobile, then verify a wallet holding at least ${minimumMyco.toLocaleString('en-US')} KING MYCO.`
-                    : `Connect Phantom and verify a wallet holding at least ${minimumMyco.toLocaleString('en-US')} KING MYCO to enter.`;
+                    ? `You can start as a guest now. Open this page inside Phantom on mobile later to unlock live Territory War with ${minimumMyco.toLocaleString('en-US')} KING MYCO.`
+                    : `Start as a guest now, then connect Phantom and verify ${minimumMyco.toLocaleString('en-US')} KING MYCO to unlock live Territory War, cloud save, and holder perks.`;
         const graphicsHelper = this.progression.data.settings.lowPerfMode === true
             ? (isMobile ? 'BATTERY SAVER · longer play' : 'BATTERY SAVER · longer sessions')
             : this.progression.data.settings.lowPerfMode === false
@@ -6869,7 +8298,7 @@ class Game3D {
                     <div style="width: 100%; height: 1px; background: #333; margin-bottom: ${isMobile ? 16 : 25}px;"></div>
 
                     <div style="display: flex; flex-direction: column; gap: 10px; align-items: center; width: 100%;">
-                        <button id="wallet-button" style="width: 100%; padding: 12px 16px; font-size: ${smFs}px; background: ${this.walletSessionToken ? 'rgba(0,255,255,0.14)' : isConnected ? '#333' : 'rgba(106,13,173,0.16)'}; border: 1px solid ${this.walletSessionToken ? '#00ffff' : '#6a0dad'}; color: white; font-family: inherit; cursor: pointer; border-radius: 5px; ${tapBtn}">
+                        <button id="wallet-button" style="width: 100%; padding: 12px 16px; font-size: ${smFs}px; background: ${access.walletVerified ? 'rgba(0,255,255,0.14)' : isConnected ? '#333' : 'rgba(106,13,173,0.16)'}; border: 1px solid ${access.walletVerified ? '#00ffff' : '#6a0dad'}; color: white; font-family: inherit; cursor: pointer; border-radius: 5px; ${tapBtn}">
                             ${walletLabel}
                         </button>
                         <div style="font-size: ${isMobile ? 9 : 8}px; color: #a0aba6; line-height: 1.55; max-width: ${isMobile ? '100%' : '340px'};">${walletHint}</div>
@@ -6914,8 +8343,26 @@ class Game3D {
 
         document.getElementById('start-button').addEventListener('click', async () => {
             await this.unlockAudio();
-            const unlocked = await this.ensureGameplayAccess();
-            if (!unlocked) return;
+            void this.trackTelemetryEvent('start_clicked', {
+                metadata: {
+                    hasSave,
+                    currentMode,
+                    canEnterCurrentMode
+                }
+            }, { eventKey: 'start_clicked' });
+            if (hasSave && !canEnterCurrentMode) {
+                void this.trackTelemetryEvent('live_access_blocked', {
+                    gameMode: currentMode,
+                    metadata: {
+                        source: 'start_button',
+                        reason: access.reason,
+                        minimumMyco
+                    }
+                }, { eventKey: `live_access_blocked:start:${currentMode}` });
+                this.setupModeSelection(true);
+                this.showFloatingText('TERRITORY WAR NEEDS HOLDER ACCESS', 0xffaa00, true);
+                return;
+            }
             if (hasSave) {
                 this.showLoadConfirmation();
             } else {
@@ -6936,9 +8383,19 @@ class Game3D {
         document.getElementById('hall-of-fame-button').addEventListener('click', () => this.showHallOfFame());
         document.getElementById('settings-button').addEventListener('click', () => this.showSettingsMenu());
         document.getElementById('wallet-button').addEventListener('click', () => {
-            if (!isConnected) this.connectWallet();
-            else if (!this.walletSessionToken || this.cloudSyncStatus === 'error') this.verifyWalletSession();
-            else this.syncWithSolana('manual');
+            if (!isConnected) {
+                void this.trackTelemetryEvent('wallet_connect_clicked', {
+                    metadata: { source: 'start_screen' }
+                }, { eventKey: 'wallet_connect_clicked' });
+                this.connectWallet();
+            } else if (!this.walletSessionToken || this.cloudSyncStatus === 'error') {
+                void this.trackTelemetryEvent('wallet_verify_clicked', {
+                    metadata: { source: 'start_screen' }
+                }, { eventKey: 'wallet_verify_clicked' });
+                this.verifyWalletSession();
+            } else {
+                this.syncWithSolana('manual');
+            }
         });
         if (isConnected) {
             document.getElementById('disconnect-wallet').addEventListener('click', () => this.disconnectWallet());
@@ -6977,6 +8434,15 @@ class Game3D {
     setupModeSelection(fromStart = false) {
         this.gameState = 'MODE_SELECT';
         const current = this.progression.data.gameMode;
+        const access = this.getGameplayAccessState();
+        const territoryUnlocked = access.eligible;
+        const territoryButtonLabel = territoryUnlocked
+            ? (current === 'TERRITORY' ? 'ENTER THE WAR' : 'JOIN THE WAR')
+            : !access.walletConnected
+                ? 'CONNECT FOR WAR'
+                : !access.walletVerified
+                    ? 'VERIFY FOR WAR'
+                    : `HOLD ${access.minimum.toLocaleString('en-US')} MYCO`;
         this.uiOverlay.innerHTML = `
             <div style="pointer-events: auto; display: flex; flex-direction: column; align-items: center; width: 100%; min-height: 100%; background: rgba(0,0,0,0.92); padding: 30px; overflow-y: auto;">
                 <h2 class="neon-text" style="margin-bottom: 8px; font-size: 28px; color: #39FF14;">CHOOSE YOUR PATH</h2>
@@ -7003,20 +8469,22 @@ class Game3D {
                     </div>
 
                     <div class="mode-card" id="mode-territory"
-                         style="width: 360px; background: #0a0a0a; border: 2px solid ${current === 'TERRITORY' ? '#ff6b2c' : '#333'}; border-radius: 12px; padding: 24px; cursor: pointer; transition: all 0.25s;"
+                         style="width: 360px; background: #0a0a0a; border: 2px solid ${current === 'TERRITORY' ? '#ff6b2c' : '#333'}; border-radius: 12px; padding: 24px; cursor: pointer; transition: all 0.25s; opacity: ${territoryUnlocked ? 1 : 0.82};"
                          onmouseover="this.style.borderColor='#ff6b2c'; this.style.boxShadow='0 0 22px #ff6b2c'; this.style.transform='translateY(-6px)'"
                          onmouseout="this.style.borderColor='${current === 'TERRITORY' ? '#ff6b2c' : '#333'}'; this.style.boxShadow='none'; this.style.transform='translateY(0)'">
                         <div style="font-size: 32px; margin-bottom: 8px;">🔥</div>
                         <h3 style="color: #ff8a3d; font-size: 16px; margin: 0 0 6px 0; letter-spacing: 1px;">TERRITORY WAR</h3>
-                        <p style="color: #888; font-size: 9px; letter-spacing: 1px; margin: 0 0 14px 0;">LIVE CLAN CONTROL</p>
+                        <p style="color: #888; font-size: 9px; letter-spacing: 1px; margin: 0 0 14px 0;">${territoryUnlocked ? 'LIVE CLAN CONTROL' : 'LIVE HOLDER ACCESS'}</p>
                         <ul style="color: #ddd; font-size: 11px; line-height: 1.6; padding-left: 18px; margin: 0 0 18px 0;">
+                            <li>All portals open, every warfront reachable instantly</li>
                             <li>Regions flip live based on clan pressure</li>
-                            <li>Burns, boss clears, and cleanses push the front</li>
+                            <li>Stand on the region flag for 20s to raise your banner</li>
                             <li>Owned land buffs allies, hostile land fights back</li>
-                            <li>Portal banners and control percentages update live</li>
+                            <li>Portal banners, flags, players, and control percentages update live</li>
+                            <li style="color:${territoryUnlocked ? '#fff2a8' : '#ffb48a'};">Requires a verified wallet with ${access.minimum.toLocaleString('en-US')} MYCO</li>
                         </ul>
                         <button id="pick-territory" style="width: 100%; padding: 12px; background: #ff6b2c; border: none; color: white; font-family: inherit; font-weight: bold; cursor: pointer;">
-                            ${current === 'TERRITORY' ? 'ENTER THE WAR' : 'JOIN THE WAR'}
+                            ${territoryButtonLabel}
                         </button>
                     </div>
 
@@ -7046,10 +8514,31 @@ class Game3D {
         `;
 
         const advance = (mode) => {
+            void this.trackTelemetryEvent('mode_selected', {
+                gameMode: mode,
+                metadata: {
+                    fromStart,
+                    previousMode: current
+                }
+            });
+            if (mode === 'TERRITORY' && !this.getGameplayAccessState().eligible) {
+                const territoryAccess = this.getGameplayAccessState();
+                void this.trackTelemetryEvent('live_access_blocked', {
+                    gameMode: mode,
+                    metadata: {
+                        source: 'mode_select',
+                        reason: territoryAccess.reason,
+                        minimumMyco: territoryAccess.minimum
+                    }
+                }, { eventKey: `live_access_blocked:mode:${mode}` });
+                this.showFloatingText('VERIFY WALLET FOR TERRITORY WAR', 0xffaa00, true);
+                this.showWalletConnectionHelp({ required: true, access: territoryAccess });
+                return;
+            }
             this.progression.setGameMode(mode);
             if (Array.isArray(this.portals)) {
                 this.portals.forEach(portal => {
-                    const shouldLock = mode === 'COLLECTOR'
+                    const shouldLock = this.shouldOpenAllPortals(mode)
                         ? false
                         : !this.progression.data.unlockedRegions.includes(portal.regionId);
                     if (portal && typeof portal.setLocked === 'function') portal.setLocked(shouldLock);
@@ -7647,6 +9136,89 @@ class Game3D {
         return `${Math.round(value)}`;
     }
 
+    createTelemetryId(prefix = 'mk3') {
+        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+            return `${prefix}_${crypto.randomUUID()}`;
+        }
+        return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+    }
+
+    initTelemetrySession() {
+        try {
+            const savedInstallId = localStorage.getItem(GUEST_INSTALL_KEY);
+            this.telemetryInstallId = savedInstallId || this.createTelemetryId('mk3i');
+            if (!savedInstallId && this.telemetryInstallId) {
+                localStorage.setItem(GUEST_INSTALL_KEY, this.telemetryInstallId);
+            }
+        } catch (_) {
+            this.telemetryInstallId = this.createTelemetryId('mk3i');
+        }
+
+        try {
+            const savedSessionId = sessionStorage.getItem(GUEST_SESSION_KEY);
+            this.telemetrySessionId = savedSessionId || this.createTelemetryId('mk3s');
+            if (this.telemetrySessionId) {
+                sessionStorage.setItem(GUEST_SESSION_KEY, this.telemetrySessionId);
+            }
+        } catch (_) {
+            this.telemetrySessionId = this.createTelemetryId('mk3s');
+        }
+
+        this.telemetrySessionStartedAt = Date.now();
+        if (!(this.telemetryEventKeys instanceof Set)) this.telemetryEventKeys = new Set();
+    }
+
+    getTelemetrySessionKind() {
+        return this.hasVerifiedWalletSession() ? 'verified' : 'guest';
+    }
+
+    async trackTelemetryEvent(eventType, payload = {}, options = {}) {
+        if (!eventType) return false;
+        if (!this.telemetrySessionId || !this.telemetryInstallId) this.initTelemetrySession();
+
+        const eventKey = options.eventKey || payload.eventKey || null;
+        if (eventKey && this.telemetryEventKeys.has(eventKey)) return false;
+        if (eventKey) this.telemetryEventKeys.add(eventKey);
+
+        const access = this.getGameplayAccessState();
+        const sessionDurationSeconds = Number(((Date.now() - this.telemetrySessionStartedAt) / 1000).toFixed(2));
+        const body = {
+            eventType,
+            ...(eventKey ? { eventKey } : {}),
+            ...(this.telemetryInstallId ? { installId: this.telemetryInstallId } : {}),
+            ...(this.telemetrySessionId ? { sessionId: this.telemetrySessionId } : {}),
+            sessionKind: this.getTelemetrySessionKind(),
+            ...(payload.gameMode ? { gameMode: payload.gameMode } : { gameMode: this.getCurrentGameMode() }),
+            ...((payload.regionId || this.currentRegion?.id) ? { regionId: payload.regionId || this.currentRegion?.id } : {}),
+            ...(payload.questId ? { questId: payload.questId } : {}),
+            ...(payload.loreId ? { loreId: payload.loreId } : {}),
+            playerName: payload.playerName || this.getPlayerName(),
+            build: this.getGameBuild(),
+            metadata: {
+                walletConnected: access.walletConnected,
+                walletVerified: access.walletVerified,
+                liveEligible: access.eligible,
+                isMobile: !!this.isMobile,
+                hasSave: !!this.progression?.data?.clanChosen,
+                sessionDurationSeconds,
+                ...(payload.metadata || {})
+            }
+        };
+
+        try {
+            await this.apiRequest('/api/game3d/telemetry', {
+                method: 'POST',
+                auth: this.hasVerifiedWalletSession(),
+                body: JSON.stringify(body)
+            });
+            return true;
+        } catch (error) {
+            console.warn('telemetry event failed', eventType, error);
+            if (eventKey) this.telemetryEventKeys.delete(eventKey);
+            return false;
+        }
+    }
+
     getHolderTierCatalog() {
         return Array.isArray(CONFIG.HOLDER_TIERS) ? CONFIG.HOLDER_TIERS : [];
     }
@@ -7663,16 +9235,25 @@ class Game3D {
     }
 
     getGameplayAccessState(balance = this.walletMycoBalance) {
-        const minimum = this.getMinimumMycoToPlay();
-        const currentBalance = Number.isFinite(balance) ? Math.max(0, Number(balance)) : 0;
+        const snapshot = this.walletAccessSnapshot && this.walletAccessSnapshot.walletAddress === this.walletAddress
+            ? this.walletAccessSnapshot
+            : null;
+        const minimum = Number.isFinite(snapshot?.minimum) ? Math.max(0, Number(snapshot.minimum)) : this.getMinimumMycoToPlay();
+        const currentBalance = Number.isFinite(balance)
+            ? Math.max(0, Number(balance))
+            : Number.isFinite(snapshot?.currentBalance)
+                ? Math.max(0, Number(snapshot.currentBalance))
+                : 0;
         const walletConnected = !!this.walletAddress;
-        const walletVerified = !!(this.walletSessionToken && Number.isFinite(balance));
+        const walletVerified = !!(snapshot?.walletVerified || (this.walletSessionToken && Number.isFinite(currentBalance)));
         let reason = null;
 
         if (!walletConnected) {
             reason = 'Connect a Solana wallet to enter Myco Kingdom.';
         } else if (!walletVerified) {
             reason = 'Verify your connected wallet before entering the live kingdom.';
+        } else if (snapshot?.eligible === false) {
+            reason = snapshot.reason || `Hold at least ${minimum.toLocaleString('en-US')} KING MYCO in the verified wallet to play.`;
         } else if (currentBalance < minimum) {
             reason = `Hold at least ${minimum.toLocaleString('en-US')} KING MYCO in the verified wallet to play.`;
         }
@@ -7683,6 +9264,9 @@ class Game3D {
             walletConnected,
             walletVerified,
             eligible: reason === null,
+            liveEligible: reason === null,
+            canPlayCurrentMode: this.canEnterMode(this.getCurrentGameMode(), { eligible: reason === null }),
+            guestPlayable: true,
             reason,
             tier: this.getHolderTier(currentBalance)
         };
@@ -7868,11 +9452,45 @@ class Game3D {
             case 'synced':
             case 'live':
                 return { title: `VERIFIED • ${this.formatMycoBalance()} MYCO`, body: syncedLabel };
+            case 'gated':
+                return { title: `VERIFIED • ${this.formatMycoBalance(this.getGameplayAccessState().currentBalance)} MYCO`, body: this.cloudSyncMessage || `Guest mode is open. Hold ${this.getMinimumMycoToPlay().toLocaleString('en-US')} KING MYCO to unlock Territory War, cloud save, and holder perks.` };
             case 'error':
-                return { title: 'ACCESS CHECK NEEDED', body: this.cloudSyncMessage || 'Re-verify the wallet and confirm the minimum MYCO balance.' };
+                return { title: 'ACCESS CHECK NEEDED', body: this.cloudSyncMessage || 'Guest mode still works. Re-verify the wallet to restore live sync and holder access.' };
             default:
-                return { title: 'WALLET REQUIRED', body: `Connect Phantom and verify at least ${this.getMinimumMycoToPlay().toLocaleString('en-US')} KING MYCO to enter the live kingdom.` };
+                return { title: 'GUEST MODE OPEN', body: `Play now as a guest, then connect Phantom with ${this.getMinimumMycoToPlay().toLocaleString('en-US')} KING MYCO to unlock Territory War, cloud save, and holder perks.` };
         }
+    }
+
+    setWalletAccessSnapshot(snapshot = null) {
+        if (!snapshot || !snapshot.walletAddress) {
+            this.walletAccessSnapshot = null;
+            return;
+        }
+
+        const minimum = Number.isFinite(snapshot.minimum) ? Math.max(0, Number(snapshot.minimum)) : this.getMinimumMycoToPlay();
+        const currentBalance = Number.isFinite(snapshot.currentBalance) ? Math.max(0, Number(snapshot.currentBalance)) : 0;
+        const walletVerified = snapshot.walletVerified !== false;
+        const eligible = typeof snapshot.eligible === 'boolean' ? snapshot.eligible : (walletVerified && currentBalance >= minimum);
+        this.walletAccessSnapshot = {
+            walletAddress: snapshot.walletAddress,
+            walletVerified,
+            currentBalance,
+            minimum,
+            eligible,
+            reason: typeof snapshot.reason === 'string' && snapshot.reason.trim() ? snapshot.reason.trim() : null
+        };
+    }
+
+    getWalletVerificationFailureLabel(error, snapshot = null) {
+        if (snapshot?.walletVerified && snapshot?.eligible === false) {
+            return `NEED ${Number(snapshot.minimum || this.getMinimumMycoToPlay()).toLocaleString('en-US')} MYCO`;
+        }
+
+        const detail = `${error?.data?.access?.reason || error?.message || ''}`.toLowerCase();
+        if (detail.includes('reject') || detail.includes('declin') || detail.includes('cancel')) return 'SIGNATURE REJECTED';
+        if (detail.includes('wallet_connection_failed')) return 'CONNECT WALLET';
+        if (detail.includes('challenge') || detail.includes('nonce') || detail.includes('expired')) return 'VERIFY AGAIN';
+        return 'VERIFY FAILED';
     }
 
     saveWalletSession(token, balance) {
@@ -7882,6 +9500,19 @@ class Game3D {
         else localStorage.removeItem(CLOUD_SESSION_KEY);
         if (this.walletMycoBalance != null) localStorage.setItem(CLOUD_BALANCE_KEY, String(this.walletMycoBalance));
         else localStorage.removeItem(CLOUD_BALANCE_KEY);
+        if (this.walletSessionToken && this.walletAddress && this.walletMycoBalance != null) {
+            const minimum = this.getMinimumMycoToPlay();
+            this.setWalletAccessSnapshot({
+                walletAddress: this.walletAddress,
+                walletVerified: true,
+                currentBalance: this.walletMycoBalance,
+                minimum,
+                eligible: this.walletMycoBalance >= minimum,
+                reason: this.walletMycoBalance >= minimum ? null : `Hold at least ${minimum.toLocaleString('en-US')} KING MYCO in the verified wallet to play.`
+            });
+        } else if (this.walletMycoBalance == null) {
+            this.setWalletAccessSnapshot(null);
+        }
         this.syncWalletTierEffects();
     }
 
@@ -7893,6 +9524,15 @@ class Game3D {
         this.walletMycoBalance = Number.isFinite(balance) ? balance : null;
         this.cloudLastSyncedAt = Number.isFinite(lastSync) ? lastSync : null;
         if (this.walletSessionToken) {
+            const minimum = this.getMinimumMycoToPlay();
+            this.setWalletAccessSnapshot({
+                walletAddress: this.walletAddress,
+                walletVerified: true,
+                currentBalance: this.walletMycoBalance,
+                minimum,
+                eligible: Number.isFinite(this.walletMycoBalance) && this.walletMycoBalance >= minimum,
+                reason: Number.isFinite(this.walletMycoBalance) && this.walletMycoBalance >= minimum ? null : `Hold at least ${minimum.toLocaleString('en-US')} KING MYCO in the verified wallet to play.`
+            });
             this.cloudSyncStatus = 'live';
             this.cloudSyncMessage = 'Verified wallet session restored';
         }
@@ -7903,6 +9543,7 @@ class Game3D {
         clearTimeout(this.pendingCloudSyncTimer);
         this.walletSessionToken = null;
         this.walletMycoBalance = null;
+        this.walletAccessSnapshot = null;
         this.cloudProfile = null;
         this.cloudLastSyncedAt = null;
         localStorage.removeItem(CLOUD_SESSION_KEY);
@@ -7915,11 +9556,59 @@ class Game3D {
         return !!(this.walletAddress && this.walletSessionToken);
     }
 
+    getHolderTierPowerupScale() {
+        const tier = this.getHolderTier();
+        if (!tier) return 1;
+        const tiers = this.getHolderTierCatalog();
+        const index = Math.max(0, tiers.findIndex(entry => entry.id === tier.id));
+        return 1 + (index * 0.08);
+    }
+
+    getTerritoryPresenceSnapshot() {
+        if (!this.player || this.gameState !== 'PLAYING') return null;
+        return {
+            regionId: this.currentRegion?.id || this.progression?.data?.currentRegionId || null,
+            position: {
+                x: Number(this.player.group?.position?.x || 0),
+                y: Number(this.player.group?.position?.y || 0),
+                z: Number(this.player.group?.position?.z || 0)
+            },
+            rotationY: Number(this.player.group?.rotation?.y || 0),
+            hp: Number(this.player.hp || this.player.maxHp || 1),
+            maxHp: Number(this.player.maxHp || 1),
+            activeSlot: Number(this.player.activeSlot || 1),
+            currentWeaponId: this.player.currentWeaponId || 'none',
+            currentMagicId: (() => {
+                const learnedMagic = Array.isArray(this.player.inventory)
+                    ? this.player.inventory.filter(id => CONFIG.MAGIC.some(m => m.id === id))
+                    : [];
+                return learnedMagic[this.player.currentMagicIdx] || null;
+            })(),
+            capturingRegionId: this.territoryCapture?.localOccupant ? (this.territoryCapture.regionId || null) : null,
+            invulnerableUntil: Number(this.territoryRespawnLockUntil || 0),
+            updatedAt: new Date().toISOString()
+        };
+    }
+
+    getCloudProgressionSnapshot() {
+        const progression = JSON.parse(JSON.stringify(this.progression?.data || {}));
+        progression.currentRegionId = this.currentRegion?.id || progression.currentRegionId || 'region8';
+        if (this.progression?.isTerritoryWarMode?.()) {
+            progression.territoryPresence = this.getTerritoryPresenceSnapshot();
+            progression.activePowerups = (this.activePowerups || []).map(effect => ({
+                id: effect.id,
+                label: effect.label,
+                expiresAt: effect.expiresAt
+            }));
+        }
+        return progression;
+    }
+
     getCloudPayload() {
         return {
             playerName: this.getPlayerName(),
             build: this.getGameBuild(),
-            progression: this.progression?.data || {},
+            progression: this.getCloudProgressionSnapshot(),
             leaderboard: this.leaderboard?.data || {},
             mycoBalance: Number.isFinite(this.walletMycoBalance) ? Number(this.walletMycoBalance) : undefined
         };
@@ -8022,12 +9711,21 @@ class Game3D {
 
             this.progression.data = JSON.parse(JSON.stringify(profile.progression || {}));
             this.leaderboard.data = JSON.parse(JSON.stringify(profile.leaderboard || this.leaderboard.data || {}));
+            if (!this.progression.data.upgrades || typeof this.progression.data.upgrades !== 'object') this.progression.data.upgrades = {};
+            (CONFIG.SKILLS || []).forEach(skill => {
+                if (!Number.isFinite(this.progression.data.upgrades[skill.id])) this.progression.data.upgrades[skill.id] = 0;
+            });
+            this.progression.data.equippedSkillId = sanitizeEquippedSkillId(this.progression.data);
             if (this.progression.data.clanChoiceLocked === undefined) {
                 this.progression.data.clanChoiceLocked = !!this.progression.data.clanChosen;
             }
             localStorage.setItem(this.progression.storageKey, JSON.stringify(this.progression.data));
             localStorage.setItem(this.leaderboard.storageKey, JSON.stringify(this.leaderboard.data));
             this.selectedClan = this.progression.data.clanChosen || this.selectedClan || 'myco';
+            if (this.player && this.gameState === 'PLAYING') {
+                this.syncPlayerStats();
+                this.updateHud();
+            }
 
             this.applyWalletTierRewards({ silent: true });
             if (this.gameState === 'START_SCREEN') this.setupStartScreen();
@@ -8040,7 +9738,9 @@ class Game3D {
     }
 
     async verifyWalletSession(options = {}) {
-        if (!this.walletAddress) return false;
+        void this.trackTelemetryEvent('wallet_verify_clicked', {
+            metadata: { source: options.source || 'verify_wallet_session' }
+        }, { eventKey: options.forceEvent === true ? null : 'wallet_verify_clicked' });
         const provider = this.getPhantomProvider();
         if (!provider || typeof provider.signMessage !== 'function') {
             this.setCloudSyncState('error', 'This wallet cannot sign messages.');
@@ -8049,19 +9749,26 @@ class Game3D {
         }
 
         try {
+            this.setCloudSyncState('verifying', 'Connecting to Phantom');
+            const activeWalletAddress = await this.ensurePhantomConnection(provider);
+            if (!activeWalletAddress) {
+                throw new Error('wallet_connection_failed');
+            }
+
             this.setCloudSyncState('verifying', 'Awaiting wallet signature');
             const nonce = await this.apiRequest('/api/game3d/auth/nonce', {
                 method: 'POST',
-                body: JSON.stringify({ walletAddress: this.walletAddress })
+                body: JSON.stringify({ walletAddress: activeWalletAddress })
             });
 
             const signed = await provider.signMessage(new TextEncoder().encode(nonce.message));
+            const signatureBytes = extractSignatureBytes(signed);
             const verify = await this.apiRequest('/api/game3d/auth/verify', {
                 method: 'POST',
                 body: JSON.stringify({
-                    publicKey: this.walletAddress,
+                    publicKey: activeWalletAddress,
                     signedMessage: nonce.message,
-                    signature: bs58.encode(signed),
+                    signature: bs58.encode(signatureBytes),
                     challenge: nonce.challenge,
                     ...this.getCloudPayload()
                 })
@@ -8072,17 +9779,49 @@ class Game3D {
             if (verify.profile) {
                 await this.applyCloudProfile(verify.profile, { preferCloud: !this.progression.data.clanChosen });
             }
+            const verifiedAccess = this.getGameplayAccessState();
+            void this.trackTelemetryEvent('wallet_verified', {
+                metadata: {
+                    balance: Number.isFinite(verify.balance) ? Number(verify.balance) : verifiedAccess.currentBalance,
+                    eligible: verifiedAccess.eligible
+                }
+            }, { eventKey: `wallet_verified:${this.walletAddress || 'wallet'}` });
             this.applyWalletTierRewards({ silent: !!options.quiet });
             if (!options.quiet) this.showFloatingText('WALLET VERIFIED', 0x39FF14, true);
             void this.refreshLiveLeaderboard();
             return true;
         } catch (error) {
             console.error('wallet verification failed', error);
-            if (Number.isFinite(error?.data?.balance)) {
-                this.saveWalletSession(null, Number(error.data.balance));
+            const accessSnapshot = error?.data?.access && Number.isFinite(error?.data?.balance)
+                ? {
+                    walletAddress: this.walletAddress,
+                    walletVerified: error.data.access.walletVerified !== false,
+                    currentBalance: Number(error.data.balance),
+                    minimum: Number(error.data.access.minimumMycoRequired || this.getMinimumMycoToPlay()),
+                    eligible: Boolean(error.data.access.eligible),
+                    reason: error.data.access.reason || null
+                }
+                : null;
+            if (accessSnapshot) {
+                this.saveWalletSession(null, accessSnapshot.currentBalance);
+                this.setWalletAccessSnapshot(accessSnapshot);
             }
-            this.setCloudSyncState('error', error?.data?.access?.reason || error?.message || 'Wallet verification failed');
-            if (!options.quiet) this.showFloatingText('WEB3 VERIFY FAILED', 0xff0000, true);
+            const failureBody = accessSnapshot?.reason || error?.data?.access?.reason || error?.message || 'Wallet verification failed';
+            if (accessSnapshot?.walletVerified && accessSnapshot?.eligible === false) {
+                void this.trackTelemetryEvent('live_access_blocked', {
+                    gameMode: 'TERRITORY',
+                    metadata: {
+                        source: 'wallet_verify',
+                        reason: failureBody,
+                        balance: accessSnapshot.currentBalance,
+                        minimumMyco: accessSnapshot.minimum
+                    }
+                }, { eventKey: `live_access_blocked:wallet:${accessSnapshot.minimum}` });
+            }
+            this.setCloudSyncState(accessSnapshot?.walletVerified && accessSnapshot?.eligible === false ? 'gated' : 'error', failureBody);
+            if (!options.quiet) {
+                this.showFloatingText(this.getWalletVerificationFailureLabel(error, accessSnapshot), accessSnapshot?.walletVerified && accessSnapshot?.eligible === false ? 0xffaa00 : 0xff0000, true);
+            }
             return false;
         }
     }
@@ -8135,7 +9874,7 @@ class Game3D {
 
     async refreshLiveTerritory(rerenderView = null, { force = false } = {}) {
         if (this.liveTerritoryLoading) return this.liveTerritory;
-        if (!force && this.liveTerritory && (Date.now() - this.liveTerritoryUpdatedAt) < LIVE_TERRITORY_TTL_MS) {
+        if (!force && this.liveTerritory && (Date.now() - this.liveTerritoryUpdatedAt) < this.getLiveTerritoryTtlMs()) {
             return this.liveTerritory;
         }
 
@@ -8168,6 +9907,60 @@ class Game3D {
         const color = this.getClanColor(clanId || 'myco');
         const parsed = Number.parseInt(String(color).replace('#', ''), 16);
         return Number.isFinite(parsed) ? parsed : 0xffffff;
+    }
+
+    pruneTerritoryFeedSeen(now = Date.now()) {
+        if (!(this.territoryFeedSeenIds instanceof Map)) this.territoryFeedSeenIds = new Map();
+        for (const [id, seenAt] of this.territoryFeedSeenIds.entries()) {
+            if ((now - Number(seenAt || 0)) > (20 * 60 * 1000)) this.territoryFeedSeenIds.delete(id);
+        }
+        if (this.territoryFeedSeenIds.size <= 180) return;
+        const extra = this.territoryFeedSeenIds.size - 180;
+        let removed = 0;
+        for (const id of this.territoryFeedSeenIds.keys()) {
+            this.territoryFeedSeenIds.delete(id);
+            removed += 1;
+            if (removed >= extra) break;
+        }
+    }
+
+    processTerritoryKillFeed(previous = null, next = this.liveTerritory) {
+        const feed = Array.isArray(next?.killFeed) ? next.killFeed : [];
+        if (!feed.length) return;
+        this.pruneTerritoryFeedSeen();
+
+        if (!previous || !Array.isArray(previous?.killFeed)) {
+            feed.forEach(entry => {
+                const id = entry?.id || entry?.eventKey;
+                if (id) this.territoryFeedSeenIds.set(id, Date.now());
+            });
+            return;
+        }
+
+        [...feed].reverse().forEach((entry) => {
+            const id = entry?.id || entry?.eventKey;
+            if (!id || this.territoryFeedSeenIds.has(id)) return;
+            this.territoryFeedSeenIds.set(id, Date.now());
+
+            const createdTs = new Date(entry?.createdAt || 0).getTime();
+            if (Number.isFinite(createdTs) && createdTs > 0 && (Date.now() - createdTs) > 90 * 1000) return;
+
+            const relevant = entry?.regionId === this.currentRegion?.id
+                || entry?.killerClanId === this.selectedClan
+                || entry?.victimClanId === this.selectedClan
+                || entry?.killerWalletAddress === this.walletAddress
+                || entry?.victimWalletAddress === this.walletAddress;
+            if (!relevant) return;
+
+            const killerName = entry?.killerWalletAddress === this.walletAddress
+                ? 'You'
+                : (entry?.killerPlayerName || (entry?.killerClanId ? entry.killerClanId.toUpperCase() : 'The Rot'));
+            const victimName = entry?.victimWalletAddress === this.walletAddress
+                ? 'you'
+                : (entry?.victimPlayerName || 'Wanderer');
+            const attackKind = String(entry?.attackKind || 'strike').replace(/_/g, ' ').toUpperCase();
+            this.showGlobalNotification(`${killerName} downed ${victimName} (${attackKind})`, this.getClanColor(entry?.killerClanId || entry?.victimClanId || 'myco'));
+        });
     }
 
     applyTerritoryWorldState(previous = null, next = this.liveTerritory) {
@@ -8214,6 +10007,19 @@ class Game3D {
             this.territoryLabels.push(banner);
         }
 
+        if (this.activeTerritoryFlag) {
+            const focusClan = currentTerritory?.ownerClan || currentTerritory?.leadingClan || (currentTerritory?.sanctuary ? 'myco' : null);
+            this.activeTerritoryFlag.applyState({
+                clanId: focusClan,
+                color: focusClan ? this.getClanColorHex(focusClan) : (this.currentRegion?.accent || 0x39FF14),
+                sanctuary: !!currentTerritory?.sanctuary,
+                contested: currentTerritory?.status === 'contested' || currentTerritory?.status === 'under_siege'
+            });
+        }
+
+        void this.applyIncomingTerritoryHits(currentTerritory);
+        this.syncRemoteTerritoryPlayers(currentTerritory);
+
         if (this.player) {
             const territoryEffect = this.getTerritoryGameplayEffect(this.currentRegion?.id);
             this.player.territoryModifiers = territoryEffect.playerModifiers;
@@ -8221,6 +10027,8 @@ class Game3D {
             if (typeof this.player.applyLevelStats === 'function') this.player.applyLevelStats();
             if (this.currentRegion && !this.currentRegion.isSafeZone) this.syncRegionThreatLevel();
         }
+
+        this.processTerritoryKillFeed(previous, next);
 
         if (previous) {
             regions.forEach(region => {
@@ -8260,6 +10068,14 @@ class Game3D {
             if (result?.profile) {
                 await this.applyCloudProfile(result.profile, { silent: true });
             }
+            void this.trackTelemetryEvent('first_burn', {
+                gameMode: mode || this.getCurrentGameMode(),
+                regionId: mergedMetadata.currentRegionId || undefined,
+                metadata: {
+                    amount,
+                    source: mergedMetadata.source || 'burn'
+                }
+            }, { eventKey: 'first_burn' });
             this.setCloudSyncState('synced', 'Live burn recorded');
             void this.refreshLiveLeaderboard();
             void this.refreshLiveTerritory();
@@ -8298,6 +10114,12 @@ class Game3D {
             if (result?.profile) {
                 await this.applyCloudProfile(result.profile, { silent: true });
             }
+            void this.trackTelemetryEvent('first_run_submitted', {
+                metadata: {
+                    runType,
+                    score: payload.score || null
+                }
+            }, { eventKey: 'first_run_submitted' });
             this.setCloudSyncState('synced', 'Live run recorded');
             void this.refreshLiveLeaderboard();
             return result;
@@ -8315,6 +10137,14 @@ class Game3D {
         const dedupeKey = payload.eventKey || `${eventType}:${payload.regionId || payload.questId || payload.loreId || ''}:${this.progression?.data?.worldDay || ''}`;
         if (dedupeKey && this.liveProgressionEvents.has(dedupeKey)) return false;
         if (dedupeKey) this.liveProgressionEvents.add(dedupeKey);
+        if (this.liveProgressionEvents.size > 1800) {
+            let removed = 0;
+            for (const key of this.liveProgressionEvents) {
+                this.liveProgressionEvents.delete(key);
+                removed += 1;
+                if (removed >= 400) break;
+            }
+        }
 
         try {
             const result = await this.apiRequest('/api/game3d/progression', {
@@ -8410,12 +10240,61 @@ class Game3D {
         return /iPad|iPhone|iPod/.test(ua) || (ua.includes('Mac') && navigator.maxTouchPoints > 1);
     }
 
+    isValidSolanaAddress(value) {
+        return typeof value === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value);
+    }
+
     getPhantomProvider() {
-        if ('solana' in window) {
-            const provider = window.solana;
-            if (provider && provider.isPhantom) return provider;
-        }
+        const pickPhantom = (candidate) => (candidate && candidate.isPhantom ? candidate : null);
+        const phantomNamespace = pickPhantom(window?.phantom?.solana);
+        if (phantomNamespace) return phantomNamespace;
+
+        const multiProvider = Array.isArray(window?.solana?.providers)
+            ? window.solana.providers.find((provider) => provider?.isPhantom)
+            : null;
+        if (multiProvider) return multiProvider;
+
+        const injectedProvider = pickPhantom(window?.solana);
+        if (injectedProvider) return injectedProvider;
         return null;
+    }
+
+    getProviderWalletAddress(provider = this.getPhantomProvider()) {
+        const address = provider?.publicKey?.toString?.();
+        return this.isValidSolanaAddress(address) ? address : null;
+    }
+
+    syncWalletAddressFromProvider(provider = this.getPhantomProvider()) {
+        const activeAddress = this.getProviderWalletAddress(provider);
+        if (activeAddress && activeAddress !== this.walletAddress) {
+            const previousAddress = this.walletAddress;
+            this.walletAddress = activeAddress;
+            this.saveWalletConnection();
+            if (previousAddress && previousAddress !== activeAddress) {
+                this.clearWalletSession();
+            }
+        }
+        return activeAddress;
+    }
+
+    async ensurePhantomConnection(provider = this.getPhantomProvider()) {
+        if (!provider) return null;
+
+        const activeAddress = this.syncWalletAddressFromProvider(provider);
+        if (activeAddress) return activeAddress;
+        if (typeof provider.connect !== 'function') return null;
+
+        const response = await provider.connect();
+        const nextAddress = response?.publicKey?.toString?.() || this.getProviderWalletAddress(provider);
+        if (!this.isValidSolanaAddress(nextAddress)) return null;
+
+        const previousAddress = this.walletAddress;
+        this.walletAddress = nextAddress;
+        this.saveWalletConnection();
+        if (previousAddress && previousAddress !== nextAddress) {
+            this.clearWalletSession();
+        }
+        return nextAddress;
     }
 
     getWalletUxState() {
@@ -8471,20 +10350,24 @@ class Game3D {
     }
 
     async connectWallet() {
+        void this.trackTelemetryEvent('wallet_connect_clicked', {
+            metadata: { source: 'connect_wallet' }
+        }, { eventKey: 'wallet_connect_clicked' });
         const provider = this.getPhantomProvider();
 
         if (provider) {
             try {
-                const resp = await provider.connect();
-                this.walletAddress = resp.publicKey.toString();
-                this.saveWalletConnection();
+                const activeAddress = await this.ensurePhantomConnection(provider);
+                if (!activeAddress) throw new Error('wallet_connection_failed');
                 const verified = await this.verifyWalletSession({ quiet: true });
                 this.setupStartScreen();
-                if (verified && this.getGameplayAccessState().eligible) {
+                const access = this.getGameplayAccessState();
+                if (verified && access.eligible) {
                     this.showFloatingText("WALLET VERIFIED!", 0x39FF14);
                 } else {
-                    this.showFloatingText("VERIFY TO ENTER", 0xffaa00);
-                    this.showWalletConnectionHelp({ required: true, access: this.getGameplayAccessState() });
+                    if (access.walletVerified && !access.eligible) this.showFloatingText(`NEED ${access.minimum.toLocaleString('en-US')} MYCO`, 0xffaa00, true);
+                    else this.showFloatingText("VERIFY TO ENTER", 0xffaa00);
+                    this.showWalletConnectionHelp({ required: true, access });
                 }
             } catch (err) {
                 console.error("User rejected connection", err);
@@ -8502,9 +10385,11 @@ class Game3D {
     }
 
     loadWalletConnection() {
+        const providerAddress = this.syncWalletAddressFromProvider();
+        if (providerAddress) return;
+
         const saved = localStorage.getItem('myco_quest_wallet');
-        const isValidSolanaAddress = typeof saved === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(saved);
-        if (isValidSolanaAddress) {
+        if (this.isValidSolanaAddress(saved)) {
             this.walletAddress = saved;
         } else if (saved) {
             localStorage.removeItem('myco_quest_wallet');
@@ -8529,12 +10414,12 @@ class Game3D {
             ? (access.walletConnected ? (access.walletVerified ? 'REFRESH HOLDINGS' : 'VERIFY WALLET') : 'CONNECT WALLET')
             : (walletState.isMobile ? 'OPEN IN PHANTOM' : 'GET PHANTOM');
         const primaryCopy = access.walletVerified && !access.eligible
-            ? `Your verified wallet currently shows ${this.formatMycoBalance(access.currentBalance)} MYCO. Hold at least ${minimum.toLocaleString('en-US')} KING MYCO to enter the live kingdom.`
+            ? `Your verified wallet currently shows ${this.formatMycoBalance(access.currentBalance)} MYCO. Guest play is open, but Territory War, cloud save, and holder perks unlock at ${minimum.toLocaleString('en-US')} KING MYCO.`
             : walletState.isIOS
-                ? `A verified wallet with ${minimum.toLocaleString('en-US')} KING MYCO is required. On iPhone and iPad, open the game inside Phantom's in-app browser to connect.`
+                ? `Guest play is open. To unlock Territory War and cloud save, open the game inside Phantom's in-app browser on iPhone or iPad and verify a wallet with ${minimum.toLocaleString('en-US')} KING MYCO.`
                 : walletState.isMobile
-                    ? `A verified wallet with ${minimum.toLocaleString('en-US')} KING MYCO is required. On mobile, the smoothest connection flow is inside Phantom's in-app browser.`
-                    : `Install or open Phantom, connect your Solana wallet, then verify at least ${minimum.toLocaleString('en-US')} KING MYCO to enter.`;
+                    ? `Guest play is open. On mobile, the smoothest path to live Territory War and cloud save is inside Phantom's in-app browser with ${minimum.toLocaleString('en-US')} KING MYCO.`
+                    : `Install or open Phantom, connect your Solana wallet, then verify at least ${minimum.toLocaleString('en-US')} KING MYCO to unlock live Territory War, cloud save, and holder perks.`;
 
         const overlay = document.createElement('div');
         overlay.style.position = 'absolute';
@@ -8563,9 +10448,10 @@ class Game3D {
                     <p style="color: #d0d8d4; font-size: 13px; text-align: center; margin: 0 0 18px 0; line-height: 1.65;">
                         ${primaryCopy}
                     </p>
-                    ${required ? `<div style="margin: 0 0 18px 0; padding: 12px; border-radius: 10px; border: 1px solid rgba(57,255,20,0.24); background: rgba(57,255,20,0.06); color: #c7f8c0; font-size: 12px; line-height: 1.6; text-align: left;">• Wallet required to enter<br>• Minimum balance: ${minimum.toLocaleString('en-US')} KING MYCO<br>• Current tier: ${access.tier ? `${access.tier.badge || '🍄'} ${access.tier.name}` : 'Not unlocked yet'}</div>` : ''}
+                    ${required ? `<div style="margin: 0 0 18px 0; padding: 12px; border-radius: 10px; border: 1px solid rgba(57,255,20,0.24); background: rgba(57,255,20,0.06); color: #c7f8c0; font-size: 12px; line-height: 1.6; text-align: left;">• Guest mode is open now<br>• Territory War + cloud save unlock at ${minimum.toLocaleString('en-US')} KING MYCO<br>• Current tier: ${access.tier ? `${access.tier.badge || '🍄'} ${access.tier.name}` : 'Not unlocked yet'}</div>` : ''}
                     <div style="display: flex; flex-direction: column; gap: 10px;">
                         <button id="wallet-help-primary" style="min-height: 46px; padding: 12px; border-radius: 10px; border: none; background: #6a0dad; color: white; font-weight: bold; cursor: pointer;">${primaryLabel}</button>
+                        ${required && !access.eligible ? '<button id="wallet-help-guest" style="min-height: 46px; padding: 12px; border-radius: 10px; border: 1px solid rgba(57,255,20,0.36); background: rgba(57,255,20,0.08); color: #dfffe1; font-weight: bold; cursor: pointer;">PLAY STORY / COLLECTOR</button>' : ''}
                         ${walletState.isMobile ? '<button id="wallet-help-copy" style="min-height: 46px; padding: 12px; border-radius: 10px; border: 1px solid #3b4a43; background: transparent; color: white; font-weight: bold; cursor: pointer;">COPY GAME LINK</button>' : ''}
                         <button id="wallet-help-close" style="min-height: 44px; padding: 12px; border-radius: 10px; border: 1px solid #3b4a43; background: transparent; color: white; font-weight: bold; cursor: pointer;">CLOSE</button>
                     </div>
@@ -8574,15 +10460,28 @@ class Game3D {
         `;
 
         overlay.querySelector('#wallet-help-primary').onclick = () => {
+            void this.trackTelemetryEvent(walletState.provider || walletState.isMobile ? 'wallet_connect_clicked' : 'wallet_install_clicked', {
+                metadata: {
+                    source: 'wallet_help',
+                    action: walletState.provider && access.walletConnected ? 'verify' : (walletState.isMobile ? 'phantom_browser' : 'phantom_download')
+                }
+            });
             if (walletState.provider && access.walletConnected) {
                 overlay.remove();
-                this.verifyWalletSession();
+                this.verifyWalletSession({ source: 'wallet_help', forceEvent: true });
             } else if (walletState.isMobile) {
                 this.openInPhantomBrowser();
             } else {
                 window.open('https://phantom.app/download', '_blank', 'noopener');
             }
         };
+        const guestBtn = overlay.querySelector('#wallet-help-guest');
+        if (guestBtn) {
+            guestBtn.onclick = () => {
+                overlay.remove();
+                this.setupModeSelection(true);
+            };
+        }
         const copyBtn = overlay.querySelector('#wallet-help-copy');
         if (copyBtn) {
             copyBtn.onclick = async () => {
@@ -9924,6 +11823,8 @@ class Game3D {
             const bossImpactActive = !!(this.boss && this.bossDamageFlashUntil && performance.now() < this.bossDamageFlashUntil);
             const bossImpactColor = this.bossDamageBlocked ? 'rgba(255, 244, 140, 0.34)' : `${bossAccent}55`;
             const { timeStr, period } = this.getWorldTimeState();
+            const equippedSkillState = this.getEquippedSkillHudState();
+            const equippedSkillLabel = equippedSkillState.label;
             const safeTop = 'env(safe-area-inset-top, 0px)';
             const safeRight = 'env(safe-area-inset-right, 0px)';
             const safeBottom = 'env(safe-area-inset-bottom, 0px)';
@@ -10012,9 +11913,39 @@ class Game3D {
                         </div>
                         <div style="color: white; font-size: 11px; font-weight: bold; margin-bottom: 3px;">${statusTitle}</div>
                         <div style="color: #c2d1d6; font-size: 9px; line-height: 1.5;">${statusDetail}</div>
+                        ${isTerritoryWarMode ? `
+                            <div id="territory-capture-wrap" style="margin-top:8px; display:block;">
+                                <div style="display:flex; justify-content:space-between; gap:8px; margin-bottom:4px; font-size:8px; color:#ffb48a; letter-spacing:0.8px;">
+                                    <span>FLAG CONTROL</span>
+                                    <span id="territory-capture-text">SECURE THE FLAG</span>
+                                </div>
+                                <div style="height:6px; background:rgba(0,0,0,0.45); border:1px solid rgba(255,138,61,0.3); border-radius:999px; overflow:hidden;">
+                                    <div id="territory-capture-fill" style="width:0%; height:100%; background:linear-gradient(90deg, #ff6b2c, #ffd166);"></div>
+                                </div>
+                                <div id="territory-powerups" style="margin-top:6px; font-size:8px; color:#fff2a8; line-height:1.5; min-height:12px;">NO ACTIVE WAR BLOOMS</div>
+                                <div style="margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.08);">
+                                    <div id="territory-frontline-text" style="font-size:7px; color:#9fdcff; line-height:1.45;">WAR GRID OFFLINE</div>
+                                    <div id="territory-respawn-text" style="margin-top:5px; font-size:6px; color:#fff2a8; line-height:1.5; letter-spacing:0.45px;">WAR FORM ACTIVE • TAKE SPACE AND FEED YOUR CLAN</div>
+                                    <div id="territory-damage-compass" style="position:relative; height:82px; margin-top:8px; opacity:0; transition:opacity 0.14s ease, filter 0.14s ease;">
+                                        <div style="position:absolute; left:50%; top:34px; width:58px; height:58px; transform:translate(-50%, -50%); border:1px solid rgba(255,255,255,0.14); border-radius:999px;"></div>
+                                        <div style="position:absolute; left:50%; top:34px; width:40px; height:40px; transform:translate(-50%, -50%); border:1px dashed rgba(255,138,61,0.24); border-radius:999px;"></div>
+                                        <div id="territory-damage-arrow" style="position:absolute; left:50%; top:34px; transform:translate(-50%, -50%) rotate(0deg) translateY(-26px); transform-origin:center 26px; color:#ff6666; font-size:18px; line-height:1; text-shadow:0 0 10px #ff6666;">▲</div>
+                                        <div id="territory-damage-text" style="position:absolute; left:0; right:0; bottom:0; text-align:center; font-size:6px; color:#ffb48a; letter-spacing:0.45px;">NO HOSTILES TRACKED</div>
+                                    </div>
+                                    <div style="margin-top:8px;">
+                                        <div style="font-size:7px; color:#00ffff; letter-spacing:0.9px; margin-bottom:4px;">WAR TABLE</div>
+                                        <div id="territory-war-standings"></div>
+                                    </div>
+                                    <div style="margin-top:8px;">
+                                        <div style="font-size:7px; color:#ffb48a; letter-spacing:0.9px; margin-bottom:4px;">RECENT DOWNS</div>
+                                        <div id="territory-war-feed"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        ` : ''}
                         <div style="display:flex; justify-content:space-between; gap:8px; margin-top:6px; font-size:8px; line-height:1.4;">
-                            <span style="color:${holderTier?.accent || '#ffaa66'};">${holderTier ? `${holderTier.badge || '🍄'} ${holderTier.name}` : 'ACCESS LOCKED'}</span>
-                            <span style="color:${access.walletVerified ? '#fff2a8' : '#8ea39a'};">${access.walletVerified ? `${this.formatMycoBalance(access.currentBalance)} MYCO` : `${access.minimum.toLocaleString('en-US')} MYCO MIN`}</span>
+                            <span style="color:${holderTier?.accent || '#ffaa66'};">${holderTier ? `${holderTier.badge || '🍄'} ${holderTier.name}` : (access.eligible ? 'LIVE ACCESS' : 'GUEST MODE')}</span>
+                            <span style="color:${access.walletVerified ? '#fff2a8' : '#8ea39a'};">${access.walletVerified ? `${this.formatMycoBalance(access.currentBalance)} MYCO` : (this.isLiveOpsMode() ? `${access.minimum.toLocaleString('en-US')} MYCO FOR WAR` : 'CONNECT FOR LIVE')}</span>
                         </div>
                         ${isMobileHud ? `
                             <div style="display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:8px; margin-top:8px;">
@@ -10081,7 +12012,7 @@ class Game3D {
                             <div id="xp-fill" style="width: ${xpPercent}%; height: 100%; background: linear-gradient(90deg, #d7dde3, #ffffff);"></div>
                         </div>
                         <div style="width: 100%; display: flex; justify-content: space-between; align-items: center; color: #d7dfe6; font-size: 9px; font-weight: bold; letter-spacing: 1px; text-shadow: 1px 1px 2px black;">
-                            <span>${isCollectorMode ? 'UTILITY' : 'ROYAL SPORE'}</span>
+                            <span id="equipped-skill-label">${equippedSkillLabel}</span>
                             <span id="cooldown-percent">READY</span>
                         </div>
                         <div style="width: 100%; height: 8px; background: rgba(0,0,0,0.62); border: 1px solid rgba(255,255,255,0.18); border-radius: 999px; overflow: hidden;">
@@ -10422,7 +12353,7 @@ class Game3D {
 
         const prog = this.progression.data;
         const refs = this.getHudRefs();
-        const { hpFill, hpText, magicFill, magicText, xpFill, xpLabel, levelLabel } = refs;
+        const { hpFill, hpText, magicFill, magicText, xpFill, xpLabel, levelLabel, skillLabel } = refs;
 
         const hpPercent = Math.max(0, Math.min(100, (this.player.hp / this.player.maxHp) * 100));
         const magicMax = this.player.maxMagic || 100;
@@ -10440,42 +12371,121 @@ class Game3D {
 
         // Update Special Cooldown Bar
         const { cooldownBar, cooldownText } = refs;
+        const equippedSkillState = this.getEquippedSkillHudState();
+
+        if (skillLabel) skillLabel.innerText = equippedSkillState.label;
 
         if (cooldownBar && cooldownText) {
-            if (!this.player.hasRoyalSpore) {
+            if (!equippedSkillState.skill) {
                 cooldownBar.style.width = '0%';
                 cooldownBar.style.background = '#444';
                 cooldownBar.style.opacity = '1';
-                cooldownText.innerText = 'LOCKED';
+                cooldownText.innerText = 'EQUIP';
                 cooldownText.style.color = '#888';
+                this.player._lastReadySkillCueId = null;
             } else {
-                const now = Date.now();
-                const elapsed = now - this.player.lastSpecialTime;
-                const cooldown = CONFIG.PLAYER.SPECIAL_COOLDOWN;
-                const progress = Math.min(1, elapsed / cooldown);
+                cooldownBar.style.width = `${equippedSkillState.progress * 100}%`;
 
-                cooldownBar.style.width = `${progress * 100}%`;
-
-                if (progress < 1) {
+                if (!equippedSkillState.ready) {
                     cooldownBar.style.background = '#ff4400';
                     cooldownBar.style.opacity = '1';
-                    const remaining = Math.ceil((cooldown - elapsed) / 1000);
+                    const remaining = Math.ceil(equippedSkillState.remainingMs / 1000);
                     cooldownText.innerText = `${remaining}s`;
                     cooldownText.style.color = '#ff4400';
-                    this.player._specialReadySoundPlayed = false;
+                    this.player._lastReadySkillCueId = null;
                 } else {
                     cooldownBar.style.background = '#39FF14';
                     cooldownText.innerText = 'READY';
                     cooldownText.style.color = '#39FF14';
 
-                    if (!this.player._specialReadySoundPlayed) {
+                    if (this.player._lastReadySkillCueId !== equippedSkillState.skill.id) {
                         this.playCooldownReadySound();
-                        this.player._specialReadySoundPlayed = true;
+                        this.player._lastReadySkillCueId = equippedSkillState.skill.id;
                     }
 
                     const pulse = 0.8 + Math.sin(Date.now() * 0.01) * 0.2;
                     cooldownBar.style.opacity = `${pulse}`;
                 }
+            }
+        }
+
+        const {
+            territoryCaptureWrap,
+            territoryCaptureFill,
+            territoryCaptureText,
+            territoryPowerups,
+            territoryFrontlineText,
+            territoryWarStandings,
+            territoryWarFeed,
+            territoryRespawnText,
+            territoryDamageCompass,
+            territoryDamageArrow,
+            territoryDamageText
+        } = refs;
+        if (territoryCaptureWrap && territoryCaptureFill && territoryCaptureText) {
+            if (this.progression.isTerritoryWarMode()) {
+                const captureState = this.getTerritoryCaptureState();
+                const regionState = this.getRegionTerritoryState(this.currentRegion?.id);
+                territoryCaptureWrap.style.display = 'block';
+                territoryCaptureFill.style.width = `${Math.round(captureState.ratio * 100)}%`;
+                territoryCaptureFill.style.opacity = captureState.active ? '1' : '0.45';
+                territoryCaptureText.innerText = captureState.text;
+                territoryCaptureText.style.color = captureState.active ? '#ffd166' : '#ffb48a';
+                const shieldSeconds = Math.max(0, Math.ceil(((this.territoryRespawnLockUntil || 0) - Date.now()) / 1000));
+                if (territoryPowerups) {
+                    this.pruneActivePowerups();
+                    const feed = [];
+                    if (shieldSeconds > 0) feed.push(`SPAWN SHIELD ${shieldSeconds}S`);
+                    if ((this.activePowerups || []).length) {
+                        feed.push(...this.activePowerups
+                            .map(effect => `${effect.label.toUpperCase()} ${Math.max(1, Math.ceil((effect.expiresAt - Date.now()) / 1000))}S`));
+                    }
+                    territoryPowerups.innerText = feed.length ? feed.join(' • ') : 'NO ACTIVE WAR BLOOMS';
+                }
+                if (territoryFrontlineText) territoryFrontlineText.innerText = this.getTerritoryFrontlineText(regionState);
+                if (territoryRespawnText) territoryRespawnText.innerText = this.getTerritoryRespawnStatusText();
+                if (territoryWarStandings) {
+                    const standingsHtml = this.renderTerritoryStandingsMarkup(this.liveTerritory?.clanStandings, { limit: 3, compact: true });
+                    if (this._territoryHudStandingsHtml !== standingsHtml) {
+                        territoryWarStandings.innerHTML = standingsHtml;
+                        this._territoryHudStandingsHtml = standingsHtml;
+                    }
+                }
+                if (territoryWarFeed) {
+                    const feedHtml = this.renderTerritoryKillFeedMarkup(this.liveTerritory?.killFeed, { limit: 3, compact: true, relevantOnly: true });
+                    if (this._territoryHudFeedHtml !== feedHtml) {
+                        territoryWarFeed.innerHTML = feedHtml;
+                        this._territoryHudFeedHtml = feedHtml;
+                    }
+                }
+                if (territoryDamageCompass && territoryDamageArrow && territoryDamageText) {
+                    const damageHud = this.territoryDamageHud || {};
+                    const remainingMs = Math.max(0, Number(damageHud.activeUntil || 0) - Date.now());
+                    if (remainingMs > 0) {
+                        const fade = Math.max(0.22, Math.min(1, remainingMs / 2200));
+                        const angleDeg = Math.round((Number(damageHud.angleRad || 0) * 180) / Math.PI);
+                        const clanColor = this.getClanColor(damageHud.sourceClan || 'enemy');
+                        territoryDamageCompass.style.opacity = `${fade}`;
+                        territoryDamageCompass.style.filter = Number(damageHud.flashUntil || 0) > Date.now() ? 'brightness(1.5)' : 'brightness(1)';
+                        territoryDamageArrow.style.color = clanColor;
+                        territoryDamageArrow.style.textShadow = `0 0 10px ${clanColor}, 0 0 18px ${clanColor}`;
+                        territoryDamageArrow.style.transform = `translate(-50%, -50%) rotate(${angleDeg}deg) translateY(-26px)`;
+                        territoryDamageText.innerText = `${String(damageHud.sourceClan || 'enemy').toUpperCase()} ${String(damageHud.attackKind || 'STRIKE').toUpperCase()} • -${Math.max(1, Math.round(Number(damageHud.damage) || 1))} HP`;
+                        territoryDamageText.style.color = clanColor;
+                    } else {
+                        territoryDamageCompass.style.opacity = shieldSeconds > 0 ? '0.18' : '0';
+                        territoryDamageCompass.style.filter = 'brightness(1)';
+                        territoryDamageArrow.style.transform = 'translate(-50%, -50%) rotate(0deg) translateY(-26px)';
+                        territoryDamageText.innerText = shieldSeconds > 0 ? `BANNER WARD LIVE • ${shieldSeconds}S` : 'NO HOSTILES TRACKED';
+                        territoryDamageText.style.color = shieldSeconds > 0 ? '#66ffee' : '#ffb48a';
+                    }
+                }
+            } else {
+                territoryCaptureWrap.style.display = 'none';
+                this._territoryHudStandingsHtml = null;
+                this._territoryHudFeedHtml = null;
+                this.territoryDamageHud.activeUntil = 0;
+                this.territoryDamageHud.flashUntil = 0;
             }
         }
 
@@ -10516,7 +12526,7 @@ class Game3D {
             ? ''
             : this.progression.isCollectorMode()
                 ? `WASD: FREE MOVE • ARROWS: TURN / DRIVE • SPACE: JUMP • E: COLLECT / INTERACT • SHIFT: DASH • B: BURN PIT`
-                : `WASD: FREE MOVE • ARROWS: TURN / DRIVE • SPACE: JUMP (x2) • X: MAGIC • Q: ROYAL SPORE • R: MYCELIAL NET • E: INTERACT • SHIFT: DASH • U: UPGRADES • B: BURN PIT`;
+                : `WASD: FREE MOVE • ARROWS: TURN / DRIVE • SPACE: JUMP (x2) • X: ATTACK • Q / PAD B: EQUIPPED MAGIC • E: INTERACT • SHIFT: DASH • U: UPGRADES • B: BURN PIT`;
 
         this.uiOverlay.innerHTML = `
             <div id="hud" style="position: absolute; inset: 0; pointer-events: none;"></div>
@@ -10530,29 +12540,68 @@ class Game3D {
 
     startGameplay() {
         const access = this.getGameplayAccessState();
-        if (!access.eligible) {
+        if (this.progression.isTerritoryWarMode() && !access.eligible) {
+            void this.trackTelemetryEvent('live_access_blocked', {
+                gameMode: 'TERRITORY',
+                metadata: {
+                    source: 'start_gameplay',
+                    reason: access.reason,
+                    minimumMyco: access.minimum
+                }
+            }, { eventKey: 'live_access_blocked:start_gameplay' });
             this.isPaused = false;
-            this.gameState = 'START_SCREEN';
-            this.setupStartScreen();
+            this.gameState = 'MODE_SELECT';
+            this.setupModeSelection(true);
             this.showWalletConnectionHelp({ required: true, access });
             return;
         }
 
+        if (this.ensureTerritoryWarLoadout()) {
+            this.syncPlayerStats();
+        }
+
         this.gameState = 'PLAYING';
         this.startTime = Date.now();
+        if (this.progression.isTerritoryWarMode()) {
+            void this.trackTelemetryEvent('territory_entered', {
+                gameMode: 'TERRITORY',
+                metadata: {
+                    source: 'start_gameplay'
+                }
+            }, { eventKey: 'territory_entered' });
+        } else if (!this.hasVerifiedWalletSession()) {
+            void this.trackTelemetryEvent('guest_started', {
+                gameMode: this.getCurrentGameMode(),
+                metadata: {
+                    source: 'start_gameplay'
+                }
+            }, { eventKey: `guest_started:${this.getCurrentGameMode()}` });
+        }
         this.spawnCollectibles(); // Refresh with correct clan colors
         this.checkClanRewards(); // Check for rewards on game start
         this.playEpicMusic('AUTO');
         this.renderGameplayHudChrome();
+        this.refreshPowerupModifiers();
+        if (this.progression.isTerritoryWarMode()) {
+            this.resetTerritoryCapture(null);
+            void this.syncTerritoryPresence(true);
+            void this.refreshLiveTerritory('map', { force: true });
+        } else {
+            this.clearRemotePlayers();
+            this.resetTerritoryCapture(null);
+        }
 
         window.openSkillMenu = () => this.showSkillMenu();
         window.openBurnPit = () => this.showBurnPitMenu();
 
         // Register global hotkeys for interaction
-        window.addEventListener('keydown', (e) => {
+        if (this._gameplayHotkeyHandler) {
+            window.removeEventListener('keydown', this._gameplayHotkeyHandler);
+        }
+        this._gameplayHotkeyHandler = (e) => {
             if (e.code === 'KeyQ' && this.gameState === 'PLAYING') {
-                if (!this.player.hasRoyalSpore) {
-                    this.showFloatingText("SKILL LOCKED (U)", 0x888888);
+                if (!this.getEquippedSkillId()) {
+                    this.showFloatingText("EQUIP A SKILL (U)", 0x888888);
                 }
             }
             // V1.9.20 - F drops a Rot-Purifying Light Pool at King Myco's feet.
@@ -10560,7 +12609,8 @@ class Game3D {
             if (e.code === 'KeyF' && this.gameState === 'PLAYING' && !this.progression.isCollectorMode()) {
                 this.dropLightPool();
             }
-        });
+        };
+        window.addEventListener('keydown', this._gameplayHotkeyHandler);
 
         this.updateHud();
         this.player.group.visible = true;
@@ -10656,6 +12706,8 @@ class Game3D {
                         const level = p.upgrades[skill.id] || 0;
                         const isUnlocked = skill.isAbility ? level > 0 : true;
                         const canAfford = p.skillPoints >= 1;
+                        const equipable = this.isSkillEquipable(skill.id) && isUnlocked;
+                        const equipped = p.equippedSkillId === skill.id;
 
                         return `
                             <div style="background: #111; padding: 10px; border: 1px solid #333; display: flex; flex-direction: column; justify-content: space-between;">
@@ -10663,9 +12715,16 @@ class Game3D {
                                     <p style="font-size: 10px; color: #00ffff;">${skill.name.toUpperCase()} ${skill.isAbility ? (isUnlocked ? '[LEARNED]' : '[LOCKED]') : `(LVL ${level})`}</p>
                                     <p style="font-size: 7px; color: #888; margin: 4px 0;">${skill.desc}</p>
                                 </div>
-                                <button onclick="window.upgradeSkill('${skill.id}')" style="margin-top: 5px; padding: 8px; background: #39FF14; color: black; border: none; font-size: 8px; width: 100%; ${!canAfford ? 'opacity: 0.5; cursor: not-allowed;' : ''}">
-                                    ${skill.isAbility && isUnlocked ? 'ALREADY LEARNED' : 'UPGRADE (1 SP)'}
-                                </button>
+                                <div style="display:grid; gap:6px; margin-top: 5px;">
+                                    <button onclick="window.upgradeSkill('${skill.id}')" style="padding: 8px; background: #39FF14; color: black; border: none; font-size: 8px; width: 100%; ${!canAfford && !(skill.isAbility && isUnlocked) ? 'opacity: 0.5; cursor: not-allowed;' : ''}">
+                                        ${skill.isAbility && isUnlocked ? 'ALREADY LEARNED' : 'UPGRADE (1 SP)'}
+                                    </button>
+                                    ${equipable ? `
+                                        <button onclick="window.equipSkillFromMenu('${skill.id}')" style="padding: 8px; background: ${equipped ? '#00ffff' : '#0b2230'}; color: ${equipped ? 'black' : '#8fefff'}; border: 1px solid ${equipped ? '#00ffff' : '#1a6378'}; font-size: 8px; width: 100%;">
+                                            ${equipped ? 'EQUIPPED' : 'EQUIP'}
+                                        </button>
+                                    ` : ''}
+                                </div>
                             </div>
                         `;
                     }).join('')}
@@ -10683,6 +12742,7 @@ class Game3D {
                 p.skillPoints--;
                 p.upgrades[skillId] = (p.upgrades[skillId] || 0) + 1;
                 this.progression.save();
+                const autoEquipped = this.isSkillEquipable(skillId) && !this.getEquippedSkillId() && this.equipSkill(skillId, { silent: true });
                 this.player.applyLevelStats();
                 this.showSkillMenu();
                 this.updateHud();
@@ -10690,9 +12750,14 @@ class Game3D {
                 synth.triggerAttackRelease("C5", "8n");
 
                 if (skill.isAbility) {
-                    this.showFloatingText(`LEARNED: ${skill.name}!`, 0xffff00, true);
+                    this.showFloatingText(autoEquipped ? `LEARNED: ${skill.name.toUpperCase()} AUTO-EQUIPPED!` : `LEARNED: ${skill.name}!`, 0xffff00, true);
                 }
             }
+        };
+
+        window.equipSkillFromMenu = (skillId) => {
+            this.equipSkill(skillId);
+            this.showSkillMenu();
         };
 
         window.closeSkillMenu = () => {
@@ -10760,6 +12825,17 @@ class Game3D {
         else if (songs[regionId]) song = songs[regionId];
         else song = songs.overworld;
 
+        const lowerNote = (note, steps = 1) => {
+            if (!note) return note;
+            return note.replace(/(-?\d+)$/, (_, octave) => String(Number(octave) - steps));
+        };
+        song = {
+            ...song,
+            bpm: Math.max(78, Math.round(song.bpm * 0.9)),
+            lead: song.lead.map(note => lowerNote(note, 1)),
+            bass: song.bass.map(note => lowerNote(note, 1)),
+        };
+
         const musicSignature = `${mode}:${this.gameState}:${regionId}:${song.bpm}`;
         if (this._musicSignature === musicSignature && this._music) return;
 
@@ -10792,27 +12868,27 @@ class Game3D {
         // That keeps repeated 8th-note attacks stable when Tone schedules notes on
         // adjacent ticks, especially on mobile Safari / headless Chromium.
         if (!filter || !lead || !bass || !blip) {
-            filter = new TONE.Filter(2200, 'lowpass').toDestination();
+            filter = new TONE.Filter(1500, 'lowpass').toDestination();
             filter.Q.value = 1.0;
 
             lead = new TONE.PolySynth(TONE.Synth, {
-                oscillator: { type: 'square' },
-                envelope:   { attack: 0.005, decay: 0.08, sustain: 0.55, release: 0.08 },
-                volume: -10
+                oscillator: { type: 'triangle' },
+                envelope:   { attack: 0.01, decay: 0.12, sustain: 0.46, release: 0.14 },
+                volume: -12
             }).connect(filter);
 
             // Bass: triangle for that warm chiptune low-end.
             bass = new TONE.PolySynth(TONE.Synth, {
                 oscillator: { type: 'triangle' },
-                envelope:   { attack: 0.005, decay: 0.20, sustain: 0.30, release: 0.12 },
-                volume: -14
+                envelope:   { attack: 0.008, decay: 0.26, sustain: 0.35, release: 0.18 },
+                volume: -12
             }).toDestination();
 
             // Blip: tiny noise hat for groove.
             blip = new TONE.NoiseSynth({
                 noise: { type: 'white' },
                 envelope: { attack: 0.001, decay: 0.04, sustain: 0, release: 0.04 },
-                volume: -28
+                volume: -32
             }).toDestination();
         }
 
@@ -10903,6 +12979,22 @@ class Game3D {
             }
         });
 
+        this.territoryFlags.forEach(flag => {
+            const dx = toMapX(flag.mesh.position.x);
+            const dy = toMapY(flag.mesh.position.z);
+            if (dx > 0 && dx < w && dy > 0 && dy < h) {
+                ctx.fillStyle = '#fff2a8';
+                ctx.fillRect(dx - 2, dy - 6, 4, 12);
+                ctx.fillStyle = '#ff6b2c';
+                ctx.beginPath();
+                ctx.moveTo(dx + 2, dy - 6);
+                ctx.lineTo(dx + 11, dy - 3);
+                ctx.lineTo(dx + 2, dy + 1);
+                ctx.closePath();
+                ctx.fill();
+            }
+        });
+
         // Draw Enemies (Purple/Red)
         this.enemies.forEach(enemy => {
             const dx = toMapX(enemy.mesh.position.x);
@@ -10914,6 +13006,16 @@ class Game3D {
                 if (enemy.isBoss) {
                     ctx.strokeStyle = '#fff'; ctx.stroke();
                 }
+            }
+        });
+
+        this.remotePlayers.forEach(remote => {
+            const dx = toMapX(remote.group.position.x);
+            const dy = toMapY(remote.group.position.z);
+            if (dx > 0 && dx < w && dy > 0 && dy < h) {
+                ctx.fillStyle = this.getClanColor(remote.currentClan || 'myco');
+                ctx.beginPath(); ctx.arc(dx, dy, 4, 0, Math.PI * 2); ctx.fill();
+                ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1; ctx.stroke();
             }
         });
 
@@ -11004,9 +13106,12 @@ class Game3D {
         this.updateDayCycle();
         this.simulateGlobalActivity();
         if ((this.gameState === 'PLAYING' || this.isPaused) && now >= (this.nextTerritoryRefreshAt || 0)) {
-            this.nextTerritoryRefreshAt = now + 15000;
+            this.nextTerritoryRefreshAt = now + (this.progression?.isTerritoryWarMode?.() ? TERRITORY_REFRESH_LOOP_MS : 15000);
             void this.refreshLiveTerritory();
         }
+        this.pruneActivePowerups();
+        if (Array.isArray(this.territoryFlags)) this.territoryFlags.forEach(flag => flag?.update?.());
+        if (Array.isArray(this.remotePlayers)) this.remotePlayers.forEach(remote => remote?.update?.());
 
         // V1.9.7 - Enemies are always visible so the player can read threats day or night.
         this.enemies.forEach(enemy => {
@@ -11030,6 +13135,10 @@ class Game3D {
         if (this.gameState === 'PLAYING' && this.player && !this.isPaused) {
             this.player.update(this.collidables, this.platforms);
             this.applyMobileSceneBudget();
+            void this.tickTerritoryCapture(now);
+            if (this.progression.isTerritoryWarMode() && now >= (this.nextTerritoryPresenceSyncAt || 0)) {
+                void this.syncTerritoryPresence();
+            }
 
             // Roblox Camera Logic, but with a little more spring and look-ahead so
             // movement feels smoother and combat reads better.
@@ -11174,7 +13283,7 @@ class Game3D {
                     let prompt = "";
                     if (this.citadelGate.state === 'BLUE') prompt = "OFFER BLUE SPORES (50) [E]";
                     else if (this.citadelGate.state === 'GOLD') prompt = "OFFER GOLD SPORES (5) [E]";
-                    else if (this.citadelGate.state === 'MAGIC') prompt = "CAST CROWNFLARE MAGIC";
+                    else if (this.citadelGate.state === 'MAGIC') prompt = "CAST CROWN MAGIC";
 
                     this.showProximityPrompt(this.citadelGate.mesh, prompt);
 
@@ -11204,18 +13313,7 @@ class Game3D {
                     this.player.projectiles.forEach(proj => {
                         if (proj.isCrownflare && proj.mesh.position.distanceTo(this.citadelGate.position) < 8) {
                             proj.deactivateCore();
-                            this.citadelGate.advanceState();
-                            this.showFloatingText("THRONE GATE OPENED!", 0x39FF14, true);
-                            this.showBossDefeatEffect(this.citadelGate.position);
-
-                            // Play triumphant activation sound
-                            this.gateActivationSynth.triggerAttackRelease(["C4", "E4", "G4", "C5"], "2n");
-
-                            // Spawn the final boss portal
-                            const portal = new Portal3D(this.scene, this.citadelGate.position.clone().add(new THREE.Vector3(0,0,5)), 'thronecap', false);
-                            portal.label.visible = false;
-                            portal.ring.scale.setScalar(2);
-                            this.portals.push(portal);
+                            this.unlockCitadelGateWithMagic('CROWNFLARE');
                         }
                     });
                 }
@@ -11428,6 +13526,7 @@ class Game3D {
             // V1.9.18 - Visual rot spread tick + per-projectile wand cleanse.
             this.updateRotSpread();
             this.player.projectiles.forEach(proj => this.tryCleanseWithProjectile(proj));
+            this.processTerritoryProjectileHits();
             // V1.9.20 - Light pool lifetimes + slow ambient cleanse inside their radius.
             this.updateLightPools();
 
@@ -11526,6 +13625,30 @@ class Game3D {
                         this.progression.data.inventory.push('rotSalve');
                         this.progression.save();
                         this.showFloatingText("+1 SALVE!", 0x00ffff);
+                    } else if (col.type === 'SKILL_POINT') {
+                        this.progression.data.skillPoints = (this.progression.data.skillPoints || 0) + (col.amount || 1);
+                        this.progression.save();
+                        this.showFloatingText(`+${col.amount || 1} SKILL POINT!`, 0xff66ff, true);
+                    } else if (col.type === 'POWERUP_FURY') {
+                        this.grantTimedPowerup('territory_fury', 'Fury Bloom', {
+                            damageBonusFlat: 3,
+                            projectileSpeedMult: 1.16,
+                            cooldownMult: 0.92,
+                            critBonus: 0.06
+                        }, 45000, 0xff8844);
+                    } else if (col.type === 'POWERUP_WARD') {
+                        this.grantTimedPowerup('territory_ward', 'Ward Bloom', {
+                            wardBonusFlat: 3,
+                            speedMult: 1.04,
+                            goalRadiusMult: 1.08
+                        }, 50000, 0x66ddff);
+                    } else if (col.type === 'POWERUP_REGEN') {
+                        this.player.hp = Math.min(this.player.maxHp, this.player.hp + 1.5);
+                        this.grantTimedPowerup('territory_regen', 'Regen Bloom', {
+                            regenBonus: 0.14,
+                            speedMult: 1.05,
+                            damageBonusMult: 1.06
+                        }, 45000, 0x7dff9f);
                     } else if (col.type === 'CROWN_SHARD') {
                         this.progression.data.shardsCollected = (this.progression.data.shardsCollected || 0) + 1;
                         this.progression.save();
@@ -11948,7 +14071,7 @@ class Game3D {
         const scene = this.scene;
         for (let i = 0; i < this.portals.length; i++) {
             const old = this.portals[i];
-            const shouldBeLocked = !unlocked.includes(old.regionId);
+            const shouldBeLocked = this.shouldOpenAllPortals(this.getCurrentGameMode()) ? false : !unlocked.includes(old.regionId);
             if (old.isLocked === shouldBeLocked) continue;
             const pos = old.mesh.position.clone();
             pos.y = 0; // Portal3D internally lifts to y=4.5
@@ -12111,8 +14234,8 @@ class Game3D {
     }
 
     enterPortal(regionId) {
-        // V1.9.21 - Spore Collector mode: every portal is open, no rot gating.
-        if (this.progression.isCollectorMode()) {
+        // Territory War and Spore Collector keep every portal open and skip rot gating.
+        if (this.shouldOpenAllPortals(this.getCurrentGameMode())) {
             this.progression.data.currentRegionId = regionId;
             this.progression.data.playerPosition = null;
             this.progression.save();
@@ -12580,6 +14703,15 @@ class Game3D {
         }
         const leveledUp = this.progression.addXp(score * 2);
         this.saveGame(); // Auto-save on victory
+        void this.trackTelemetryEvent('session_completed', {
+            metadata: {
+                outcome: 'victory',
+                score,
+                timeTaken: Number(timeTaken.toFixed(2)),
+                lootCount: this.lootCount,
+                clanId: this.selectedClan
+            }
+        }, { eventKey: 'session_completed:victory' });
         if (this.hasVerifiedWalletSession()) {
             void this.submitRunRecord('victory', {
                 score,

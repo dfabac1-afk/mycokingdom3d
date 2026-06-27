@@ -20,7 +20,13 @@ export const CONFIG = {
         { id: 'fireTrail', name: 'Fire Trail', desc: 'Projectiles leave a damaging trail of green embers.', isAbility: true },
         { id: 'royalSpore', name: 'Clan Special', desc: 'Unlock your Clan\'s unique Special Ability (Key: Q).', isAbility: true },
         { id: 'fungalShield', name: 'Fungal Shield', desc: 'A rotating spore that blocks projectiles.', isAbility: true },
-        { id: 'mycelialNet', name: 'Mycelial Net', desc: 'Trap skill (Key: R) that slows enemies in a target area.', isAbility: true }
+        { id: 'mycelialNet', name: 'Mycelial Net', desc: 'Trap skill (Key: R) that slows enemies in a target area.', isAbility: true },
+        { id: 'spore_blast', name: 'Spore Blast', desc: 'A crystal-cracking burst needed for the Shardcap Warden.', isAbility: true, isMagicSkill: true },
+        { id: 'shroom_shield', name: 'Shroom Shield', desc: 'A bog-proof warding spell for the Ambermycel trial.', isAbility: true, isMagicSkill: true },
+        { id: 'mycelial_dash', name: 'Mycelial Dash', desc: 'A burst-step spell that lets you pierce silk and rot lanes.', isAbility: true, isMagicSkill: true },
+        { id: 'ember_strike', name: 'Ember Strike', desc: 'A brutal flame strike that counters the Cindercap Brute.', isAbility: true, isMagicSkill: true },
+        { id: 'void_step', name: 'Void Step', desc: 'A shadow skip spell needed to outmaneuver the Voidlichen Oracle.', isAbility: true, isMagicSkill: true },
+        { id: 'crown_aegis', name: 'Crown Aegis', desc: 'A royal ward sigil required for the Thronecap Citadel.', isAbility: true, isMagicSkill: true }
     ],
     COLORS: {
         BACKGROUND: 0x050510,

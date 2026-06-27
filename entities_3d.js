@@ -50,6 +50,19 @@ const FIREBALL_TRAIL_GEOMETRIES = {
     crownflare: new THREE.BoxGeometry(0.34, 0.34, 0.952)
 };
 
+const CLAN_VISUALS = {
+    myco: { robe: 0x800080, magic: 0x00ff00, banner: 'assets/king-myco-clan-banner-2.jpg', avatar: 'assets/myco-avatar.webp' },
+    rougarou: { robe: 0x555555, magic: 0xaaaaaa, banner: 'assets/rougarou-clan-banner-2.jpg', avatar: 'assets/rougarou-avatar.webp' },
+    tegbot: { robe: 0x00ffff, magic: 0x00ffff, banner: 'assets/tegbot-clan-banner.webp', avatar: 'assets/tegbot-avatar.webp' },
+    shiba: { robe: 0xffff00, magic: 0xffff00, banner: 'assets/shiba-clan-banner.webp', avatar: 'assets/shiba-avatar.webp' },
+    brood: { robe: 0xffaa00, magic: 0xff5500, banner: 'assets/brood-dragon-clan-banner.jpg', avatar: 'assets/brood-avatar.webp' },
+    mycelius: { robe: 0xaa00ff, magic: 0xaa00ff, banner: 'assets/dark-mycelius-clan-banner.jpg', avatar: 'assets/mycelius-avatar.webp' }
+};
+
+function getClanVisual(clanId = 'myco') {
+    return CLAN_VISUALS[clanId] || CLAN_VISUALS.myco;
+}
+
 export class Enemy3D {
     constructor(scene, position, regionConfig = null) {
         this.scene = scene;
@@ -2624,7 +2637,7 @@ export class Portal3D {
 export class Collectible3D {
     constructor(scene, position, type, clanId = null, amount = null, keyItemConfig = null) {
         this.scene = scene;
-        this.type = type; // 'XP', 'LOOT', 'GOLDEN_SPORE', 'INGREDIENT', 'POTION', 'BOMB', 'SALVE', 'KEY_ITEM', 'CROWN_SHARD'
+        this.type = type; // 'XP', 'LOOT', 'GOLDEN_SPORE', 'INGREDIENT', 'POTION', 'BOMB', 'SALVE', 'KEY_ITEM', 'CROWN_SHARD', 'SKILL_POINT', 'POWERUP_FURY', 'POWERUP_WARD', 'POWERUP_REGEN'
         this.amount = amount;
         this.keyItemConfig = keyItemConfig; // V1.9.12 - { id, name, color, shape } from CONFIG.PORTAL_KEYS
         this.mesh = new THREE.Group();
@@ -2729,6 +2742,41 @@ export class Collectible3D {
             return;
         }
 
+        if (['SKILL_POINT', 'POWERUP_FURY', 'POWERUP_WARD', 'POWERUP_REGEN'].includes(type)) {
+            const palette = {
+                SKILL_POINT: { color: 0xff66ff, emissive: 0xff44ff, geo: new THREE.OctahedronGeometry(0.45, 0) },
+                POWERUP_FURY: { color: 0xff8844, emissive: 0xff4400, geo: new THREE.TorusKnotGeometry(0.32, 0.1, 64, 12) },
+                POWERUP_WARD: { color: 0x66ddff, emissive: 0x00ffff, geo: new THREE.IcosahedronGeometry(0.46, 0) },
+                POWERUP_REGEN: { color: 0x7dff9f, emissive: 0x39ff14, geo: new THREE.SphereGeometry(0.38, 18, 14) }
+            };
+            const cfg = palette[type] || palette.SKILL_POINT;
+            const core = new THREE.Mesh(
+                cfg.geo,
+                new THREE.MeshStandardMaterial({ color: cfg.color, emissive: cfg.emissive, emissiveIntensity: 3.8, metalness: 0.2, roughness: 0.25 })
+            );
+            this.mesh.add(core);
+            this._powerupCore = core;
+
+            const ring = new THREE.Mesh(
+                new THREE.TorusGeometry(0.72, 0.06, 10, 28),
+                new THREE.MeshBasicMaterial({ color: cfg.color, transparent: true, opacity: 0.5 })
+            );
+            ring.rotation.x = Math.PI / 2;
+            this.mesh.add(ring);
+            this._powerupRing = ring;
+
+            const light = new THREE.PointLight(cfg.color, 2.4, 8);
+            light.position.y = 0.3;
+            this.mesh.add(light);
+
+            this.mesh.position.copy(position);
+            this.mesh.position.y = 1.15;
+            this.scene.add(this.mesh);
+            this.rotationSpeed = 0.06;
+            this.floatY = Math.random() * Math.PI * 2;
+            return;
+        }
+
         if (type === 'LOOT' || type === 'GOLDEN_SPORE' || type === 'INGREDIENT' || ['POTION', 'BOMB', 'SALVE'].includes(type)) {
             size = isMultiplier ? 0.8 : 0.5;
             
@@ -2818,11 +2866,269 @@ export class Collectible3D {
             }
             return;
         }
+        if (['SKILL_POINT', 'POWERUP_FURY', 'POWERUP_WARD', 'POWERUP_REGEN'].includes(this.type)) {
+            this.mesh.position.y = 1.25 + Math.sin(this.floatY) * 0.28;
+            if (this._powerupCore) {
+                this._powerupCore.rotation.x += 0.02;
+                this._powerupCore.rotation.z += 0.015;
+            }
+            if (this._powerupRing) {
+                this._powerupRing.rotation.z += 0.03;
+                const s = 1 + Math.sin(this.floatY * 1.6) * 0.12;
+                this._powerupRing.scale.set(s, s, 1);
+            }
+            return;
+        }
         this.mesh.position.y = 1 + Math.sin(this.floatY) * 0.2;
     }
 
     destroy() {
         this.scene.remove(this.mesh);
+    }
+}
+
+export class TerritoryFlag3D {
+    constructor(scene, position, options = {}) {
+        this.scene = scene;
+        this.regionId = options.regionId || null;
+        this.mesh = new THREE.Group();
+        this.state = null;
+
+        const pole = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.08, 0.12, 6.6, 10),
+            new THREE.MeshStandardMaterial({ color: 0xc8c8d4, metalness: 0.65, roughness: 0.35 })
+        );
+        pole.position.y = 3.3;
+        this.mesh.add(pole);
+
+        const finial = new THREE.Mesh(
+            new THREE.SphereGeometry(0.22, 16, 12),
+            new THREE.MeshStandardMaterial({ color: 0xffdd88, emissive: 0xffaa22, emissiveIntensity: 0.45 })
+        );
+        finial.position.y = 6.75;
+        this.mesh.add(finial);
+
+        this.bannerMat = new THREE.MeshStandardMaterial({
+            color: 0x39ff14,
+            emissive: 0x39ff14,
+            emissiveIntensity: 0.55,
+            side: THREE.DoubleSide,
+            transparent: true,
+            opacity: 0.92
+        });
+        this.banner = new THREE.Mesh(new THREE.PlaneGeometry(2.9, 1.65, 10, 6), this.bannerMat);
+        this.banner.position.set(1.45, 5.55, 0);
+        this.banner.rotation.y = Math.PI;
+        this.mesh.add(this.banner);
+
+        this.baseRing = new THREE.Mesh(
+            new THREE.TorusGeometry(1.85, 0.12, 12, 40),
+            new THREE.MeshBasicMaterial({ color: 0x39ff14, transparent: true, opacity: 0.42 })
+        );
+        this.baseRing.rotation.x = Math.PI / 2;
+        this.baseRing.position.y = 0.12;
+        this.mesh.add(this.baseRing);
+
+        this.light = new THREE.PointLight(0x39ff14, 1.7, 11, 1.4);
+        this.light.position.set(0.6, 4.8, 0);
+        this.mesh.add(this.light);
+
+        this.mesh.position.copy(position);
+        this.scene.add(this.mesh);
+        this._waveT = Math.random() * Math.PI * 2;
+    }
+
+    applyState(state = {}) {
+        this.state = state;
+        const visual = getClanVisual(state.clanId || 'myco');
+        const color = Number.isFinite(state.color) ? state.color : visual.magic;
+        this.bannerMat.color.setHex(color);
+        this.bannerMat.emissive.setHex(color);
+        this.bannerMat.emissiveIntensity = state.contested ? 0.9 : 0.55;
+        this.baseRing.material.color.setHex(color);
+        this.baseRing.material.opacity = state.contested ? 0.68 : 0.42;
+        this.light.color.setHex(color);
+        this.light.intensity = state.contested ? 2.2 : 1.7;
+        this.banner.scale.y = state.sanctuary ? 1.08 : 1;
+    }
+
+    update() {
+        this._waveT += 0.08;
+        const pos = this.banner.geometry.attributes.position;
+        const arr = pos.array;
+        for (let i = 0; i < arr.length; i += 3) {
+            const x = arr[i];
+            const y = arr[i + 1];
+            arr[i + 2] = Math.sin(this._waveT + x * 2.2 + y * 0.8) * 0.18;
+        }
+        pos.needsUpdate = true;
+        this.baseRing.rotation.z += 0.008;
+    }
+
+    destroy() {
+        this.scene.remove(this.mesh);
+    }
+}
+
+export class RemoteClanPlayer3D {
+    constructor(scene) {
+        this.scene = scene;
+        this.group = new THREE.Group();
+        this.targetPosition = new THREE.Vector3();
+        this.targetRotationY = 0;
+        this._floatT = Math.random() * Math.PI * 2;
+        this.activeSlot = 1;
+        this.currentWeaponId = 'none';
+        this.currentClan = 'myco';
+        this.name = 'Wanderer';
+        this.hp = 5;
+        this.maxHp = 5;
+        this.invulnerableUntil = 0;
+        this.hitFlashUntil = 0;
+        this._lastShieldSecond = -1;
+
+        const bodyMat = new THREE.MeshStandardMaterial({ color: 0xefe8d7, roughness: 0.95 });
+        this.body = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.36, 1.3, 8), bodyMat);
+        this.body.position.y = 0.8;
+        this.group.add(this.body);
+
+        this.robeMat = new THREE.MeshStandardMaterial({ color: 0x800080, emissive: 0x300030, emissiveIntensity: 0.25, roughness: 0.7 });
+        this.robe = new THREE.Mesh(new THREE.ConeGeometry(0.7, 1.55, 8), this.robeMat);
+        this.robe.position.y = 0.9;
+        this.group.add(this.robe);
+
+        this.capMat = new THREE.MeshStandardMaterial({ color: 0x00ff00, emissive: 0x00ff00, emissiveIntensity: 0.35 });
+        this.cap = new THREE.Mesh(new THREE.SphereGeometry(0.65, 14, 10), this.capMat);
+        this.cap.position.set(0, 1.68, 0);
+        this.group.add(this.cap);
+
+        this.weaponRoot = new THREE.Group();
+        this.weaponRoot.position.set(0.45, 1.15, 0.1);
+        this.group.add(this.weaponRoot);
+
+        this.hpCanvas = document.createElement('canvas');
+        this.hpCanvas.width = 256;
+        this.hpCanvas.height = 88;
+        this.hpCtx = this.hpCanvas.getContext('2d');
+        this.hpTexture = new THREE.CanvasTexture(this.hpCanvas);
+        this.hpTexture.minFilter = THREE.LinearFilter;
+        this.hpTexture.magFilter = THREE.LinearFilter;
+        this.hpSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.hpTexture, transparent: true, depthTest: false, depthWrite: false }));
+        this.hpSprite.scale.set(2.2, 0.78, 1);
+        this.hpSprite.position.set(0, 3.25, 0);
+        this.hpSprite.renderOrder = 999;
+        this.group.add(this.hpSprite);
+
+        this.scene.add(this.group);
+        this.updateLoadoutVisual();
+        this.redrawHpBar();
+    }
+
+    setClan(clanId = 'myco') {
+        this.currentClan = clanId;
+        const visual = getClanVisual(clanId);
+        this.robeMat.color.setHex(visual.robe);
+        this.robeMat.emissive.setHex(visual.magic);
+        this.capMat.color.setHex(visual.magic);
+        this.capMat.emissive.setHex(visual.magic);
+    }
+
+    updateLoadoutVisual() {
+        while (this.weaponRoot.children.length) this.weaponRoot.remove(this.weaponRoot.children[0]);
+        const visual = getClanVisual(this.currentClan);
+        if (this.activeSlot === 2 && this.currentWeaponId && this.currentWeaponId !== 'none') {
+            let weapon;
+            if (this.currentWeaponId === 'ember_axe') {
+                weapon = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.42, 0.12), new THREE.MeshStandardMaterial({ color: 0x552200, emissive: 0xff5500, emissiveIntensity: 0.8 }));
+                weapon.position.set(0.18, 0.45, 0);
+            } else if (this.currentWeaponId === 'crystal_spire') {
+                weapon = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.16, 1.05, 6), new THREE.MeshStandardMaterial({ color: 0x88ffff, emissive: 0x00ffff, emissiveIntensity: 0.9, transparent: true, opacity: 0.88 }));
+                weapon.rotation.z = -0.45;
+                weapon.position.set(0.12, 0.32, 0);
+            } else {
+                weapon = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.88, 0.06), new THREE.MeshStandardMaterial({ color: 0xa8d9a8, emissive: 0x39ff14, emissiveIntensity: 0.35 }));
+                weapon.rotation.z = -0.55;
+                weapon.position.set(0.05, 0.28, 0);
+            }
+            this.weaponRoot.add(weapon);
+        } else {
+            const orb = new THREE.Mesh(new THREE.SphereGeometry(0.18, 12, 10), new THREE.MeshStandardMaterial({ color: visual.magic, emissive: visual.magic, emissiveIntensity: 1.2 }));
+            orb.position.set(0.1, 0.4, 0);
+            this.weaponRoot.add(orb);
+        }
+    }
+
+    redrawHpBar() {
+        if (!this.hpCtx) return;
+        const ctx = this.hpCtx;
+        const W = this.hpCanvas.width;
+        const H = this.hpCanvas.height;
+        const shieldSeconds = Math.max(0, Math.ceil((Number(this.invulnerableUntil || 0) - Date.now()) / 1000));
+        ctx.clearRect(0, 0, W, H);
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.58)';
+        ctx.fillRect(8, 8, W - 16, H - 16);
+        ctx.strokeStyle = shieldSeconds > 0 ? 'rgba(102,255,238,0.88)' : 'rgba(255,255,255,0.18)';
+        ctx.strokeRect(8.5, 8.5, W - 17, H - 17);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 18px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText((this.name || 'WANDERER').slice(0, 22), W / 2, 30);
+
+        if (shieldSeconds > 0) {
+            ctx.font = 'bold 11px sans-serif';
+            ctx.fillStyle = '#66ffee';
+            ctx.fillText(`SPAWN SHIELD ${shieldSeconds}S`, W / 2, 42);
+        }
+
+        const pct = Math.max(0, Math.min(1, this.hp / Math.max(1, this.maxHp)));
+        ctx.fillStyle = 'rgba(16,16,16,0.9)';
+        ctx.fillRect(26, shieldSeconds > 0 ? 50 : 44, W - 52, 16);
+        ctx.fillStyle = pct > 0.5 ? '#39ff14' : pct > 0.25 ? '#ffcc33' : '#ff5555';
+        ctx.fillRect(28, shieldSeconds > 0 ? 52 : 46, Math.max(0, (W - 56) * pct), 12);
+        ctx.font = 'bold 12px sans-serif';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(`${Math.ceil(this.hp)} / ${this.maxHp} HP`, W / 2, shieldSeconds > 0 ? 63 : 57);
+        this.hpTexture.needsUpdate = true;
+        this._lastShieldSecond = shieldSeconds;
+    }
+
+    applyPresence(presence = {}) {
+        this.walletAddress = presence.walletAddress || this.walletAddress;
+        this.name = presence.playerName || this.name;
+        this.hp = Number.isFinite(Number(presence.effectiveHp)) ? Number(presence.effectiveHp) : (Number.isFinite(Number(presence.hp)) ? Number(presence.hp) : this.hp);
+        this.maxHp = Math.max(1, Number.isFinite(Number(presence.maxHp)) ? Number(presence.maxHp) : this.maxHp);
+        this.activeSlot = Number(presence.activeSlot || 1);
+        this.currentWeaponId = presence.currentWeaponId || 'none';
+        this.invulnerableUntil = Math.max(0, Number(presence.invulnerableUntil || 0));
+        this.targetPosition.set(Number(presence.position?.x || 0), 0, Number(presence.position?.z || 0));
+        this.targetRotationY = Number.isFinite(Number(presence.rotationY)) ? Number(presence.rotationY) : this.targetRotationY;
+        if (presence.clanId && presence.clanId !== this.currentClan) this.setClan(presence.clanId);
+        this.updateLoadoutVisual();
+        this.redrawHpBar();
+    }
+
+    flashHit() {
+        this.hitFlashUntil = performance.now() + 180;
+    }
+
+    update() {
+        this._floatT += 0.05;
+        this.group.position.lerp(this.targetPosition, 0.18);
+        this.group.position.y = Math.sin(this._floatT) * 0.05;
+        let yawDelta = this.targetRotationY - this.group.rotation.y;
+        yawDelta = Math.atan2(Math.sin(yawDelta), Math.cos(yawDelta));
+        this.group.rotation.y += yawDelta * 0.18;
+        this.weaponRoot.rotation.y += 0.03;
+        const shieldSeconds = Math.max(0, Math.ceil((Number(this.invulnerableUntil || 0) - Date.now()) / 1000));
+        if (shieldSeconds !== this._lastShieldSecond) this.redrawHpBar();
+        const hitFlash = performance.now() < this.hitFlashUntil;
+        this.body.material.emissive?.setHex?.(hitFlash ? 0x661111 : (shieldSeconds > 0 ? 0x114444 : 0x000000));
+        this.robeMat.emissiveIntensity = shieldSeconds > 0 ? 0.45 + Math.sin(this._floatT * 2) * 0.1 : 0.25;
+        this.hpSprite.material.opacity = hitFlash ? 1 : (shieldSeconds > 0 ? 0.99 : 0.96);
+    }
+
+    destroy() {
+        this.scene.remove(this.group);
     }
 }
 
@@ -3830,12 +4136,12 @@ export class Player3D {
         
         // Clan Colors and Modifiers
         this.clanColors = {
-            'myco': { robe: 0x800080, magic: 0x00ff00, powerName: 'Spirit Glide', powerDesc: 'Reduced gravity effect.', banner: 'assets/king-myco-clan-banner-2.jpg', avatar: 'assets/myco-avatar.webp' },
-            'rougarou': { robe: 0x555555, magic: 0xaaaaaa, powerName: 'Feral Speed', powerDesc: 'Increased base movement speed.', banner: 'assets/rougarou-clan-banner-2.jpg', avatar: 'assets/rougarou-avatar.webp' },
-            'tegbot': { robe: 0x00ffff, magic: 0x00ffff, powerName: 'Overclock', powerDesc: 'Faster magic cooldown.', banner: 'assets/tegbot-clan-banner.webp', avatar: 'assets/tegbot-avatar.webp' },
-            'shiba': { robe: 0xffff00, magic: 0xffff00, powerName: 'Fortune Radius', powerDesc: 'Increased victory capture range.', banner: 'assets/shiba-clan-banner.webp', avatar: 'assets/shiba-avatar.webp' },
-            'brood': { robe: 0xffaa00, magic: 0xff5500, powerName: 'Dragon Flare', powerDesc: 'Faster, brighter projectiles.', banner: 'assets/brood-dragon-clan-banner.jpg', avatar: 'assets/brood-avatar.webp' },
-            'mycelius': { robe: 0xaa00ff, magic: 0xaa00ff, powerName: 'Rot Siphon', powerDesc: 'Drains lifeforce from enemies.', banner: 'assets/dark-mycelius-clan-banner.jpg', avatar: 'assets/mycelius-avatar.webp' }
+            myco: { ...CLAN_VISUALS.myco, powerName: 'Spirit Glide', powerDesc: 'Reduced gravity effect.' },
+            rougarou: { ...CLAN_VISUALS.rougarou, powerName: 'Feral Speed', powerDesc: 'Increased base movement speed.' },
+            tegbot: { ...CLAN_VISUALS.tegbot, powerName: 'Overclock', powerDesc: 'Faster magic cooldown.' },
+            shiba: { ...CLAN_VISUALS.shiba, powerName: 'Fortune Radius', powerDesc: 'Increased victory capture range.' },
+            brood: { ...CLAN_VISUALS.brood, powerName: 'Dragon Flare', powerDesc: 'Faster, brighter projectiles.' },
+            mycelius: { ...CLAN_VISUALS.mycelius, powerName: 'Rot Siphon', powerDesc: 'Drains lifeforce from enemies.' }
         };
 
         this.currentClan = 'myco';
@@ -4106,6 +4412,10 @@ export class Player3D {
         
         this.hasFungalShield = false;
         this.hasMycelialNet = false;
+        this.tempWardBonus = 0;
+        this.skillReadyAt = {};
+        this._specialHeld = false;
+        this._trapHeld = false;
         this.shieldOrbitAngle = 0;
         this.shieldGroup = new THREE.Group();
         this.group.add(this.shieldGroup);
@@ -4440,6 +4750,17 @@ export class Player3D {
         this.modifiers.regenRate += wallet.regenBonus || 0;
         this.modifiers.critChance += wallet.critBonus || 0;
 
+        const powerup = this.powerupModifiers || {};
+        this.modifiers.speedMult *= powerup.speedMult || 1;
+        this.modifiers.cooldownMult *= powerup.cooldownMult || 1;
+        this.modifiers.goalRadiusMult *= powerup.goalRadiusMult || 1;
+        this.modifiers.projectileSpeedMult *= powerup.projectileSpeedMult || 1;
+        this.modifiers.projectileCount += powerup.projectileCountBonus || 0;
+        this.modifiers.damageBonus = (this.modifiers.damageBonus + (powerup.damageBonusFlat || 0)) * (powerup.damageBonusMult || 1);
+        this.modifiers.wardBonus += powerup.wardBonusFlat || 0;
+        this.modifiers.regenRate += powerup.regenBonus || 0;
+        this.modifiers.critChance += powerup.critBonus || 0;
+
         this.updateModelVisuals();
     }
 
@@ -4762,7 +5083,7 @@ export class Player3D {
         }
 
         // Flat reduction from ward
-        const actualDamage = Math.max(0, amount - (this.modifiers.wardBonus || 0));
+        const actualDamage = Math.max(0, amount - ((this.modifiers.wardBonus || 0) + (this.tempWardBonus || 0)));
         
         if (actualDamage <= 0) {
             if (window.game) window.game.showFloatingText("BLOCKED!", 0x39FF14);
@@ -4789,8 +5110,13 @@ export class Player3D {
             window.game.showFloatingText("OUCH!", 0xff0000);
             window.game.updateHud();
             if (this.hp <= 0) {
-                window.game.showFloatingText("DEFEATED", 0xff0000, true);
-                setTimeout(() => location.reload(), 2000);
+                if (window.game.progression?.isTerritoryWarMode?.() && typeof window.game.handleTerritoryPlayerDown === 'function') {
+                    window.game.showFloatingText("BANNER FALL!", 0xff0000, true);
+                    void window.game.handleTerritoryPlayerDown();
+                } else {
+                    window.game.showFloatingText("DEFEATED", 0xff0000, true);
+                    setTimeout(() => location.reload(), 2000);
+                }
             }
         }
     }
@@ -4865,6 +5191,8 @@ export class Player3D {
             const fireball = new Fireball3D(this.scene, shootPos, forward, isCrit, this.hasFireTrail);
             fireball.speed *= this.modifiers.projectileSpeedMult;
             fireball.magicId = currentMagicId;
+            fireball.remoteCombatId = `proj:${now}:${i}:${Math.random().toString(36).slice(2, 8)}`;
+            fireball.remoteHitWallets = new Set();
             fireball.rotCleanse = magicCfg.rotCleanse || 0.45;
             fireball.rotRadius = magicCfg.rotRadius || 4.5;
 
@@ -4998,6 +5326,18 @@ export class Player3D {
                 }
             });
 
+            if (typeof window.game.tryTerritoryMeleeHit === 'function') {
+                const remoteHit = window.game.tryTerritoryMeleeHit({
+                    playerPos,
+                    forward,
+                    weaponCfg,
+                    baseDamage: baseMeleeDmg + (this.modifiers.damageBonus || 0),
+                    critChance: this.modifiers.critChance || 0,
+                });
+                if (remoteHit?.hitAny) hitAny = true;
+                if (remoteHit?.hitCrit) hitCrit = true;
+            }
+
             if (hitAny && window.game) {
                 try {
                     if (window.game.impactSynth) window.game.impactSynth.triggerAttackRelease("8n");
@@ -5090,9 +5430,9 @@ export class Player3D {
     }
 
     specialAbility() {
-        if (!this.hasRoyalSpore) return;
+        if (!this.hasRoyalSpore) return false;
         const now = Date.now();
-        if (now - this.lastSpecialTime < CONFIG.PLAYER.SPECIAL_COOLDOWN) return;
+        if (now - this.lastSpecialTime < CONFIG.PLAYER.SPECIAL_COOLDOWN) return false;
         this.lastSpecialTime = now;
         this.isAttacking = true;
         this.attackAnimTimer = 0;
@@ -5106,6 +5446,282 @@ export class Player3D {
             case 'mycelius': this.abilityMycelius(); break;
             default: this.abilityMyco(); break;
         }
+        return true;
+    }
+
+    getEquippedSkillCooldownMs(skillId) {
+        switch (skillId) {
+            case 'royalSpore': return CONFIG.PLAYER.SPECIAL_COOLDOWN;
+            case 'mycelialNet': return 8000;
+            case 'spore_blast': return 4500;
+            case 'shroom_shield': return 10000;
+            case 'mycelial_dash': return this.dashCooldownMs;
+            case 'ember_strike': return 6500;
+            case 'void_step': return 5500;
+            case 'crown_aegis': return 14000;
+            default: return 0;
+        }
+    }
+
+    getEquippedSkillCooldownRemaining(skillId) {
+        if (!skillId) return 0;
+        switch (skillId) {
+            case 'royalSpore':
+                return Math.max(0, CONFIG.PLAYER.SPECIAL_COOLDOWN - (Date.now() - this.lastSpecialTime));
+            case 'mycelialNet':
+                return Math.max(0, 8000 - (Date.now() - this.lastNetTime));
+            case 'mycelial_dash':
+                return Math.max(0, this.dashReadyAt - performance.now());
+            default:
+                return Math.max(0, Number(this.skillReadyAt?.[skillId] || 0) - Date.now());
+        }
+    }
+
+    useEquippedSkill(skillId) {
+        if (!skillId) {
+            if (window.game) window.game.showFloatingText('EQUIP A SKILL (U)', 0x888888, true);
+            return false;
+        }
+
+        switch (skillId) {
+            case 'royalSpore':
+                if (!this.hasRoyalSpore) {
+                    if (window.game) window.game.showFloatingText('CLAN SPECIAL LOCKED', 0x888888, true);
+                    return false;
+                }
+                return this.specialAbility();
+            case 'mycelialNet':
+                if (!this.hasMycelialNet) {
+                    if (window.game) window.game.showFloatingText('NET LOCKED', 0x888888, true);
+                    return false;
+                }
+                return this.useMycelialNet();
+            case 'spore_blast':
+                return this.useSporeBlast();
+            case 'shroom_shield':
+                return this.useShroomShield();
+            case 'mycelial_dash':
+                return this.useMycelialDash();
+            case 'ember_strike':
+                return this.useEmberStrike();
+            case 'void_step':
+                return this.useVoidStep();
+            case 'crown_aegis':
+                return this.useCrownAegis();
+            default:
+                if (window.game) window.game.showFloatingText('SKILL NOT READY', 0x888888, true);
+                return false;
+        }
+    }
+
+    spendSkillMagic(cost, failLabel = 'LOW MAGIC') {
+        if ((this.magic || 0) < cost) {
+            if (window.game) window.game.showFloatingText(failLabel, 0x66ccff, true);
+            return false;
+        }
+        this.magic -= cost;
+        if (window.game) window.game.updateHud();
+        return true;
+    }
+
+    triggerSkillCooldown(skillId) {
+        const cooldownMs = this.getEquippedSkillCooldownMs(skillId);
+        if (cooldownMs > 0) this.skillReadyAt[skillId] = Date.now() + cooldownMs;
+    }
+
+    createSkillPulse(color = this.magicColor, radius = 1.8, durationMs = 450) {
+        if (!this.scene) return;
+        const ring = new THREE.Mesh(
+            new THREE.RingGeometry(radius * 0.35, radius, 32),
+            new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.75, side: THREE.DoubleSide })
+        );
+        ring.rotation.x = Math.PI / 2;
+        ring.position.copy(this.group.position).y = 0.2;
+        this.scene.add(ring);
+
+        const start = performance.now();
+        const tick = () => {
+            const t = Math.min(1, (performance.now() - start) / durationMs);
+            ring.scale.setScalar(1 + t * 1.8);
+            ring.material.opacity = 0.75 * (1 - t);
+            if (t < 1) {
+                requestAnimationFrame(tick);
+            } else {
+                try {
+                    this.scene.remove(ring);
+                    ring.geometry.dispose();
+                    ring.material.dispose();
+                } catch (_) {}
+            }
+        };
+        tick();
+    }
+
+    applyTimedWardBonus(amount, durationMs, label, color = this.magicColor) {
+        this.tempWardBonus = Math.max(this.tempWardBonus || 0, amount);
+        this.createSkillPulse(color, 2.2, 650);
+        if (window.game) {
+            window.game.showFloatingText(label, color, true);
+            window.game.updateHud();
+        }
+        clearTimeout(this._tempWardTimer);
+        this._tempWardTimer = setTimeout(() => {
+            this.tempWardBonus = 0;
+            if (window.game) window.game.showFloatingText('WARD FADED', 0x888888);
+        }, durationMs);
+    }
+
+    useSporeBlast() {
+        if (this.getEquippedSkillCooldownRemaining('spore_blast') > 0) return false;
+        if (!this.spendSkillMagic(18, 'NEED 18 MAGIC')) return false;
+        this.triggerSkillCooldown('spore_blast');
+        this.isAttacking = true;
+        this.attackAnimTimer = 0;
+        this.createSkillPulse(0x66eeff, 3.2, 600);
+        this.dealAreaDamage(this.group.position, 8.5, 12);
+        if (window.game?.handleEquippedSkillWorldCast) {
+            window.game.handleEquippedSkillWorldCast('spore_blast', {
+                player: this,
+                position: this.group.position.clone()
+            });
+        }
+        if (window.game) window.game.showFloatingText('SPORE BLAST!', 0x66eeff, true);
+        try {
+            const synth = new TONE.PolySynth({ polyphony: 3, oscillator: { type: 'triangle' } }).toDestination();
+            synth.volume.value = -8;
+            synth.triggerAttackRelease(['C4', 'G4', 'C5'], '8n');
+        } catch (_) {}
+        return true;
+    }
+
+    useShroomShield() {
+        if (this.getEquippedSkillCooldownRemaining('shroom_shield') > 0) return false;
+        if (!this.spendSkillMagic(16, 'NEED 16 MAGIC')) return false;
+        this.triggerSkillCooldown('shroom_shield');
+        this.applyTimedWardBonus(4, 8000, 'SHROOM SHIELD!', 0x80ffaa);
+        this.hp = Math.min(this.maxHp, this.hp + 1);
+        if (window.game) window.game.updateHud();
+        if (window.game?.handleEquippedSkillWorldCast) {
+            window.game.handleEquippedSkillWorldCast('shroom_shield', {
+                player: this,
+                position: this.group.position.clone()
+            });
+        }
+        return true;
+    }
+
+    useMycelialDash() {
+        const startPos = this.group.position.clone();
+        if (!this.dash()) {
+            if (window.game) window.game.showFloatingText('DASH CHARGING', 0x66ffee, true);
+            return false;
+        }
+        this.dealAreaDamage(this.group.position, 4.5, 6);
+        if (window.game?.handleEquippedSkillWorldCast) {
+            window.game.handleEquippedSkillWorldCast('mycelial_dash', {
+                player: this,
+                startPos,
+                position: this.group.position.clone(),
+                endPos: this.group.position.clone()
+            });
+        }
+        if (window.game) window.game.showFloatingText('MYCELIAL DASH!', 0x66ffee, true);
+        return true;
+    }
+
+    useEmberStrike() {
+        if (this.getEquippedSkillCooldownRemaining('ember_strike') > 0) return false;
+        if (!this.spendSkillMagic(20, 'NEED 20 MAGIC')) return false;
+        this.triggerSkillCooldown('ember_strike');
+        this.isAttacking = true;
+        this.attackAnimTimer = 0;
+
+        const count = 7;
+        const spread = Math.PI / 4;
+        for (let i = 0; i < count; i++) {
+            const angleOffset = (i / (count - 1) - 0.5) * spread;
+            const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(this.group.quaternion);
+            forward.applyAxisAngle(new THREE.Vector3(0, 1, 0), angleOffset);
+            const shootPos = this.group.position.clone().add(new THREE.Vector3(0, 1, 0));
+            const fireball = new Fireball3D(this.scene, shootPos, forward, true, true);
+            fireball.speed = 0.55 + Math.random() * 0.2;
+            fireball.life = 26 + Math.random() * 10;
+            fireball.damage = 10;
+            fireball.trailColor = 0xff8800;
+            fireball.skillId = 'ember_strike';
+            fireball.mesh.scale.setScalar(1.15);
+            this.projectiles.push(fireball);
+        }
+
+        if (window.game?.handleEquippedSkillWorldCast) {
+            window.game.handleEquippedSkillWorldCast('ember_strike', {
+                player: this,
+                position: this.group.position.clone()
+            });
+        }
+        if (window.game) window.game.showFloatingText('EMBER STRIKE!', 0xff8800, true);
+        return true;
+    }
+
+    useVoidStep() {
+        if (this.getEquippedSkillCooldownRemaining('void_step') > 0) return false;
+        if (!this.spendSkillMagic(14, 'NEED 14 MAGIC')) return false;
+        this.triggerSkillCooldown('void_step');
+
+        const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(this.group.quaternion).setY(0).normalize();
+        const startPos = this.group.position.clone();
+        this.group.position.addScaledVector(forward, 8);
+        this._dashIFrameUntil = performance.now() + 260;
+        this.createSkillPulse(0xaa66ff, 2.5, 550);
+        this.dealAreaDamage(this.group.position, 4, 8);
+        if (window.game) {
+            window.game.showFloatingText('VOID STEP!', 0xaa66ff, true);
+            window.game.addCameraImpulse(0.12);
+        }
+
+        if (this.scene) {
+            [startPos, this.group.position.clone()].forEach(pos => {
+                const marker = new THREE.Mesh(
+                    new THREE.SphereGeometry(0.4, 8, 8),
+                    new THREE.MeshBasicMaterial({ color: 0xaa66ff, transparent: true, opacity: 0.55 })
+                );
+                marker.position.copy(pos).y += 1;
+                this.scene.add(marker);
+                setTimeout(() => {
+                    try {
+                        this.scene.remove(marker);
+                        marker.geometry.dispose();
+                        marker.material.dispose();
+                    } catch (_) {}
+                }, 260);
+            });
+        }
+        if (window.game?.handleEquippedSkillWorldCast) {
+            window.game.handleEquippedSkillWorldCast('void_step', {
+                player: this,
+                startPos,
+                position: this.group.position.clone(),
+                endPos: this.group.position.clone()
+            });
+        }
+        return true;
+    }
+
+    useCrownAegis() {
+        if (this.getEquippedSkillCooldownRemaining('crown_aegis') > 0) return false;
+        if (!this.spendSkillMagic(24, 'NEED 24 MAGIC')) return false;
+        this.triggerSkillCooldown('crown_aegis');
+        this.hp = Math.min(this.maxHp, this.hp + 3);
+        this.applyTimedWardBonus(6, 10000, 'CROWN AEGIS!', 0xffdd55);
+        this.dealAreaDamage(this.group.position, 6.5, 10);
+        if (window.game) window.game.updateHud();
+        if (window.game?.handleEquippedSkillWorldCast) {
+            window.game.handleEquippedSkillWorldCast('crown_aegis', {
+                player: this,
+                position: this.group.position.clone()
+            });
+        }
+        return true;
     }
 
     abilityMyco() {
@@ -5457,9 +6073,9 @@ export class Player3D {
     }
 
     useMycelialNet() {
-        if (!this.hasMycelialNet) return;
+        if (!this.hasMycelialNet) return false;
         const now = Date.now();
-        if (now - this.lastNetTime < 8000) return; // 8s cooldown
+        if (now - this.lastNetTime < 8000) return false; // 8s cooldown
         this.lastNetTime = now;
         
         const trap = new NetTrap3D(this.scene, this.group.position, 0x00ffff);
@@ -5471,6 +6087,7 @@ export class Player3D {
 
         const synth = new TONE.NoiseSynth({ envelope: { attack: 0.1, decay: 0.5 } }).toDestination();
         synth.triggerAttackRelease("4n");
+        return true;
     }
     
     levelUp() {
@@ -5874,6 +6491,28 @@ export class Player3D {
     update(collidables = [], platforms = []) {
         if (this.isGhost) return;
         this.checkGamepad();
+
+        if (this.keys.special) {
+            if (!this._specialHeld) {
+                this._specialHeld = true;
+                if (window.game && window.game.gameState === 'PLAYING') {
+                    window.game.useEquippedSkill({ source: 'input' });
+                }
+            }
+        } else {
+            this._specialHeld = false;
+        }
+
+        if (this.keys.trap) {
+            if (!this._trapHeld) {
+                this._trapHeld = true;
+                if (window.game && window.game.gameState === 'PLAYING' && window.game.getEquippedSkillId?.() === 'mycelialNet') {
+                    window.game.useEquippedSkill({ source: 'trap' });
+                }
+            }
+        } else {
+            this._trapHeld = false;
+        }
         
         const prevPos = this._prevPos.copy(this.group.position);
         if (!this._tempBox) this._tempBox = new THREE.Box3();
