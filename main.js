@@ -26,7 +26,7 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { Player3D, Enemy3D, RotInfectedEnemy3D, LightPool3D, Boss3D, MossfangSentinel3D, ShardcapWarden3D, DarkMycelius3D, GrandRotBoss3D, BogbellyMyconid3D, WidowcapWeaver3D, Collectible3D, NPC3D, Portal3D, Chest3D, NetTrap3D, Hazard3D, PuzzlePillar3D, SporeBomb3D, VoxelCorruptedHazard3D, InteractiveBuilding3D, RotCluster3D, CitadelGate3D, TerritoryFlag3D, RemoteClanPlayer3D } from './entities_3d.js';
 import { CONFIG } from './config.js';
 
-const LIVE_BUILD = '1.9.68';
+const LIVE_BUILD = '1.9.69';
 const CLOUD_SESSION_KEY = 'myco_quest_wallet_session_v1';
 const CLOUD_BALANCE_KEY = 'myco_quest_wallet_balance_v1';
 const CLOUD_LAST_SYNC_KEY = 'myco_quest_wallet_last_sync_v1';
@@ -7783,6 +7783,7 @@ class Game3D {
     }
 
     showGlobalNotification(message, color = '#39FF14') {
+        if (this.gameState !== 'PLAYING') return;
         const id = Date.now();
         const notification = document.createElement('div');
         notification.id = `notif-${id}`;
@@ -9093,6 +9094,7 @@ class Game3D {
             : isMobile
                 ? `Guest now, Phantom later for live war + cloud save.`
                 : `Guest now, connect Phantom later for live war + cloud save.`;
+        const walletStatusTitle = isMobile ? 'WALLET + CLOUD STATUS' : 'WALLET + SAVE';
         const showCloudStatusCard = !!(access.walletVerified || this.walletSessionToken || this.cloudSyncStatus === 'error');
         const cloudStatusBody = access.walletVerified || this.walletSessionToken
             ? cloudStatus.body
@@ -9209,7 +9211,7 @@ class Game3D {
                         <div style="width:100%; padding:${isMobile ? 10 : 11}px; background:rgba(255,255,255,0.035); border:1px solid rgba(255,255,255,0.08); border-radius:16px; box-sizing:border-box; display:grid; gap:8px; text-align:left;">
                             <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start; flex-wrap:wrap;">
                                 <div>
-                                    <div style="font-size:8px; color:#9cb8b1; letter-spacing:1px; margin-bottom:4px;">WALLET + CLOUD STATUS</div>
+                                    <div style="font-size:8px; color:#9cb8b1; letter-spacing:1px; margin-bottom:4px;">${walletStatusTitle}</div>
                                     <div style="font-size:${smFs}px; color:${access.walletVerified ? '#00ffff' : '#ffffff'}; line-height:1.55;">${walletLabel}</div>
                                 </div>
                                 <div style="padding:6px 10px; border-radius:999px; border:1px solid ${access.walletVerified ? 'rgba(0,255,255,0.28)' : 'rgba(255,170,0,0.22)'}; background:${access.walletVerified ? 'rgba(0,255,255,0.08)' : 'rgba(255,170,0,0.08)'}; font-size:7px; color:${access.walletVerified ? '#8ef9ff' : '#ffd280'};">${access.walletVerified ? 'VERIFIED HOLDER' : 'GUEST READY'}</div>
@@ -9377,6 +9379,49 @@ class Game3D {
                     ? 'VERIFY FOR WAR'
                     : `HOLD ${access.minimum.toLocaleString('en-US')} MYCO`;
         const isMobile = !!this.isMobile;
+        const modeIntroCopy = isMobile
+            ? 'Pick your run. Story is campaign, War is live PvP, Collector is chill sandbox.'
+            : 'Pick the mood for this session. Story mode is the full cinematic campaign, Territory War is the live holder battleground, and Spore Collector is the clean sandbox loop.';
+        const storyNotes = isMobile
+            ? [
+                { text: 'Full quest, combat, and progression' },
+                { text: 'Reclaim 7 Crown Shards' }
+            ]
+            : [
+                { text: 'Full quest, combat, and progression' },
+                { text: 'Reclaim 7 Crown Shards' },
+                { text: 'NPCs, shops, upgrades, and daily rot' },
+                { text: 'Bosses, dungeons, and corrupted warzones' }
+            ];
+        const territoryNotes = isMobile
+            ? [
+                { text: 'All portals open instantly' },
+                { text: 'Regions flip with clan pressure' }
+            ]
+            : [
+                { text: 'All portals open, every warfront reachable instantly' },
+                { text: 'Regions flip live based on clan pressure' },
+                { text: 'Stand on a region flag for 20s to raise your banner' },
+                { text: 'Owned land buffs allies, hostile land fights back', accent: territoryUnlocked ? '#fff2a8' : '#ffcfad' }
+            ];
+        const territoryWarning = territoryUnlocked
+            ? (isMobile
+                ? 'Live flags, portals, and region pressure update in real time.'
+                : 'Every portal is open. Region flags, clan pressure, portal banners, and hostile buffs all update live.')
+            : (isMobile
+                ? `Verified ${access.minimum.toLocaleString('en-US')} MYCO required for live war.`
+                : `Requires a verified wallet holding ${access.minimum.toLocaleString('en-US')} MYCO to enter live war.`);
+        const collectorNotes = isMobile
+            ? [
+                { text: 'All regions open, every portal unlocked' },
+                { text: 'Collect up to 1000 spores per day', accent: '#fff2a8' }
+            ]
+            : [
+                { text: 'All regions open, every portal unlocked' },
+                { text: 'Collect up to 1000 spores per day', accent: '#fff2a8' },
+                { text: 'Burn spores at the Burn Pit' },
+                { text: 'No enemies, no bosses, no quest pressure' }
+            ];
         const renderModeCard = ({ id, icon, accent, glow, title, subtitle, notes, buttonLabel, buttonTextColor = 'white', active, locked = false, warning = null }) => `
             <div class="mode-card" id="mode-${id}"
                  style="position:relative; min-height:${isMobile ? '0' : '430px'}; background:linear-gradient(180deg, rgba(12,16,18,0.98), rgba(6,9,11,0.94)); border:1px solid ${active ? accent : 'rgba(255,255,255,0.08)'}; border-top:3px solid ${accent}; border-radius:20px; padding:${isMobile ? 12 : 22}px; cursor:pointer; transition:all 0.25s; opacity:${locked ? 0.86 : 1}; box-shadow:${active ? `0 22px 56px rgba(0,0,0,0.46), 0 0 28px ${glow}` : '0 18px 38px rgba(0,0,0,0.32)'}; overflow:hidden;"
@@ -9413,7 +9458,7 @@ class Game3D {
                             </div>
                             <div>
                                 <h2 class="neon-text" style="margin:0 0 8px 0; font-size:${isMobile ? 22 : 30}px; color:#39FF14;">CHOOSE YOUR PATH</h2>
-                                <p style="color:#aab6b0; font-size:${isMobile ? 9 : 11}px; margin:0; letter-spacing:1px; line-height:${isMobile ? 1.55 : 1.7}; max-width:760px;">Pick the mood for this session. Story mode is the full cinematic campaign, Territory War is the live holder battleground, and Spore Collector is the clean sandbox loop.</p>
+                                <p style="color:#aab6b0; font-size:${isMobile ? 8 : 11}px; margin:0; letter-spacing:1px; line-height:${isMobile ? 1.45 : 1.7}; max-width:760px;">${modeIntroCopy}</p>
                             </div>
                         </div>
                     </div>
@@ -9427,12 +9472,7 @@ class Game3D {
                             title: 'STORY MODE',
                             subtitle: 'FULL CAMPAIGN',
                             active: current === 'STORY',
-                            notes: [
-                                { text: 'Full quest, combat, and progression' },
-                                { text: 'Reclaim 7 Crown Shards' },
-                                { text: 'NPCs, shops, upgrades, and daily rot' },
-                                { text: 'Bosses, dungeons, and corrupted warzones' }
-                            ],
+                            notes: storyNotes,
                             buttonLabel: current === 'STORY' ? 'CONTINUE STORY' : 'BEGIN STORY',
                             buttonTextColor: 'black'
                         })}
@@ -9445,13 +9485,8 @@ class Game3D {
                             subtitle: territoryUnlocked ? 'LIVE CLAN CONTROL' : 'LIVE HOLDER ACCESS',
                             active: current === 'TERRITORY',
                             locked: !territoryUnlocked,
-                            warning: territoryUnlocked ? 'Every portal is open. Region flags, clan pressure, portal banners, and hostile buffs all update live.' : `Requires a verified wallet holding ${access.minimum.toLocaleString('en-US')} MYCO to enter live war.`,
-                            notes: [
-                                { text: 'All portals open, every warfront reachable instantly' },
-                                { text: 'Regions flip live based on clan pressure' },
-                                { text: 'Stand on a region flag for 20s to raise your banner' },
-                                { text: 'Owned land buffs allies, hostile land fights back', accent: territoryUnlocked ? '#fff2a8' : '#ffcfad' }
-                            ],
+                            warning: territoryWarning,
+                            notes: territoryNotes,
                             buttonLabel: territoryButtonLabel
                         })}
                         ${renderModeCard({
@@ -9462,12 +9497,7 @@ class Game3D {
                             title: 'SPORE COLLECTOR',
                             subtitle: 'SANDBOX · NO COMBAT',
                             active: current === 'COLLECTOR',
-                            notes: [
-                                { text: 'All regions open, every portal unlocked' },
-                                { text: 'Collect up to 1000 spores per day', accent: '#fff2a8' },
-                                { text: 'Burn spores at the Burn Pit' },
-                                { text: 'No enemies, no bosses, no quest pressure' }
-                            ],
+                            notes: collectorNotes,
                             buttonLabel: current === 'COLLECTOR' ? 'CONTINUE COLLECTING' : 'COLLECT SPORES'
                         })}
                     </div>
