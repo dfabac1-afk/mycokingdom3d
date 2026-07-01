@@ -26,7 +26,7 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { Player3D, Enemy3D, RotInfectedEnemy3D, LightPool3D, Boss3D, MossfangSentinel3D, ShardcapWarden3D, DarkMycelius3D, GrandRotBoss3D, BogbellyMyconid3D, WidowcapWeaver3D, Collectible3D, NPC3D, Portal3D, Chest3D, NetTrap3D, Hazard3D, PuzzlePillar3D, SporeBomb3D, VoxelCorruptedHazard3D, InteractiveBuilding3D, RotCluster3D, CitadelGate3D, TerritoryFlag3D, RemoteClanPlayer3D } from './entities_3d.js';
 import { CONFIG } from './config.js';
 
-const LIVE_BUILD = '1.9.67';
+const LIVE_BUILD = '1.9.68';
 const CLOUD_SESSION_KEY = 'myco_quest_wallet_session_v1';
 const CLOUD_BALANCE_KEY = 'myco_quest_wallet_balance_v1';
 const CLOUD_LAST_SYNC_KEY = 'myco_quest_wallet_last_sync_v1';
@@ -9041,16 +9041,16 @@ class Game3D {
         // every button, and let the menu breathe vertically so the title is always
         // the first thing visible.
         const isMobile = !!this.isMobile;
-        const titleSz = isMobile ? 30 : 48;
-        const subSz   = isMobile ? 10 : 13;
-        const lvlSz   = isMobile ? 10 : 10;
+        const titleSz = isMobile ? 28 : 48;
+        const subSz   = isMobile ? 9 : 13;
+        const lvlSz   = isMobile ? 9 : 10;
         const padIn   = isMobile ? 18 : 50;
-        const gapSz   = isMobile ? 9 : 15;
-        const startFs = isMobile ? 15 : 18;
-        const btnFs   = isMobile ? 11 : 12;
-        const smFs    = isMobile ? 10 : 10;
-        const topPad  = isMobile ? 'calc(10px + env(safe-area-inset-top))' : '40px';
-        const botPad  = isMobile ? 'calc(22px + env(safe-area-inset-bottom))' : '40px';
+        const gapSz   = isMobile ? 8 : 15;
+        const startFs = isMobile ? 14 : 18;
+        const btnFs   = isMobile ? 10 : 12;
+        const smFs    = isMobile ? 9 : 10;
+        const topPad  = isMobile ? 'calc(8px + env(safe-area-inset-top))' : '40px';
+        const botPad  = isMobile ? 'calc(12px + env(safe-area-inset-bottom))' : '40px';
         const tapBtn  = 'min-height: 44px; touch-action: manipulation; -webkit-tap-highlight-color: transparent;';
         const modeLabel = this.getGameModeLabel();
         const modeAccent = this.getGameModeAccent();
@@ -9088,22 +9088,25 @@ class Game3D {
         const mobileWalletHint = access.walletVerified
             ? walletHint
             : `Guest play is open now. Later, use Phantom to unlock live war with ${minimumMyco.toLocaleString('en-US')} KING MYCO.`;
+        const compactWalletHint = access.walletVerified
+            ? walletHint
+            : isMobile
+                ? `Guest now, Phantom later for live war + cloud save.`
+                : `Guest now, connect Phantom later for live war + cloud save.`;
+        const showCloudStatusCard = !!(access.walletVerified || this.walletSessionToken || this.cloudSyncStatus === 'error');
+        const cloudStatusBody = access.walletVerified || this.walletSessionToken
+            ? cloudStatus.body
+            : 'Guest progress saves locally on this device until you connect Phantom.';
         const holderPerksPanelId = 'holder-perks-panel';
         const holderPerksToggleId = 'holder-perks-toggle';
-        const holderPerksMarkup = isMobile
-            ? `
-                <button id="${holderPerksToggleId}" style="width:100%; padding:11px 12px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.1); color:#d9e6df; font-family:inherit; font-size:9px; cursor:pointer; border-radius:12px; ${tapBtn}">
-                    VIEW HOLDER TIERS
-                </button>
-                <div id="${holderPerksPanelId}" style="display:none; width:100%; grid-template-columns:1fr; gap:8px;">
-                    ${this.renderHolderTierLadder(access, { compact: true })}
-                </div>
-            `
-            : `
-                <div id="${holderPerksPanelId}" style="width:100%; display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px;">
-                    ${this.renderHolderTierLadder(access, { compact: true })}
-                </div>
-            `;
+        const holderPerksMarkup = `
+            <button id="${holderPerksToggleId}" style="width:100%; padding:${isMobile ? '11px 12px' : '10px 12px'}; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.1); color:#d9e6df; font-family:inherit; font-size:${isMobile ? 9 : 8}px; cursor:pointer; border-radius:12px; ${tapBtn}">
+                VIEW HOLDER TIERS
+            </button>
+            <div id="${holderPerksPanelId}" style="display:none; width:100%; grid-template-columns:${isMobile ? '1fr' : 'repeat(2, minmax(0, 1fr))'}; gap:8px;">
+                ${this.renderHolderTierLadder(access, { compact: true })}
+            </div>
+        `;
         const graphicsHelper = this.progression.data.settings.lowPerfMode === true
             ? (isMobile ? 'BATTERY SAVER · longer play' : 'BATTERY SAVER · longer sessions')
             : this.progression.data.settings.lowPerfMode === false
@@ -9130,11 +9133,11 @@ class Game3D {
                 </div>
             `
             : `
-                <div style="display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:10px; width:100%; margin-bottom:22px; position:relative; z-index:1; text-align:left;">
+                <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:8px; width:100%; margin-bottom:16px; position:relative; z-index:1; text-align:left;">
                     ${openerHighlights.map(item => `
-                        <div style="padding:12px; background:rgba(255,255,255,0.035); border:1px solid rgba(255,255,255,0.08); border-radius:14px; min-height:86px; display:flex; flex-direction:column; justify-content:flex-start; gap:6px;">
+                        <div style="padding:9px 12px; background:rgba(255,255,255,0.035); border:1px solid rgba(255,255,255,0.08); border-radius:999px; display:flex; align-items:center; gap:8px;">
                             <div style="font-size:8px; color:${item.accent}; letter-spacing:1px;">${item.label}</div>
-                            <div style="font-size:9px; color:#d4ded8; line-height:1.6;">${item.value}</div>
+                            <div style="font-size:8px; color:#d4ded8; line-height:1.45;">${item.value}</div>
                         </div>
                     `).join('')}
                 </div>
@@ -9161,25 +9164,23 @@ class Game3D {
                     </div>
                 `
                 : `
-                    <div style="display:grid; grid-template-columns:1fr; gap:10px;">
+                    <div style="display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px;">
                         <button id="settings-button" style="padding: 12px; font-size: ${btnFs}px; background: #2f3436; border: 1px solid #6f7a74; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">SETTINGS</button>
-                    </div>
-                    <div style="display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:10px;">
+                        <button id="wallet-button-inline" style="padding: 12px; font-size: ${smFs}px; background: rgba(106,13,173,0.16); border: 1px solid #6a0dad; color: #e4d0ff; font-family: inherit; cursor: pointer; ${tapBtn}">WALLET ACCESS</button>
                         <button id="leaderboard-button" style="padding: 12px; font-size: ${smFs}px; background: rgba(0,255,255,0.12); border: 1px solid #00ffff; color: #b8ffff; font-family: inherit; cursor: pointer; ${tapBtn}">LIVE LEADERBOARD</button>
                         <button id="hall-of-fame-button" style="padding: 12px; font-size: ${smFs}px; background: rgba(255,170,0,0.12); border: 1px solid #ffaa00; color: #ffd280; font-family: inherit; cursor: pointer; ${tapBtn}">HALL OF FAME</button>
-                        <button id="wallet-button-inline" style="padding: 12px; font-size: ${smFs}px; background: rgba(106,13,173,0.16); border: 1px solid #6a0dad; color: #e4d0ff; font-family: inherit; cursor: pointer; ${tapBtn}">WALLET ACCESS</button>
                     </div>
                 `;
 
         this.uiOverlay.innerHTML = `
-            <div id="start-screen-wrap" style="pointer-events: auto; width: 100%; min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; padding: ${topPad} ${isMobile ? 16 : 18}px ${botPad} ${isMobile ? 16 : 18}px; box-sizing: border-box; background: radial-gradient(circle at top, rgba(57,255,20,0.08), transparent 30%), linear-gradient(180deg, rgba(1,4,3,0.74), rgba(0,0,0,0.8)); overflow-y: auto;">
-                <div id="start-screen" style="display: flex; flex-direction: column; align-items: center; width: 100%; max-width: ${isMobile ? 340 : 560}px; margin: 0 auto; background: linear-gradient(180deg, rgba(10,16,18,0.96), rgba(3,7,8,0.92)); padding: ${isMobile ? 18 : 26}px ${isMobile ? 16 : 24}px ${isMobile ? 18 : 24}px; border: 1px solid rgba(255,255,255,0.1); border-top: 3px solid rgba(57,255,20,0.82); border-radius: 22px; box-shadow: 0 28px 80px rgba(0,0,0,0.52), 0 0 32px rgba(57,255,20,0.14), inset 0 1px 0 rgba(255,255,255,0.08); text-align: center; box-sizing: border-box; backdrop-filter: blur(10px); position: relative; overflow: hidden;">
+            <div id="start-screen-wrap" style="pointer-events: auto; width: 100%; min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; padding: ${topPad} ${isMobile ? 14 : 18}px ${botPad} ${isMobile ? 14 : 18}px; box-sizing: border-box; background: radial-gradient(circle at top, rgba(57,255,20,0.08), transparent 30%), linear-gradient(180deg, rgba(1,4,3,0.74), rgba(0,0,0,0.8)); overflow-y: auto;">
+                <div id="start-screen" style="display: flex; flex-direction: column; align-items: center; width: 100%; max-width: ${isMobile ? 340 : 560}px; margin: 0 auto; background: linear-gradient(180deg, rgba(10,16,18,0.96), rgba(3,7,8,0.92)); padding: ${isMobile ? 16 : 22}px ${isMobile ? 15 : 22}px ${isMobile ? 16 : 22}px; border: 1px solid rgba(255,255,255,0.1); border-top: 3px solid rgba(57,255,20,0.82); border-radius: 22px; box-shadow: 0 28px 80px rgba(0,0,0,0.52), 0 0 32px rgba(57,255,20,0.14), inset 0 1px 0 rgba(255,255,255,0.08); text-align: center; box-sizing: border-box; backdrop-filter: blur(10px); position: relative; overflow: hidden;">
                     <div style="position:absolute; inset:auto -10% 58% auto; width:${isMobile ? 160 : 220}px; height:${isMobile ? 160 : 220}px; border-radius:50%; background:radial-gradient(circle, rgba(57,255,20,0.18), transparent 68%); pointer-events:none;"></div>
                     <div style="position:absolute; inset:58% auto auto -8%; width:${isMobile ? 140 : 180}px; height:${isMobile ? 140 : 180}px; border-radius:50%; background:radial-gradient(circle, rgba(0,255,255,0.12), transparent 70%); pointer-events:none;"></div>
 
                     <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:${isMobile ? 6 : 8}px; width:100%; margin-bottom:${isMobile ? 12 : 16}px; position:relative; z-index:1;">
                         ${heroSignals.map(signal => `
-                            <div style="padding:8px 10px; min-width:${isMobile ? '96px' : '108px'}; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:12px; text-align:left; box-shadow:inset 0 1px 0 rgba(255,255,255,0.05);">
+                            <div style="padding:${isMobile ? '7px 9px' : '7px 10px'}; min-width:${isMobile ? '92px' : '96px'}; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:12px; text-align:left; box-shadow:inset 0 1px 0 rgba(255,255,255,0.05);">
                                 <div style="font-size:7px; color:#8a9891; margin-bottom:4px; letter-spacing:1px;">${signal.label}</div>
                                 <div style="font-size:8px; color:${signal.accent}; line-height:1.45;">${signal.value}</div>
                             </div>
@@ -9187,10 +9188,10 @@ class Game3D {
                     </div>
 
                     <div style="position:relative; z-index:1; display:flex; flex-direction:column; align-items:center; gap:${isMobile ? 6 : 8}px; margin-bottom:${isMobile ? 14 : 18}px;">
-                        <div style="padding:6px 12px; background:rgba(57,255,20,0.1); border:1px solid rgba(57,255,20,0.24); border-radius:999px; font-size:8px; color:#c6ffbf; letter-spacing:1.4px;">PSYCHEDELIC ACTION RPG · LIVE KINGDOM BUILD</div>
+                        <div style="padding:6px 12px; background:rgba(57,255,20,0.1); border:1px solid rgba(57,255,20,0.24); border-radius:999px; font-size:${isMobile ? 7 : 8}px; color:#c6ffbf; letter-spacing:${isMobile ? 1.1 : 1.4}px;">PSYCHEDELIC ACTION RPG · LIVE KINGDOM BUILD</div>
                         <h1 class="neon-text" style="font-size: ${titleSz}px; margin: 0; color: #39FF14; text-shadow: 0 0 12px rgba(57,255,20,0.9), 0 0 28px rgba(57,255,20,0.22); line-height: 1.02;">MYCO KINGDOM</h1>
-                        <p style="font-size: ${subSz}px; margin: 0; color: #f5fff5; letter-spacing: ${isMobile ? 1.3 : 2}px; line-height: 1.55; max-width: ${isMobile ? 230 : 390}px;">${subtitleHtml}</p>
-                        <p style="font-size: ${lvlSz}px; margin: 0; color: #b6c8c0; letter-spacing: 1px; line-height:1.7; max-width:${isMobile ? '100%' : '430px'};">${statusLine}</p>
+                        <p style="font-size: ${subSz}px; margin: 0; color: #f5fff5; letter-spacing: ${isMobile ? 1.1 : 2}px; line-height: 1.45; max-width: ${isMobile ? 220 : 390}px;">${subtitleHtml}</p>
+                        <p style="font-size: ${lvlSz}px; margin: 0; color: #b6c8c0; letter-spacing: 1px; line-height:1.55; max-width:${isMobile ? '100%' : '430px'};">${statusLine}</p>
                     </div>
 
                     ${openerHighlightsMarkup}
@@ -9204,8 +9205,8 @@ class Game3D {
 
                     <div style="width: 100%; height: 1px; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.16), transparent); margin-bottom: ${isMobile ? 12 : 20}px;"></div>
 
-                    <div style="display: flex; flex-direction: column; gap: 10px; align-items: center; width: 100%; position:relative; z-index:1;">
-                        <div style="width:100%; padding:12px; background:rgba(255,255,255,0.035); border:1px solid rgba(255,255,255,0.08); border-radius:16px; box-sizing:border-box; display:grid; gap:10px; text-align:left;">
+                    <div style="display: flex; flex-direction: column; gap: 8px; align-items: center; width: 100%; position:relative; z-index:1;">
+                        <div style="width:100%; padding:${isMobile ? 10 : 11}px; background:rgba(255,255,255,0.035); border:1px solid rgba(255,255,255,0.08); border-radius:16px; box-sizing:border-box; display:grid; gap:8px; text-align:left;">
                             <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start; flex-wrap:wrap;">
                                 <div>
                                     <div style="font-size:8px; color:#9cb8b1; letter-spacing:1px; margin-bottom:4px;">WALLET + CLOUD STATUS</div>
@@ -9213,32 +9214,36 @@ class Game3D {
                                 </div>
                                 <div style="padding:6px 10px; border-radius:999px; border:1px solid ${access.walletVerified ? 'rgba(0,255,255,0.28)' : 'rgba(255,170,0,0.22)'}; background:${access.walletVerified ? 'rgba(0,255,255,0.08)' : 'rgba(255,170,0,0.08)'}; font-size:7px; color:${access.walletVerified ? '#8ef9ff' : '#ffd280'};">${access.walletVerified ? 'VERIFIED HOLDER' : 'GUEST READY'}</div>
                             </div>
-                            <button id="wallet-button" style="width: 100%; padding: 12px 16px; font-size: ${smFs}px; background: ${access.walletVerified ? 'rgba(0,255,255,0.14)' : isConnected ? '#333' : 'rgba(106,13,173,0.16)'}; border: 1px solid ${access.walletVerified ? '#00ffff' : '#6a0dad'}; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">
-                                ${access.walletVerified ? 'SYNC WALLET + CLOUD SAVE' : walletLabel}
-                            </button>
-                            <div style="font-size: ${isMobile ? 9 : 8}px; color: #a0aba6; line-height: 1.62; max-width: ${isMobile ? '100%' : '100%'};">${isMobile ? mobileWalletHint : walletHint}</div>
-                            <div style="width: 100%; padding: 10px 12px; background: rgba(0,0,0,0.28); border: 1px solid rgba(0,255,255,0.2); border-radius: 10px; text-align: left; box-sizing: border-box;">
-                                <div style="font-size: 8px; color: #00ffff; letter-spacing: 1px; margin-bottom: 4px;">${cloudStatus.title}</div>
-                                <div style="font-size: 8px; color: #8fa6a2; line-height: 1.55;">${cloudStatus.body}</div>
+                            <div style="display:grid; grid-template-columns:${isMobile ? '1fr' : 'minmax(0, 1.15fr) minmax(0, 0.85fr)'}; gap:8px; align-items:center;">
+                                <button id="wallet-button" style="width: 100%; padding: 11px 14px; font-size: ${smFs}px; background: ${access.walletVerified ? 'rgba(0,255,255,0.14)' : isConnected ? '#333' : 'rgba(106,13,173,0.16)'}; border: 1px solid ${access.walletVerified ? '#00ffff' : '#6a0dad'}; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">
+                                    ${access.walletVerified ? 'SYNC WALLET + CLOUD SAVE' : walletLabel}
+                                </button>
+                                <div style="font-size: 7px; color: #a0aba6; line-height: 1.5; max-width: 100%;">${isMobile ? mobileWalletHint : compactWalletHint}</div>
                             </div>
+                            ${showCloudStatusCard ? `
+                                <div style="width: 100%; padding: 8px 10px; background: rgba(0,0,0,0.28); border: 1px solid rgba(0,255,255,0.2); border-radius: 10px; text-align: left; box-sizing: border-box;">
+                                    <div style="font-size: 8px; color: #00ffff; letter-spacing: 1px; margin-bottom: 4px;">${cloudStatus.title}</div>
+                                    <div style="font-size: 7px; color: #8fa6a2; line-height: 1.5;">${cloudStatusBody}</div>
+                                </div>
+                            ` : ''}
                         </div>
                         ${holderPerksMarkup}
                         ${isConnected ? `<button id="disconnect-wallet" style="font-size: 8px; color: #77807d; background: none; border: none; cursor: pointer; text-decoration: underline; ${tapBtn}">Disconnect wallet</button>` : ''}
                     </div>
 
-                    <div style="margin-top: ${isMobile ? 14 : 20}px; width: 100%; display: flex; flex-direction: ${isMobile ? 'column' : 'row'}; align-items: ${isMobile ? 'stretch' : 'center'}; justify-content: space-between; gap: ${isMobile ? 8 : 10}px; padding: 10px 12px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; position:relative; z-index:1;">
+                    <div style="margin-top: ${isMobile ? 8 : 14}px; width: 100%; display: flex; flex-direction: ${isMobile ? 'column' : 'row'}; align-items: ${isMobile ? 'stretch' : 'center'}; justify-content: space-between; gap: ${isMobile ? 6 : 10}px; padding: ${isMobile ? '8px 10px' : '10px 12px'}; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; position:relative; z-index:1;">
                         <div style="text-align: left; flex: 1;">
-                            <div style="font-size: 9px; color: #ccc; letter-spacing: 1px;">GRAPHICS PROFILE</div>
-                            <div style="font-size: 7px; color: #8b9992; margin-top: 4px; line-height: 1.55;">
+                            <div style="font-size: ${isMobile ? 8 : 9}px; color: #ccc; letter-spacing: 1px;">GRAPHICS PROFILE</div>
+                            <div style="font-size: ${isMobile ? 6 : 7}px; color: #8b9992; margin-top: 3px; line-height: 1.45;">
                                 ${graphicsHelper}
                             </div>
                         </div>
-                        <button id="low-perf-toggle" style="padding: 9px 12px; font-size: 9px; background: ${this.progression.data.settings.lowPerfMode === true ? '#ff8800' : this.progression.data.settings.lowPerfMode === false ? '#39FF14' : '#444'}; color: ${this.progression.data.settings.lowPerfMode === false ? '#000' : '#fff'}; border: none; font-family: inherit; cursor: pointer; min-width: 84px; width: ${isMobile ? '100%' : 'auto'}; ${tapBtn}">
+                        <button id="low-perf-toggle" style="padding: ${isMobile ? '8px 12px' : '9px 12px'}; font-size: ${isMobile ? 8 : 9}px; background: ${this.progression.data.settings.lowPerfMode === true ? '#ff8800' : this.progression.data.settings.lowPerfMode === false ? '#39FF14' : '#444'}; color: ${this.progression.data.settings.lowPerfMode === false ? '#000' : '#fff'}; border: none; font-family: inherit; cursor: pointer; min-width: ${isMobile ? '0' : '84px'}; width: ${isMobile ? '100%' : 'auto'}; ${tapBtn}">
                             ${this.progression.data.settings.lowPerfMode === true ? 'BATTERY' : this.progression.data.settings.lowPerfMode === false ? 'HIGH' : 'AUTO'}
                         </button>
                     </div>
 
-                    <div style="margin-top: ${isMobile ? 16 : 20}px; font-size: ${isMobile ? 9 : 8}px; color: #7e8b85; letter-spacing: 1px; opacity: 0.95; position:relative; z-index:1;">
+                    <div style="margin-top: ${isMobile ? 10 : 20}px; font-size: ${isMobile ? 8 : 8}px; color: #7e8b85; letter-spacing: 1px; opacity: 0.95; position:relative; z-index:1;">
                         LIVE BUILD v${this.getGameBuild()}
                     </div>
                 </div>
@@ -9374,7 +9379,7 @@ class Game3D {
         const isMobile = !!this.isMobile;
         const renderModeCard = ({ id, icon, accent, glow, title, subtitle, notes, buttonLabel, buttonTextColor = 'white', active, locked = false, warning = null }) => `
             <div class="mode-card" id="mode-${id}"
-                 style="position:relative; min-height:${isMobile ? '0' : '430px'}; background:linear-gradient(180deg, rgba(12,16,18,0.98), rgba(6,9,11,0.94)); border:1px solid ${active ? accent : 'rgba(255,255,255,0.08)'}; border-top:3px solid ${accent}; border-radius:20px; padding:${isMobile ? 14 : 22}px; cursor:pointer; transition:all 0.25s; opacity:${locked ? 0.86 : 1}; box-shadow:${active ? `0 22px 56px rgba(0,0,0,0.46), 0 0 28px ${glow}` : '0 18px 38px rgba(0,0,0,0.32)'}; overflow:hidden;"
+                 style="position:relative; min-height:${isMobile ? '0' : '430px'}; background:linear-gradient(180deg, rgba(12,16,18,0.98), rgba(6,9,11,0.94)); border:1px solid ${active ? accent : 'rgba(255,255,255,0.08)'}; border-top:3px solid ${accent}; border-radius:20px; padding:${isMobile ? 12 : 22}px; cursor:pointer; transition:all 0.25s; opacity:${locked ? 0.86 : 1}; box-shadow:${active ? `0 22px 56px rgba(0,0,0,0.46), 0 0 28px ${glow}` : '0 18px 38px rgba(0,0,0,0.32)'}; overflow:hidden;"
                  onmouseover="this.style.borderColor='${accent}'; this.style.boxShadow='0 24px 60px rgba(0,0,0,0.48), 0 0 30px ${glow}'; this.style.transform='translateY(-6px)'"
                  onmouseout="this.style.borderColor='${active ? accent : 'rgba(255,255,255,0.08)'}'; this.style.boxShadow='${active ? `0 22px 56px rgba(0,0,0,0.46), 0 0 28px ${glow}` : '0 18px 38px rgba(0,0,0,0.32)'}'; this.style.transform='translateY(0)'">
                 <div style="position:absolute; inset:auto -12% 68% auto; width:150px; height:150px; border-radius:50%; background:radial-gradient(circle, ${glow}, transparent 72%); pointer-events:none;"></div>
@@ -9382,29 +9387,29 @@ class Game3D {
                     <div>
                         <div style="font-size:${isMobile ? 28 : 34}px; margin-bottom:${isMobile ? 8 : 10}px; filter:drop-shadow(0 10px 18px rgba(0,0,0,0.35));">${icon}</div>
                         <h3 style="color:${accent}; font-size:${isMobile ? 14 : 16}px; margin:0 0 6px 0; letter-spacing:1px;">${title}</h3>
-                        <p style="color:#98a39e; font-size:9px; letter-spacing:1.1px; margin:0; line-height:1.5;">${subtitle}</p>
+                        <p style="color:#98a39e; font-size:${isMobile ? 8 : 9}px; letter-spacing:1.1px; margin:0; line-height:1.45;">${subtitle}</p>
                     </div>
                     <div style="padding:6px 10px; border-radius:999px; background:${active ? glow.replace('0.28', '0.16') : 'rgba(255,255,255,0.04)'}; border:1px solid ${active ? accent : 'rgba(255,255,255,0.08)'}; color:${active ? accent : '#b7c0bc'}; font-size:7px; letter-spacing:1px; white-space:nowrap;">${active ? 'ACTIVE PATH' : 'AVAILABLE'}</div>
                 </div>
                 <ul style="position:relative; z-index:1; color:#dfe7e2; font-size:${isMobile ? 9 : 11}px; line-height:${isMobile ? 1.55 : 1.7}; padding-left:${isMobile ? 16 : 18}px; margin:0 0 ${isMobile ? 12 : 18}px 0; display:grid; gap:${isMobile ? 4 : 6}px;">
-                    ${notes.slice(0, isMobile ? 3 : notes.length).map(note => `<li style="color:${note.accent || '#dfe7e2'};">${note.text}</li>`).join('')}
+                    ${notes.slice(0, isMobile ? 2 : notes.length).map(note => `<li style="color:${note.accent || '#dfe7e2'};">${note.text}</li>`).join('')}
                 </ul>
                 ${warning ? `<div style="position:relative; z-index:1; margin:0 0 ${isMobile ? 12 : 16}px 0; padding:${isMobile ? '8px 10px' : '10px 12px'}; border-radius:12px; background:rgba(255,170,0,0.08); border:1px solid rgba(255,170,0,0.18); color:#ffd280; font-size:8px; line-height:1.55;">${warning}</div>` : ''}
-                <button id="pick-${id}" style="position:relative; z-index:1; width:100%; padding:${isMobile ? 12 : 13}px; background:linear-gradient(135deg, ${accent}, ${accent === '#39FF14' ? '#7dff64' : accent === '#ff8a3d' ? '#ffb36d' : '#d08dff'}); border:none; color:${buttonTextColor}; font-family:inherit; font-weight:bold; cursor:pointer; box-shadow:0 14px 30px rgba(0,0,0,0.24);">
+                <button id="pick-${id}" style="position:relative; z-index:1; width:100%; padding:${isMobile ? 11 : 13}px; background:linear-gradient(135deg, ${accent}, ${accent === '#39FF14' ? '#7dff64' : accent === '#ff8a3d' ? '#ffb36d' : '#d08dff'}); border:none; color:${buttonTextColor}; font-family:inherit; font-weight:bold; cursor:pointer; box-shadow:0 14px 30px rgba(0,0,0,0.24);">
                     ${buttonLabel}
                 </button>
             </div>
         `;
         this.uiOverlay.innerHTML = `
-            <div style="pointer-events: auto; display: flex; flex-direction: column; align-items: center; width: 100%; min-height: 100%; background: radial-gradient(circle at top, rgba(57,255,20,0.06), transparent 26%), linear-gradient(180deg, rgba(0,0,0,0.92), rgba(2,5,6,0.96)); padding:${isMobile ? '20px 14px 26px' : '34px 24px 40px'}; overflow-y: auto; box-sizing:border-box;">
+            <div style="pointer-events: auto; display: flex; flex-direction: column; align-items: center; width: 100%; min-height: 100%; background: radial-gradient(circle at top, rgba(57,255,20,0.06), transparent 26%), linear-gradient(180deg, rgba(0,0,0,0.92), rgba(2,5,6,0.96)); padding:${isMobile ? '18px 14px 24px' : '30px 24px 36px'}; overflow-y: auto; box-sizing:border-box;">
                 <div style="width:100%; max-width:1180px; display:grid; gap:${isMobile ? 18 : 24}px;">
-                    <div style="background:linear-gradient(180deg, rgba(9,14,16,0.95), rgba(4,7,8,0.92)); border:1px solid rgba(255,255,255,0.08); border-top:3px solid #39FF14; border-radius:22px; padding:${isMobile ? 18 : 24}px; box-shadow:0 24px 64px rgba(0,0,0,0.42); position:relative; overflow:hidden;">
+                    <div style="background:linear-gradient(180deg, rgba(9,14,16,0.95), rgba(4,7,8,0.92)); border:1px solid rgba(255,255,255,0.08); border-top:3px solid #39FF14; border-radius:22px; padding:${isMobile ? 16 : 24}px; box-shadow:0 24px 64px rgba(0,0,0,0.42); position:relative; overflow:hidden;">
                         <div style="position:absolute; inset:auto -8% 58% auto; width:190px; height:190px; border-radius:50%; background:radial-gradient(circle, rgba(57,255,20,0.16), transparent 70%);"></div>
-                        <div style="position:relative; z-index:1; display:grid; gap:14px;">
-                            <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+                        <div style="position:relative; z-index:1; display:grid; gap:${isMobile ? 12 : 14}px;">
+                            <div style="display:flex; flex-wrap:wrap; gap:${isMobile ? 6 : 8}px; align-items:center;">
                                 <div style="padding:7px 12px; background:rgba(57,255,20,0.1); border:1px solid rgba(57,255,20,0.24); border-radius:999px; font-size:8px; color:#c7ffbf; letter-spacing:1.2px;">KINGDOM DEPLOYMENT</div>
-                                <div style="padding:7px 12px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:999px; font-size:8px; color:#b7c0bc; letter-spacing:1.2px;">CURRENT: ${this.getGameModeLabel()}</div>
-                                <div style="padding:7px 12px; background:${territoryUnlocked ? 'rgba(255,138,61,0.12)' : 'rgba(255,255,255,0.04)'}; border:1px solid ${territoryUnlocked ? 'rgba(255,138,61,0.24)' : 'rgba(255,255,255,0.08)'}; border-radius:999px; font-size:8px; color:${territoryUnlocked ? '#ffb36d' : '#b7c0bc'}; letter-spacing:1.2px;">${territoryUnlocked ? 'LIVE WAR UNLOCKED' : `${access.minimum.toLocaleString('en-US')} MYCO FOR WAR`}</div>
+                                <div style="padding:7px 12px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:999px; font-size:${isMobile ? 7 : 8}px; color:#b7c0bc; letter-spacing:1.2px;">CURRENT: ${this.getGameModeLabel()}</div>
+                                <div style="padding:7px 12px; background:${territoryUnlocked ? 'rgba(255,138,61,0.12)' : 'rgba(255,255,255,0.04)'}; border:1px solid ${territoryUnlocked ? 'rgba(255,138,61,0.24)' : 'rgba(255,255,255,0.08)'}; border-radius:999px; font-size:${isMobile ? 7 : 8}px; color:${territoryUnlocked ? '#ffb36d' : '#b7c0bc'}; letter-spacing:1.2px;">${territoryUnlocked ? 'LIVE WAR UNLOCKED' : `${access.minimum.toLocaleString('en-US')} MYCO FOR WAR`}</div>
                             </div>
                             <div>
                                 <h2 class="neon-text" style="margin:0 0 8px 0; font-size:${isMobile ? 22 : 30}px; color:#39FF14;">CHOOSE YOUR PATH</h2>
