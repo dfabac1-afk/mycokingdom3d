@@ -150,7 +150,44 @@
       }
     </script>
     <style>
-      html, body { width: 100%; height: 100%; min-height: 100dvh; margin: 0; padding: 0; background-color: black; overflow: hidden; }
+      :root {
+        color-scheme: dark;
+        --myco-bg: #050807;
+        --myco-panel: rgba(7, 12, 14, 0.88);
+        --myco-panel-strong: rgba(4, 8, 9, 0.94);
+        --myco-green: #39FF14;
+        --myco-cyan: #00ffff;
+        --myco-gold: #ffaa00;
+        --myco-purple: #aa44ff;
+        --myco-border: rgba(255, 255, 255, 0.1);
+      }
+
+      html, body {
+        width: 100%;
+        height: 100%;
+        min-height: 100dvh;
+        margin: 0;
+        padding: 0;
+        background:
+          radial-gradient(circle at top, rgba(57,255,20,0.08), transparent 28%),
+          radial-gradient(circle at 20% 80%, rgba(0,255,255,0.06), transparent 24%),
+          linear-gradient(180deg, #07110d 0%, #040706 45%, #020303 100%);
+        overflow: hidden;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background:
+          radial-gradient(circle at 50% 0%, rgba(255,255,255,0.08), transparent 24%),
+          linear-gradient(180deg, rgba(255,255,255,0.04), transparent 16%, transparent 84%, rgba(0,0,0,0.22));
+        opacity: 0.65;
+      }
+
       #game-container { width: 100%; height: 100%; min-height: 100dvh; margin: 0; padding: 0; position: relative; background-color: black; overflow: hidden; touch-action: manipulation; }
       /* V1.9.40 - Real mobile scroll fix.
          `touch-action: none` on #game-container blocked native vertical panning
@@ -159,6 +196,21 @@
          Keep gesture suppression on the WebGL canvas only, and let menu/overlay
          DOM nodes opt into pan-y scrolling normally. */
       canvas { display: block; touch-action: none; }
+
+      ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+
+      ::-webkit-scrollbar-track {
+        background: rgba(255,255,255,0.04);
+      }
+
+      ::-webkit-scrollbar-thumb {
+        background: linear-gradient(180deg, rgba(57,255,20,0.48), rgba(0,255,255,0.38));
+        border-radius: 999px;
+        border: 2px solid rgba(3,5,4,0.9);
+      }
       
       .neon-text {
         color: #fff;
@@ -196,10 +248,21 @@
       button {
         cursor: pointer;
         font-family: 'Press Start 2P', cursive;
-        transition: transform 0.1s;
+        transition: transform 0.12s ease, box-shadow 0.18s ease, filter 0.18s ease, border-color 0.18s ease;
+        border-radius: 10px;
+        box-shadow: 0 10px 24px rgba(0,0,0,0.24);
       }
+
+      @media (hover: hover) and (pointer: fine) {
+        button:hover {
+          transform: translateY(-1px);
+          filter: brightness(1.05);
+          box-shadow: 0 14px 30px rgba(0,0,0,0.28);
+        }
+      }
+
       button:active {
-        transform: scale(0.95);
+        transform: translateY(1px) scale(0.98);
       }
     </style>
 </head>

@@ -26,7 +26,7 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { Player3D, Enemy3D, RotInfectedEnemy3D, LightPool3D, Boss3D, MossfangSentinel3D, ShardcapWarden3D, DarkMycelius3D, GrandRotBoss3D, BogbellyMyconid3D, WidowcapWeaver3D, Collectible3D, NPC3D, Portal3D, Chest3D, NetTrap3D, Hazard3D, PuzzlePillar3D, SporeBomb3D, VoxelCorruptedHazard3D, InteractiveBuilding3D, RotCluster3D, CitadelGate3D, TerritoryFlag3D, RemoteClanPlayer3D } from './entities_3d.js';
 import { CONFIG } from './config.js';
 
-const LIVE_BUILD = '1.9.62';
+const LIVE_BUILD = '1.9.65';
 const CLOUD_SESSION_KEY = 'myco_quest_wallet_session_v1';
 const CLOUD_BALANCE_KEY = 'myco_quest_wallet_balance_v1';
 const CLOUD_LAST_SYNC_KEY = 'myco_quest_wallet_last_sync_v1';
@@ -470,6 +470,10 @@ class ProgressionManager {
                     crown: null
                 },
                 loreDiscovered: ['start'],
+                pixelRelics: {},
+                displayedRelics: [],
+                relicFindLog: [],
+                mintedRelics: {},
                 playerPosition: null, // Saved {x, y, z}
                 dailyBurnedAmount: 0,
                 totalBurned: 0,
@@ -521,6 +525,7 @@ class ProgressionManager {
                     threats: {},
                     dwellingTier: 1
                 },
+                regionBuilds: {},
                 walletTierClaims: {},
                 quests: {
                     goldenSpore: {
@@ -542,6 +547,10 @@ class ProgressionManager {
         if (data.metNetworkGhost === undefined) data.metNetworkGhost = false;
         if (!Number.isFinite(data.lastSavedAt)) data.lastSavedAt = Date.now();
         if (data.loreDiscovered === undefined) data.loreDiscovered = ['start'];
+        if (!data.pixelRelics || typeof data.pixelRelics !== 'object' || Array.isArray(data.pixelRelics)) data.pixelRelics = {};
+        if (!Array.isArray(data.displayedRelics)) data.displayedRelics = [];
+        if (!Array.isArray(data.relicFindLog)) data.relicFindLog = [];
+        if (!data.mintedRelics || typeof data.mintedRelics !== 'object' || Array.isArray(data.mintedRelics)) data.mintedRelics = {};
         if (data.playerPosition === undefined) data.playerPosition = null;
         if (data.settings === undefined) {
             data.settings = {
@@ -641,6 +650,7 @@ class ProgressionManager {
         if (!data.kingdom.structures || typeof data.kingdom.structures !== 'object') data.kingdom.structures = {};
         if (!data.kingdom.residents || typeof data.kingdom.residents !== 'object') data.kingdom.residents = {};
         if (!data.kingdom.threats || typeof data.kingdom.threats !== 'object') data.kingdom.threats = {};
+        if (!data.regionBuilds || typeof data.regionBuilds !== 'object') data.regionBuilds = {};
         if (!data.walletTierClaims || typeof data.walletTierClaims !== 'object') data.walletTierClaims = {};
         if (!Number.isFinite(data.kingdom.dwellingTier) || data.kingdom.dwellingTier < 1) {
             data.kingdom.dwellingTier = Math.max(1, Number(data.home.level) || 1);
@@ -816,6 +826,142 @@ class ProgressionManager {
             collectorCap: this.getCollectorDailyCap(),
             collectorBonus: this.getKingdomCollectorCapBonus()
         };
+    }
+
+    getPixelRelicState() {
+        if (!this.data.pixelRelics || typeof this.data.pixelRelics !== 'object' || Array.isArray(this.data.pixelRelics)) {
+            this.data.pixelRelics = {};
+        }
+        return this.data.pixelRelics;
+    }
+
+    getRelicFindLog() {
+        if (!Array.isArray(this.data.relicFindLog)) this.data.relicFindLog = [];
+        return this.data.relicFindLog;
+    }
+
+    getMintedRelics() {
+        if (!this.data.mintedRelics || typeof this.data.mintedRelics !== 'object' || Array.isArray(this.data.mintedRelics)) {
+            this.data.mintedRelics = {};
+        }
+        return this.data.mintedRelics;
+    }
+
+    getDisplayedRelics() {
+        if (!Array.isArray(this.data.displayedRelics)) this.data.displayedRelics = [];
+        const owned = this.getPixelRelicState();
+        const unique = this.data.displayedRelics.filter((id, index, list) => {
+            return !!owned[id] && Number(owned[id]?.count || 0) > 0 && list.indexOf(id) === index;
+        });
+        this.data.displayedRelics = unique.slice(0, this.getDisplayedRelicLimit());
+        return this.data.displayedRelics;
+    }
+
+    getDisplayedRelicLimit() {
+        const kingdom = this.getKingdomState();
+        return Math.max(2, Math.min(6, 1 + Number(kingdom.dwellingTier || 1)));
+    }
+
+    getPixelRelicSummary() {
+        const collection = this.getPixelRelicState();
+        const totalUnlocked = Object.values(collection).filter(entry => Number(entry?.count || 0) > 0).length;
+        const totalFinds = Object.values(collection).reduce((total, entry) => total + Number(entry?.count || 0), 0);
+        const displayed = this.getDisplayedRelics();
+        return {
+            totalUnlocked,
+            totalFinds,
+            displayedCount: displayed.length,
+            displayLimit: this.getDisplayedRelicLimit()
+        };
+    }
+
+    awardRandomPixelRelic(poolKey = 'lore', options = {}) {
+        const chance = Number.isFinite(Number(options.chance))
+            ? Math.max(0, Math.min(1, Number(options.chance)))
+            : 1;
+        if (chance < 1 && Math.random() > chance) return null;
+
+        const catalog = (CONFIG.PIXEL_RELICS || []).filter(relic => {
+            return Array.isArray(relic?.pools) && (relic.pools.includes(poolKey) || relic.pools.includes('all'));
+        });
+        if (!catalog.length) return null;
+
+        const totalWeight = catalog.reduce((sum, relic) => sum + Math.max(1, Number(relic.weight || 1)), 0);
+        let roll = Math.random() * totalWeight;
+        let chosen = catalog[0];
+        for (const relic of catalog) {
+            roll -= Math.max(1, Number(relic.weight || 1));
+            if (roll <= 0) {
+                chosen = relic;
+                break;
+            }
+        }
+
+        const now = Date.now();
+        const collection = this.getPixelRelicState();
+        const current = (collection[chosen.id] && typeof collection[chosen.id] === 'object') ? collection[chosen.id] : {};
+        const nextCount = Number(current.count || 0) + 1;
+        collection[chosen.id] = {
+            count: nextCount,
+            firstFoundAt: current.firstFoundAt || now,
+            lastFoundAt: now,
+            lastPool: poolKey,
+            lastSource: options.sourceLabel || poolKey,
+            lastRegionId: options.regionId || current.lastRegionId || null,
+            rarity: chosen.rarity || 'COMMON'
+        };
+
+        const displayed = this.getDisplayedRelics();
+        let autoDisplayed = false;
+        if (!displayed.includes(chosen.id) && displayed.length < this.getDisplayedRelicLimit()) {
+            displayed.push(chosen.id);
+            autoDisplayed = true;
+        }
+
+        const log = this.getRelicFindLog();
+        log.unshift({
+            id: chosen.id,
+            foundAt: now,
+            poolKey,
+            sourceLabel: options.sourceLabel || poolKey,
+            regionId: options.regionId || null,
+            count: nextCount
+        });
+        if (log.length > 24) log.length = 24;
+
+        this.save();
+        return {
+            relic: chosen,
+            count: nextCount,
+            isNew: nextCount === 1,
+            autoDisplayed,
+            poolKey,
+            sourceLabel: options.sourceLabel || poolKey,
+            regionId: options.regionId || null
+        };
+    }
+
+    toggleDisplayedRelic(relicId) {
+        const collection = this.getPixelRelicState();
+        if (!collection[relicId] || Number(collection[relicId]?.count || 0) <= 0) {
+            return { ok: false, reason: 'locked', limit: this.getDisplayedRelicLimit() };
+        }
+
+        const displayed = this.getDisplayedRelics();
+        const currentIndex = displayed.indexOf(relicId);
+        if (currentIndex >= 0) {
+            displayed.splice(currentIndex, 1);
+            this.save();
+            return { ok: true, displayed: false, limit: this.getDisplayedRelicLimit() };
+        }
+
+        if (displayed.length >= this.getDisplayedRelicLimit()) {
+            return { ok: false, reason: 'limit', limit: this.getDisplayedRelicLimit() };
+        }
+
+        displayed.push(relicId);
+        this.save();
+        return { ok: true, displayed: true, limit: this.getDisplayedRelicLimit() };
     }
 
     unlockRegion(regionId) {
@@ -1010,6 +1156,15 @@ class ProgressionManager {
             } catch (_) {}
             if (window.game) {
                 window.game.showGlobalNotification(`LORE DISCOVERED: Check your Activity Log!`, '#ffaa00');
+                try {
+                    window.game.tryAwardPixelRelic?.('lore', {
+                        chance: 1,
+                        sourceLabel: `Lore discovered: ${loreId}`,
+                        loreId,
+                        regionId: window.game?.currentRegion?.id || null,
+                        eventKey: `pixel_relic:lore:${loreId}`
+                    });
+                } catch (_) {}
             }
         }
     }
@@ -1131,6 +1286,28 @@ class Game3D {
         this.traps = [];
         this.hazards = [];
         this.puzzlePillars = [];
+        this.regionBuildMeshes = [];
+        this.stageCookingStation = null;
+        this.stageCookingLiquid = null;
+        this.stageCookingBubbles = [];
+        this.stageCookingFire = null;
+        this.skyDragon = null;
+        this.skyDragonWings = [];
+        this.buildPreview = null;
+        this.buildHud = null;
+        this.buildHudStateKey = '';
+        this.maxBuildBlocksPerRegion = 400;
+        this.buildPalette = [
+            { id: 'mosswall', name: 'MOSS WALL', color: 0x7dcf68, emissive: 0x1f3b19 },
+            { id: 'amberbrick', name: 'AMBER BRICK', color: 0xd6964a, emissive: 0x4c2b10 },
+            { id: 'crystalglass', name: 'CRYSTAL GLASS', color: 0x8ce8ff, emissive: 0x1b5866 },
+            { id: 'voidstone', name: 'VOID STONE', color: 0x7862a8, emissive: 0x241736 }
+        ];
+        this.buildMode = {
+            active: false,
+            materialIndex: 0,
+            height: 0
+        };
         this.citadelGate = null;
         this.lootCount = 0;
         this.heartParticles = null;
@@ -2150,15 +2327,16 @@ class Game3D {
 
         const renderTabButton = (section) => `
             <button onclick="window.setInventoryTab('${section.id}')" style="
-                flex: 1;
-                padding: 10px;
-                background: ${this.activeInventoryTab === section.id ? clanColor : '#222'};
-                color: ${this.activeInventoryTab === section.id ? 'black' : 'white'};
-                border: none;
+                flex: 1 1 110px;
+                padding: 12px 10px;
+                background: ${this.activeInventoryTab === section.id ? `linear-gradient(135deg, ${clanColor}, rgba(255,255,255,0.2))` : 'rgba(255,255,255,0.04)'};
+                color: ${this.activeInventoryTab === section.id ? 'black' : '#e6efea'};
+                border: 1px solid ${this.activeInventoryTab === section.id ? clanColor : 'rgba(255,255,255,0.08)'};
                 font-family: inherit;
                 font-size: 10px;
                 cursor: pointer;
-                border-top: 2px solid ${clanColor};
+                border-radius: 12px 12px 0 0;
+                box-shadow: ${this.activeInventoryTab === section.id ? `0 12px 24px rgba(0,0,0,0.28), 0 0 20px ${clanColor}33` : 'none'};
             ">
                 ${section.shortLabel}
             </button>
@@ -2389,6 +2567,8 @@ class Game3D {
             `;
         } else if (this.activeInventoryTab === 'LOG') {
             const discoveredLore = p.loreDiscovered || [];
+            const relicSummary = this.progression.getPixelRelicSummary();
+            const recentRelics = this.progression.getRelicFindLog().slice(0, 6);
             content = `
                 <div style="padding: 20px; text-align: left;">
                     <h3 style="color: #ffaa00; font-size: 12px; margin-bottom: 20px;">ACTIVITY LOG & LORE</h3>
@@ -2406,6 +2586,29 @@ class Game3D {
                         ${p.metChronicler ? '<p style="margin-bottom: 15px; border-bottom: 1px solid #222; padding-bottom: 5px;"><span style="color: #00ffff;">[CHRONICLER]:</span> The Crown was a network transmitter. Shards are held by corrupted echoes.</p>' : ''}
                         ${p.metNetworkGhost ? '<p style="margin-bottom: 15px; border-bottom: 1px solid #222; padding-bottom: 5px;"><span style="color: #aa00ff;">[VOID GHOST]:</span> The Rot is an uploaded virus. Dark Mycelius is a glitch.</p>' : ''}
                         ${p.shardsCollected > 0 ? `<p style="margin-bottom: 15px; border-bottom: 1px solid #222; padding-bottom: 5px;"><span style="color: #ffff00;">[SYSTEM]:</span> ${p.shardsCollected} Crown Shards reclaimed.</p>` : ''}
+                        <div style="margin:20px 0; padding:14px; background:rgba(255,102,204,0.06); border:1px solid rgba(255,102,204,0.2);">
+                            <p style="color:#ff66cc; font-weight:bold; margin:0 0 10px 0;">[PIXEL RELIC ARCHIVE]</p>
+                            <p style="font-size:8px; color:#f2d6f2; margin:0 0 12px 0; line-height:1.8;">${relicSummary.totalUnlocked}/${(CONFIG.PIXEL_RELICS || []).length} unique lore relics found, ${relicSummary.displayedCount}/${relicSummary.displayLimit} currently shown in the trophy room.</p>
+                            ${recentRelics.length > 0 ? `
+                                <div style="display:grid; grid-template-columns:${this.isMobile ? '1fr' : '1fr 1fr'}; gap:10px;">
+                                    ${recentRelics.map(entry => {
+                                        const relic = this.getPixelRelicConfig(entry.id);
+                                        if (!relic) return '';
+                                        const accent = this.getPixelRelicAccentColor(relic, '#ff66cc');
+                                        return `
+                                            <div style="background:#111; border:1px solid ${accent}; padding:10px; display:flex; gap:10px; align-items:flex-start;">
+                                                ${this.renderPixelRelicGlyphMarkup(relic, { pixelSize: 5, padding: 4, background: 'rgba(0,0,0,0.5)' })}
+                                                <div style="min-width:0;">
+                                                    <div style="font-size:8px; color:${accent}; margin-bottom:4px;">${relic.name.toUpperCase()}</div>
+                                                    <div style="font-size:7px; color:#999; line-height:1.7;">${String(entry.sourceLabel || entry.poolKey || 'field').toUpperCase()}</div>
+                                                    <div style="font-size:7px; color:#777; line-height:1.6;">${relic.lore}</div>
+                                                </div>
+                                            </div>
+                                        `;
+                                    }).join('')}
+                                </div>
+                            ` : '<p style="font-size:8px; color:#888; margin:0;">No relic finds logged yet.</p>'}
+                        </div>
                         <p style="color: #444;">More lore entries will appear as you explore...</p>
                     </div>
                 </div>
@@ -2432,11 +2635,18 @@ class Game3D {
         };
 
         this.uiOverlay.innerHTML = `
-            <div style="pointer-events: auto; background: rgba(0,0,0,0.95); width: 100%; height: 100%; display: flex; justify-content: center; align-items: ${this.isMobile ? 'flex-start' : 'center'}; font-family: 'Press Start 2P', cursive; box-sizing: border-box; padding: ${pauseOverlayPadding}; overflow-y: auto; -webkit-overflow-scrolling: touch;">
-                <div style="background: #050505; border: 4px solid ${clanColor}; width: min(100%, 900px); box-shadow: 0 0 30px ${clanColor}; max-height: ${pausePanelMaxHeight}; overflow: ${this.isMobile ? 'visible' : 'hidden'}; display: flex; flex-direction: column; margin: auto;">
-                    <div style="padding: ${this.isMobile ? '16px' : '20px'}; background: ${clanColor}; color: black; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
-                        <h2 style="font-size: 18px; margin: 0;">PAUSED</h2>
-                        <span style="font-size: 10px;">KING MYCO'S JOURNEY</span>
+            <div style="pointer-events: auto; background: radial-gradient(circle at top, rgba(57,255,20,0.06), transparent 28%), rgba(0,0,0,0.95); width: 100%; height: 100%; display: flex; justify-content: center; align-items: ${this.isMobile ? 'flex-start' : 'center'}; font-family: 'Press Start 2P', cursive; box-sizing: border-box; padding: ${pauseOverlayPadding}; overflow-y: auto; -webkit-overflow-scrolling: touch;">
+                <div style="background: linear-gradient(180deg, rgba(8,12,14,0.98), rgba(3,5,6,0.96)); border: 1px solid rgba(255,255,255,0.1); border-top: 4px solid ${clanColor}; border-radius: 22px; width: min(100%, 940px); box-shadow: 0 26px 80px rgba(0,0,0,0.52), 0 0 32px ${clanColor}44; max-height: ${pausePanelMaxHeight}; overflow: ${this.isMobile ? 'visible' : 'hidden'}; display: flex; flex-direction: column; margin: auto; position:relative;">
+                    <div style="padding: ${this.isMobile ? '16px' : '20px'}; background: linear-gradient(135deg, ${clanColor}, rgba(255,255,255,0.18)); color: black; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; border-radius: 18px 18px 0 0;">
+                        <div style="display:grid; gap:6px;">
+                            <div style="font-size: 8px; letter-spacing: 1.8px; color: rgba(0,0,0,0.7);">KINGDOM COMMAND</div>
+                            <h2 style="font-size: 18px; margin: 0;">PAUSED</h2>
+                        </div>
+                        <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end;">
+                            <span style="font-size: 8px; padding: 6px 10px; border-radius: 999px; background: rgba(0,0,0,0.14);">${this.getGameModeLabel()}</span>
+                            <span style="font-size: 8px; padding: 6px 10px; border-radius: 999px; background: rgba(0,0,0,0.14);">${(this.currentRegion?.name || 'Sanctuary').toUpperCase()}</span>
+                            <span style="font-size: 8px; padding: 6px 10px; border-radius: 999px; background: rgba(0,0,0,0.14);">${timeStr} ${period}</span>
+                        </div>
                     </div>
 
                     <div style="padding: 16px 20px 0 20px; display: grid; grid-template-columns: ${pauseLayoutColumns}; gap: 12px; align-items: stretch; flex: 0 0 auto;">
@@ -2528,21 +2738,21 @@ class Game3D {
                             ${inventorySections.map(section => renderAccordionSection(section)).join('')}
                         </div>
                     ` : `
-                        <div style="display: flex; flex-wrap: wrap; flex: 0 0 auto;">
+                        <div style="display: flex; flex-wrap: wrap; flex: 0 0 auto; gap: 8px; padding: 10px 12px 0 12px; background: rgba(255,255,255,0.02);">
                             ${inventorySections.map(section => renderTabButton(section)).join('')}
                         </div>
 
-                        <div style="flex: 1; min-height: 0; color: white; overflow: hidden;">
-                            <div style="height: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch;">
+                        <div style="flex: 1; min-height: 0; color: white; overflow: hidden; background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0));">
+                            <div style="height: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch; padding-bottom: 6px;">
                                 ${currentPanelContent}
                             </div>
                         </div>
                     `}
 
-                    <div style="padding: ${this.isMobile ? '14px 16px' : '20px'}; border-top: 1px solid #222; display: flex; gap: 10px; flex-wrap: wrap; flex: 0 0 auto; background: #050505;">
-                        <button onclick="window.game.togglePause()" style="flex: 2; padding: 15px; background: #39FF14; border: none; font-family: inherit; cursor: pointer; color: black;">RESUME</button>
-                        <button onclick="window.game.saveGame()" style="flex: 1; padding: 15px; background: #00ffff; border: none; font-family: inherit; cursor: pointer; color: black;">${this.walletSessionToken ? 'SAVE + CLOUD' : 'SAVE'}</button>
-                        <button onclick="location.reload()" style="padding: 15px; background: #ff0000; border: none; font-family: inherit; cursor: pointer; color: white;">QUIT</button>
+                    <div style="padding: ${this.isMobile ? '14px 16px' : '18px 20px'}; border-top: 1px solid rgba(255,255,255,0.08); display: flex; gap: 10px; flex-wrap: wrap; flex: 0 0 auto; background: rgba(3,5,5,0.96);">
+                        <button onclick="window.game.togglePause()" style="flex: 2; padding: 15px; background: linear-gradient(135deg, #39FF14, #7dff64); border: none; font-family: inherit; cursor: pointer; color: black; box-shadow: 0 16px 28px rgba(0,0,0,0.24);">RESUME</button>
+                        <button onclick="window.game.saveGame()" style="flex: 1; padding: 15px; background: linear-gradient(135deg, #00d9ff, #6ff7ff); border: none; font-family: inherit; cursor: pointer; color: black;">${this.walletSessionToken ? 'SAVE + CLOUD' : 'SAVE'}</button>
+                        <button onclick="location.reload()" style="padding: 15px; background: linear-gradient(135deg, #9b1200, #ff3f1f); border: none; font-family: inherit; cursor: pointer; color: white;">QUIT</button>
                     </div>
                 </div>
             </div>
@@ -4505,6 +4715,12 @@ class Game3D {
         this.territoryCapture.completing = false;
         this.resetTerritoryCapture(null);
         if (result) {
+            this.tryAwardPixelRelic('territory', {
+                chance: 0.55,
+                sourceLabel: `${this.currentRegion?.name || regionId} territory claim`,
+                regionId,
+                eventKey: `pixel_relic:territory_claim:${regionId}:${this.selectedClan}:${bucket}`
+            });
             this.showGlobalNotification(`${(this.currentRegion?.name || regionId)} claimed for ${this.selectedClan.toUpperCase()}`, this.getClanColor(this.selectedClan));
             void this.syncTerritoryPresence(true);
             void this.refreshLiveTerritory('map', { force: true });
@@ -4597,6 +4813,17 @@ class Game3D {
             return true;
         } catch (error) {
             console.error('territory presence sync failed', error);
+            if (error?.status === 409 && error?.data?.error === 'territory_clan_server_full') {
+                const clanId = String(error?.data?.clanId || this.selectedClan || 'myco').toUpperCase();
+                const activePlayers = Math.max(0, Number(error?.data?.activePlayers || 0));
+                const maxActivePlayers = Math.max(1, Number(error?.data?.maxActivePlayers || 5));
+                this.progression?.setGameMode?.('STORY');
+                this.resetTerritoryCapture('WAR BAND FULL');
+                this.showGlobalNotification(`${clanId} war band is full (${activePlayers}/${maxActivePlayers}). Pick another mode and try again soon.`, '#ff8a3d');
+                this.showFloatingText(`${clanId} FULL ${activePlayers}/${maxActivePlayers}`, 0xff8a3d, true);
+                this.setupModeSelection(true);
+                return false;
+            }
             if (error?.status === 401) this.clearWalletSession();
             return false;
         } finally {
@@ -4998,6 +5225,12 @@ class Game3D {
                     metadata: { worldDay, title: cfg.title, firstMastery, rewardClaimed }
                 });
             }
+            this.tryAwardPixelRelic('quest', {
+                chance: firstMastery ? 1 : 0.4,
+                sourceLabel: `${regionName} rot purge`,
+                regionId,
+                eventKey: `pixel_relic:rot_quest:${regionId}:day:${worldDay}`
+            });
             if (announce && isCurrentRegion) {
                 this.showFloatingText(`${regionName.toUpperCase()} PURIFIED`, cfg.accent || 0x39FF14, true);
                 this.showGlobalNotification(firstMastery ? `${cfg.title} complete.` : `${regionName} is clean for today.`, '#39FF14');
@@ -5075,6 +5308,15 @@ class Game3D {
         this.npcs.forEach(n => n.destroy());
         this.buildings.forEach(b => this.scene.remove(b.mesh));
         this.portals.forEach(p => p.destroy());
+        this.clearRegionBuildMeshes();
+        if (this.stageCookingStation) this.scene.remove(this.stageCookingStation);
+        this.stageCookingStation = null;
+        this.stageCookingLiquid = null;
+        this.stageCookingBubbles = [];
+        this.stageCookingFire = null;
+        if (this.skyDragon) this.scene.remove(this.skyDragon);
+        this.skyDragon = null;
+        this.skyDragonWings = [];
         if (this.areaLabels) {
             this.areaLabels.forEach(l => this.scene.remove(l));
         }
@@ -5106,6 +5348,7 @@ class Game3D {
                 const pos = center.clone().add(new THREE.Vector3(Math.cos(angle) * 10, 0, Math.sin(angle) * 10));
                 const npc = new NPC3D(this.scene, pos, npcCfg.name, npcCfg);
                 npc.role = npcCfg.role;
+                npc.allowCollectorDialogue = !!npcCfg.allowCollectorDialogue;
                 // V1.9.37 - If the village NPC carries its own dialogue tree
                 // (e.g. the expanded Sporewood roster), promote it to the NPC
                 // root so interactNPC()'s `npc.dialogue` lookup finds it.
@@ -5118,6 +5361,10 @@ class Game3D {
             const villageLabel = this.createFloatingLabel(village.name, this.currentRegion.accent);
             villageLabel.position.copy(center).add(new THREE.Vector3(0, 15, 0));
             this.areaLabels.push(villageLabel);
+
+            if (this.currentRegion.id === 'sporewood') {
+                this.createVillageCookingStation(center.clone().add(new THREE.Vector3(6, 0, -6)));
+            }
         }
 
         // Add NPC for the current region
@@ -5183,11 +5430,419 @@ class Game3D {
         // Add Restoration Landmarks for Sporewood
         this.spawnRestorationLandmarks();
         this.spawnTerritoryFlagForCurrentRegion();
+        this.renderRegionBuildBlocks();
+        this.createSkyDragon();
 
         // V1.9.14 - Boss Dungeon door + Sage NPC for non-hub regions.
         this.buildBossDungeon();
         this.spawnPendingBossRewardsForCurrentRegion();
         if (this.liveTerritory) this.applyTerritoryWorldState(null, this.liveTerritory);
+    }
+
+    getRegionBuildList(regionId = (this.currentRegion?.id || this.progression?.data?.currentRegionId || 'region8')) {
+        if (!this.progression.data.regionBuilds || typeof this.progression.data.regionBuilds !== 'object') {
+            this.progression.data.regionBuilds = {};
+        }
+        if (!Array.isArray(this.progression.data.regionBuilds[regionId])) {
+            this.progression.data.regionBuilds[regionId] = [];
+        }
+        return this.progression.data.regionBuilds[regionId];
+    }
+
+    getBuildPaletteEntry(id) {
+        return this.buildPalette.find(entry => entry.id === id) || this.buildPalette[0];
+    }
+
+    getActiveBuildMaterial() {
+        return this.buildPalette[this.buildMode.materialIndex % this.buildPalette.length] || this.buildPalette[0];
+    }
+
+    clearRegionBuildMeshes() {
+        if (Array.isArray(this.regionBuildMeshes)) {
+            this.regionBuildMeshes.forEach(mesh => {
+                try {
+                    this.scene.remove(mesh);
+                    mesh.geometry?.dispose?.();
+                    mesh.material?.dispose?.();
+                } catch (_) {}
+            });
+        }
+        this.regionBuildMeshes = [];
+        if (Array.isArray(this.collidables)) {
+            this.collidables = this.collidables.filter(obj => !obj?.userData?.isVoxelBuildBlock);
+        }
+    }
+
+    createVoxelBuildMesh(block, { preview = false } = {}) {
+        const palette = this.getBuildPaletteEntry(block.material);
+        const mesh = new THREE.Mesh(
+            new THREE.BoxGeometry(2, 2, 2),
+            new THREE.MeshStandardMaterial({
+                color: palette.color,
+                emissive: palette.emissive,
+                emissiveIntensity: preview ? 0.8 : 0.28,
+                transparent: preview,
+                opacity: preview ? 0.45 : 1,
+                roughness: preview ? 0.38 : 0.72,
+                metalness: preview ? 0.08 : 0.02
+            })
+        );
+        mesh.position.set(block.x, block.y, block.z);
+        mesh.castShadow = !preview;
+        mesh.receiveShadow = true;
+        mesh.userData.isVoxelBuildBlock = !preview;
+        mesh.userData.blockMaterial = palette.id;
+        return mesh;
+    }
+
+    renderRegionBuildBlocks() {
+        if (this.isInterior) return;
+        this.clearRegionBuildMeshes();
+        this.getRegionBuildList().forEach(block => {
+            const mesh = this.createVoxelBuildMesh(block);
+            this.regionBuildMeshes.push(mesh);
+            this.scene.add(mesh);
+            this.collidables.push(mesh);
+        });
+    }
+
+    getVoxelBuildPreviewPosition() {
+        if (!this.player?.group) return new THREE.Vector3(0, 1, 0);
+        const facing = new THREE.Vector3(0, 0, 1).applyQuaternion(this.player.group.quaternion);
+        facing.y = 0;
+        if (facing.lengthSq() < 0.001) facing.set(0, 0, 1);
+        facing.normalize();
+        const pos = this.player.group.position.clone().addScaledVector(facing, 6);
+        pos.x = Math.round(pos.x / 2) * 2;
+        pos.z = Math.round(pos.z / 2) * 2;
+        pos.y = 1 + (Math.max(0, this.buildMode.height) * 2);
+        return pos;
+    }
+
+    hideBuildModeHud() {
+        if (this.buildHud) this.buildHud.style.display = 'none';
+    }
+
+    renderBuildModeHud() {
+        if (!this.buildHud) {
+            this.buildHud = document.createElement('div');
+            this.buildHud.style.cssText = `
+                position: fixed;
+                right: ${this.isMobile ? '12px' : '16px'};
+                bottom: ${this.isMobile ? 'calc(184px + env(safe-area-inset-bottom, 0px))' : '118px'};
+                width: min(${this.isMobile ? '360px' : '320px'}, calc(100vw - 24px));
+                z-index: 2200;
+                pointer-events: auto;
+                background: rgba(0,0,0,0.84);
+                border: 1px solid rgba(57,255,20,0.35);
+                border-radius: 14px;
+                box-shadow: 0 10px 28px rgba(0,0,0,0.42);
+                backdrop-filter: ${this.mobilePerf ? 'none' : 'blur(10px)'};
+                padding: ${this.isMobile ? '14px' : '12px'};
+                font-family: inherit;
+            `;
+            document.body.appendChild(this.buildHud);
+        }
+
+        if (!this.buildMode?.active || this.gameState !== 'PLAYING' || this.isInterior) {
+            this.hideBuildModeHud();
+            return;
+        }
+
+        const material = this.getActiveBuildMaterial();
+        const regionId = this.currentRegion?.id || 'region8';
+        const count = this.getRegionBuildList(regionId).length;
+        const buildLimit = this.maxBuildBlocksPerRegion;
+        const hudStateKey = [
+            this.isMobile ? 'mobile' : 'desktop',
+            regionId,
+            count,
+            buildLimit,
+            material.id,
+            this.buildMode.height
+        ].join('|');
+        if (this.buildHudStateKey === hudStateKey && this.buildHud.style.display === 'block') return;
+        this.buildHudStateKey = hudStateKey;
+        this.buildHud.style.display = 'block';
+        this.buildHud.innerHTML = `
+            <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start; margin-bottom:10px;">
+                <div>
+                    <div style="color:#39FF14; font-size:${this.isMobile ? '12px' : '11px'}; letter-spacing:1px; margin-bottom:4px;">VOXEL BUILDER</div>
+                    <div style="color:#cfd8dc; font-size:${this.isMobile ? '10px' : '9px'}; line-height:1.7;">${(this.currentRegion?.name || regionId).toUpperCase()} • ${count}/${buildLimit} BLOCKS</div>
+                    <div style="color:#8de1ff; font-size:${this.isMobile ? '10px' : '9px'}; line-height:1.7;">MATERIAL: ${material.name} • HEIGHT: ${this.buildMode.height}</div>
+                </div>
+                <button onclick="window.game.toggleBuildMode(false)" style="padding:${this.isMobile ? '10px 12px' : '6px 10px'}; min-height:${this.isMobile ? '42px' : '0'}; background:#5a1620; color:#ffd7df; border:none; border-radius:8px; font-size:${this.isMobile ? '10px' : '8px'}; cursor:pointer;">CLOSE</button>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px;">
+                <button onclick="window.game.placeBuildBlock()" style="padding:${this.isMobile ? '12px' : '10px'}; min-height:${this.isMobile ? '46px' : '0'}; background:#39FF14; color:black; border:none; border-radius:10px; font-size:${this.isMobile ? '10px' : '9px'}; cursor:pointer;">PLACE</button>
+                <button onclick="window.game.removeBuildBlock()" style="padding:${this.isMobile ? '12px' : '10px'}; min-height:${this.isMobile ? '46px' : '0'}; background:#ff6b6b; color:black; border:none; border-radius:10px; font-size:${this.isMobile ? '10px' : '9px'}; cursor:pointer;">REMOVE</button>
+                <button onclick="window.game.adjustBuildHeight(1)" style="padding:${this.isMobile ? '12px' : '10px'}; min-height:${this.isMobile ? '46px' : '0'}; background:#1c2f42; color:#8de1ff; border:none; border-radius:10px; font-size:${this.isMobile ? '10px' : '9px'}; cursor:pointer;">HEIGHT +</button>
+                <button onclick="window.game.adjustBuildHeight(-1)" style="padding:${this.isMobile ? '12px' : '10px'}; min-height:${this.isMobile ? '46px' : '0'}; background:#1c2f42; color:#8de1ff; border:none; border-radius:10px; font-size:${this.isMobile ? '10px' : '9px'}; cursor:pointer;">HEIGHT -</button>
+                <button onclick="window.game.cycleBuildMaterial(1)" style="grid-column:1 / span 2; padding:${this.isMobile ? '12px' : '10px'}; min-height:${this.isMobile ? '46px' : '0'}; background:#2a203f; color:#ecd8ff; border:none; border-radius:10px; font-size:${this.isMobile ? '10px' : '9px'}; cursor:pointer;">CYCLE MATERIAL</button>
+            </div>
+            <div style="color:#7b8a90; font-size:${this.isMobile ? '9px' : '8px'}; line-height:1.7; margin-top:10px;">${this.isMobile ? 'Mobile: use these buttons, then move to aim your preview block.' : 'Desktop: G toggle • R place • T remove • [ / ] height • C material'}</div>
+        `;
+    }
+
+    toggleBuildMode(forceState = null) {
+        if (this.progression.isTerritoryWarMode()) {
+            this.showGlobalNotification('VOXEL BUILDER IS OFF IN TERRITORY WAR', '#ff8844');
+            return false;
+        }
+        const next = forceState == null ? !this.buildMode.active : !!forceState;
+        this.buildMode.active = next;
+        if (!next) {
+            if (this.buildPreview) this.buildPreview.visible = false;
+            this.buildHudStateKey = '';
+            this.hideBuildModeHud();
+            this.showGlobalNotification('VOXEL BUILDER CLOSED', '#8aa0a8');
+            return false;
+        }
+        this.buildMode.height = Math.max(0, this.buildMode.height || 0);
+        this.showGlobalNotification('VOXEL BUILDER LIVE', '#39FF14');
+        this.buildHudStateKey = '';
+        this.renderBuildModeHud();
+        this.updateBuildModePreview();
+        return true;
+    }
+
+    launchVoxelBuilder() {
+        if (this.progression.isTerritoryWarMode()) {
+            this.showGlobalNotification('VOXEL BUILDER IS OFF IN TERRITORY WAR', '#ff8844');
+            return;
+        }
+        this.startGameplay();
+        this.toggleBuildMode(true);
+    }
+
+    cycleBuildMaterial(delta = 1) {
+        const len = this.buildPalette.length;
+        this.buildMode.materialIndex = (this.buildMode.materialIndex + delta + len) % len;
+        this.renderBuildModeHud();
+        this.updateBuildModePreview();
+    }
+
+    adjustBuildHeight(delta = 1) {
+        this.buildMode.height = Math.max(0, Math.min(16, (this.buildMode.height || 0) + delta));
+        this.renderBuildModeHud();
+        this.updateBuildModePreview();
+    }
+
+    placeBuildBlock() {
+        if (!this.buildMode?.active || this.gameState !== 'PLAYING' || this.isInterior) return;
+        const regionId = this.currentRegion?.id || 'region8';
+        const blocks = this.getRegionBuildList(regionId);
+        if (blocks.length >= this.maxBuildBlocksPerRegion) {
+            this.showGlobalNotification('REGION BUILD LIMIT REACHED', '#ff8844');
+            return;
+        }
+        const pos = this.getVoxelBuildPreviewPosition();
+        if (blocks.some(block => block.x === pos.x && block.y === pos.y && block.z === pos.z)) {
+            this.showGlobalNotification('BLOCK ALREADY PLACED', '#8de1ff');
+            return;
+        }
+        const material = this.getActiveBuildMaterial();
+        blocks.push({ x: pos.x, y: pos.y, z: pos.z, material: material.id });
+        this.progression.save();
+        this.renderRegionBuildBlocks();
+        this.renderBuildModeHud();
+        this.updateBuildModePreview();
+        this.showFloatingText(`${material.name} PLACED`, material.color, true);
+    }
+
+    removeBuildBlock() {
+        if (this.gameState !== 'PLAYING' || this.isInterior) return;
+        const regionId = this.currentRegion?.id || 'region8';
+        const blocks = this.getRegionBuildList(regionId);
+        const pos = this.getVoxelBuildPreviewPosition();
+        const index = blocks.findIndex(block => block.x === pos.x && block.y === pos.y && block.z === pos.z);
+        if (index === -1) {
+            this.showGlobalNotification('NO BLOCK TO REMOVE', '#8aa0a8');
+            return;
+        }
+        blocks.splice(index, 1);
+        this.progression.save();
+        this.renderRegionBuildBlocks();
+        this.renderBuildModeHud();
+        this.updateBuildModePreview();
+        this.showFloatingText('BLOCK REMOVED', 0xff6b6b, true);
+    }
+
+    updateBuildModePreview() {
+        if (!this.buildMode?.active || this.gameState !== 'PLAYING' || this.isInterior || !this.player?.group) {
+            if (this.buildPreview) this.buildPreview.visible = false;
+            this.hideBuildModeHud();
+            return;
+        }
+        const material = this.getActiveBuildMaterial();
+        const pos = this.getVoxelBuildPreviewPosition();
+        if (!this.buildPreview) {
+            this.buildPreview = this.createVoxelBuildMesh({ x: pos.x, y: pos.y, z: pos.z, material: material.id }, { preview: true });
+            this.scene.add(this.buildPreview);
+        }
+        const previewMat = this.buildPreview.material;
+        previewMat.color.setHex(material.color);
+        previewMat.emissive.setHex(material.emissive);
+        previewMat.emissiveIntensity = 0.8;
+        this.buildPreview.position.copy(pos);
+        this.buildPreview.visible = true;
+    }
+
+    createVillageCookingStation(position) {
+        const stationGroup = new THREE.Group();
+
+        const base = new THREE.Mesh(
+            new THREE.CylinderGeometry(2.3, 2.8, 0.4, 10),
+            new THREE.MeshStandardMaterial({ color: 0x4a3320, roughness: 0.92 })
+        );
+        base.position.y = 0.2;
+        stationGroup.add(base);
+
+        const pot = new THREE.Mesh(
+            new THREE.CylinderGeometry(1.6, 1.3, 1.8, 10, 1, true),
+            new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.55, side: THREE.DoubleSide })
+        );
+        pot.position.y = 1.25;
+        stationGroup.add(pot);
+
+        const rim = new THREE.Mesh(
+            new THREE.TorusGeometry(1.52, 0.12, 8, 18),
+            new THREE.MeshStandardMaterial({ color: 0x2e2e2e, metalness: 0.18, roughness: 0.38 })
+        );
+        rim.rotation.x = Math.PI / 2;
+        rim.position.y = 2.05;
+        stationGroup.add(rim);
+
+        const liquid = new THREE.Mesh(
+            new THREE.CircleGeometry(1.38, 20),
+            new THREE.MeshStandardMaterial({ color: 0x57ff8c, emissive: 0x39FF14, emissiveIntensity: 1.1 })
+        );
+        liquid.rotation.x = -Math.PI / 2;
+        liquid.position.y = 1.98;
+        stationGroup.add(liquid);
+
+        const fire = new THREE.Mesh(
+            new THREE.ConeGeometry(0.72, 1.4, 6),
+            new THREE.MeshStandardMaterial({ color: 0xff7a1a, emissive: 0xff5500, emissiveIntensity: 1.1, transparent: true, opacity: 0.9 })
+        );
+        fire.position.y = 0.95;
+        stationGroup.add(fire);
+
+        const bubbles = [];
+        for (let i = 0; i < (this.mobilePerf ? 3 : 5); i++) {
+            const bubble = new THREE.Mesh(
+                new THREE.SphereGeometry(0.12 + (i * 0.02), 10, 10),
+                new THREE.MeshStandardMaterial({ color: 0xcffff0, emissive: 0x80ffcc, emissiveIntensity: 0.8, transparent: true, opacity: 0.85 })
+            );
+            bubble.userData.phase = Math.random() * Math.PI * 2;
+            bubble.userData.radius = 0.25 + Math.random() * 0.8;
+            stationGroup.add(bubble);
+            bubbles.push(bubble);
+        }
+
+        if (!this.mobilePerf) {
+            const light = new THREE.PointLight(0x57ff8c, 1.2, 18, 1.4);
+            light.position.set(0, 2.8, 0);
+            stationGroup.add(light);
+        }
+
+        stationGroup.position.copy(position);
+        this.scene.add(stationGroup);
+        this.stageCookingStation = stationGroup;
+        this.stageCookingLiquid = liquid;
+        this.stageCookingFire = fire;
+        this.stageCookingBubbles = bubbles;
+    }
+
+    updateStageCookingStation(now = Date.now()) {
+        if (!this.stageCookingStation) return;
+        const t = now * 0.003;
+        if (this.stageCookingLiquid?.material) {
+            this.stageCookingLiquid.material.emissiveIntensity = 0.85 + (Math.sin(t * 1.7) * 0.25);
+        }
+        if (this.stageCookingFire) {
+            this.stageCookingFire.scale.y = 0.85 + ((Math.sin(t * 2.4) + 1) * 0.18);
+            this.stageCookingFire.rotation.y += 0.03;
+        }
+        (this.stageCookingBubbles || []).forEach((bubble, index) => {
+            const phase = t + bubble.userData.phase;
+            bubble.position.set(
+                Math.cos(phase * 1.4 + index) * bubble.userData.radius,
+                1.95 + ((Math.sin(phase * 2.1) + 1) * 0.22),
+                Math.sin(phase * 1.3 + index) * bubble.userData.radius
+            );
+            bubble.scale.setScalar(0.8 + ((Math.sin(phase * 3.2) + 1) * 0.18));
+        });
+    }
+
+    createSkyDragon() {
+        const dragon = new THREE.Group();
+        const darkScale = new THREE.MeshStandardMaterial({ color: 0x1a1025, emissive: 0x100818, emissiveIntensity: 0.35, roughness: 0.62 });
+        const ember = new THREE.MeshStandardMaterial({ color: 0xff7a2f, emissive: 0xff5500, emissiveIntensity: 1.2, roughness: 0.3 });
+
+        const body = new THREE.Mesh(new THREE.CapsuleGeometry(1.2, 6.2, 6, 12), darkScale);
+        body.rotation.z = Math.PI / 2;
+        dragon.add(body);
+
+        const neck = new THREE.Mesh(new THREE.CapsuleGeometry(0.55, 2.1, 5, 10), darkScale);
+        neck.position.set(3.4, 1.2, 0);
+        neck.rotation.z = -0.65;
+        dragon.add(neck);
+
+        const head = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.1, 1.1), darkScale);
+        head.position.set(5.1, 2.1, 0);
+        dragon.add(head);
+
+        [-0.25, 0.25].forEach(z => {
+            const eye = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 8), ember);
+            eye.position.set(5.72, 2.2, z);
+            dragon.add(eye);
+        });
+
+        const wingGeo = new THREE.BufferGeometry();
+        wingGeo.setAttribute('position', new THREE.Float32BufferAttribute([
+            0, 0, 0,
+            -5.4, 0.2, 3.8,
+            -1.1, 0.1, 0.7
+        ], 3));
+        wingGeo.computeVertexNormals();
+        const wingMat = new THREE.MeshStandardMaterial({ color: 0x241833, emissive: 0x0f0917, side: THREE.DoubleSide, transparent: true, opacity: 0.92 });
+        const leftWing = new THREE.Mesh(wingGeo, wingMat);
+        leftWing.position.set(0.8, 1.1, 0.85);
+        dragon.add(leftWing);
+        const rightWing = new THREE.Mesh(wingGeo.clone(), wingMat.clone());
+        rightWing.position.set(0.8, 1.1, -0.85);
+        rightWing.scale.z = -1;
+        dragon.add(rightWing);
+
+        const tail = new THREE.Mesh(new THREE.ConeGeometry(0.45, 3.8, 8), darkScale);
+        tail.position.set(-4.8, 0.6, 0);
+        tail.rotation.z = -Math.PI / 2;
+        dragon.add(tail);
+
+        dragon.scale.set(1.7, 1.7, 1.7);
+        dragon.traverse(obj => {
+            if (obj.isMesh) obj.frustumCulled = false;
+        });
+        this.scene.add(dragon);
+        this.skyDragon = dragon;
+        this.skyDragonWings = [leftWing, rightWing];
+    }
+
+    updateSkyDragon(now = Date.now()) {
+        if (!this.skyDragon) return;
+        const anchor = this.player?.group?.position || new THREE.Vector3();
+        const t = now * 0.00018;
+        this.skyDragon.position.set(
+            anchor.x + Math.cos(t) * 58,
+            56 + (Math.sin(t * 2.8) * 4),
+            anchor.z + Math.sin(t * 0.85) * 46
+        );
+        this.skyDragon.lookAt(anchor.x, anchor.y + 10, anchor.z);
+        this.skyDragon.rotation.z += Math.sin(now * 0.002) * 0.002;
+        const flap = Math.sin(now * 0.012) * 0.55;
+        if (this.skyDragonWings[0]) this.skyDragonWings[0].rotation.z = flap;
+        if (this.skyDragonWings[1]) this.skyDragonWings[1].rotation.z = -flap;
     }
 
     // V1.9.13 - Expanded hub world. Four themed zones spread around the King's
@@ -6228,6 +6883,88 @@ class Game3D {
         this.scene.add(stationGroup);
         this.cookingStation = stationGroup;
         this.potPos = new THREE.Vector3(6, 1.25, 6);
+
+        this.placeDisplayedRelicTrophies();
+    }
+
+    createPixelRelicVoxelArt(relicInput, { pixelSize = 0.16, depth = 0.14 } = {}) {
+        const relic = typeof relicInput === 'string' ? this.getPixelRelicConfig(relicInput) : relicInput;
+        const art = new THREE.Group();
+        if (!relic || !Array.isArray(relic.sprite) || !relic.sprite.length) return art;
+
+        const palette = relic.palette || {};
+        const rows = relic.sprite.length;
+        const cols = String(relic.sprite[0] || '').length || 8;
+        const xOffset = ((cols - 1) * pixelSize) / 2;
+        const yOffset = ((rows - 1) * pixelSize) / 2;
+
+        relic.sprite.forEach((row, rowIndex) => {
+            [...String(row)].forEach((token, colIndex) => {
+                if (!token || token === '.' || token === '0' || token === ' ') return;
+                const color = this.getPixelRelicColorValue(palette[token] || palette.a || '#ffffff', 0xffffff);
+                const cube = new THREE.Mesh(
+                    new THREE.BoxGeometry(pixelSize, pixelSize, depth),
+                    new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.35, roughness: 0.45, metalness: 0.08 })
+                );
+                cube.position.set((colIndex * pixelSize) - xOffset, ((rows - 1 - rowIndex) * pixelSize) - yOffset, 0);
+                art.add(cube);
+            });
+        });
+
+        return art;
+    }
+
+    createRelicPedestalDisplay(relicId) {
+        const relic = this.getPixelRelicConfig(relicId);
+        const accent = this.getPixelRelicColorValue(this.getPixelRelicAccentColor(relic, '#ffaa00'), 0xffaa00);
+        const group = new THREE.Group();
+
+        const pedestal = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.9, 1.05, 0.7, 8),
+            new THREE.MeshStandardMaterial({ color: 0x2a1910, roughness: 0.65 })
+        );
+        pedestal.position.y = 0.35;
+        group.add(pedestal);
+
+        const topPlate = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.72, 0.78, 0.16, 8),
+            new THREE.MeshStandardMaterial({ color: 0x140d08, emissive: accent, emissiveIntensity: 0.15 })
+        );
+        topPlate.position.y = 0.78;
+        group.add(topPlate);
+
+        const relicArt = this.createPixelRelicVoxelArt(relic, { pixelSize: 0.18, depth: 0.18 });
+        relicArt.position.y = 1.9;
+        group.add(relicArt);
+
+        const light = new THREE.PointLight(accent, 1.1, 4.5);
+        light.position.set(0, 2.3, 0.4);
+        group.add(light);
+
+        return group;
+    }
+
+    placeDisplayedRelicTrophies() {
+        const displayed = this.progression.getDisplayedRelics().slice(0, this.progression.getDisplayedRelicLimit());
+        if (!displayed.length) return;
+
+        const trophySlots = [
+            new THREE.Vector3(-6.4, 0, -5.4),
+            new THREE.Vector3(-7.0, 0, -0.8),
+            new THREE.Vector3(-4.4, 0, 5.6),
+            new THREE.Vector3(0, 0, 7.0),
+            new THREE.Vector3(5.1, 0, -4.6),
+            new THREE.Vector3(7.0, 0, 0.8)
+        ];
+
+        displayed.forEach((relicId, index) => {
+            const slot = trophySlots[index];
+            if (!slot) return;
+            const display = this.createRelicPedestalDisplay(relicId);
+            display.position.copy(slot);
+            display.lookAt(0, 1.4, 0);
+            this.scene.add(display);
+        });
     }
 
     placeDecorationMesh(id, position) {
@@ -8078,6 +8815,7 @@ class Game3D {
 
                 this.showBurnEffect(amount);
                 this.showFloatingText(`BURNED ${amount} SPORES!`, 0xff0000, true);
+                this.tryAwardBurnRelic(amount, 'burn-pit');
                 this.updateHud();
                 updateBurnUI();
 
@@ -8274,57 +9012,102 @@ class Game3D {
             : this.progression.data.settings.lowPerfMode === false
                 ? 'HIGH FIDELITY · full effects'
                 : (isMobile ? 'SMART AUTO · tuned for this device' : 'SMART AUTO · tuned for this device');
+        const heroSignals = [
+            { label: 'MODE', value: modeLabel, accent: modeAccent },
+            { label: 'ACCESS', value: access.walletVerified ? (holderTier?.name || 'VERIFIED') : (isConnected ? 'VERIFY WALLET' : 'GUEST OPEN'), accent: access.walletVerified ? '#00ffff' : (isConnected ? '#ffaa00' : '#39FF14') },
+            { label: 'SAVE', value: this.walletSessionToken ? 'CLOUD LIVE' : (hasSave ? 'LOCAL READY' : 'FRESH START'), accent: this.walletSessionToken ? '#39FF14' : '#b6c8c0' }
+        ];
+        const openerHighlights = [
+            { label: 'ACTION RPG', value: 'Combat, quests, dungeons', accent: '#39FF14' },
+            { label: 'LIVE WAR', value: 'Holder-gated territory control', accent: '#ff8a3d' },
+            { label: 'WEB3 SAVE', value: 'Cloud sync and wallet perks', accent: '#00ffff' }
+        ];
 
         this.uiOverlay.innerHTML = `
-            <div id="start-screen-wrap" style="pointer-events: auto; width: 100%; min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: ${isMobile ? 'flex-start' : 'center'}; padding: ${topPad} ${isMobile ? 16 : 12}px ${botPad} ${isMobile ? 16 : 12}px; box-sizing: border-box;">
-                <div id="start-screen" style="display: flex; flex-direction: column; align-items: center; width: 100%; max-width: ${isMobile ? 326 : 500}px; background: linear-gradient(180deg, rgba(8,12,14,0.92), rgba(2,5,6,0.88)); padding: ${padIn}px; border: 3px solid rgba(57,255,20,0.82); border-radius: 18px; box-shadow: 0 18px 48px rgba(0,0,0,0.45), 0 0 24px rgba(57,255,20,0.16); text-align: center; box-sizing: border-box; backdrop-filter: blur(4px);">
-                    <h1 class="neon-text" style="font-size: ${titleSz}px; margin: 0 0 8px 0; color: #39FF14; text-shadow: 0 0 10px #39FF14; line-height: 1.08;">MYCO KINGDOM</h1>
-                    <p style="font-size: ${subSz}px; margin: 0 0 8px 0; color: #f5fff5; letter-spacing: ${isMobile ? 1.4 : 2}px; line-height: 1.45; max-width: ${isMobile ? 210 : 360}px;">${subtitleHtml}</p>
-                    <p style="font-size: ${lvlSz}px; margin: 0 0 ${isMobile ? 16 : 30}px 0; color: #b6c8c0; letter-spacing: 1px;">${statusLine}</p>
+            <div id="start-screen-wrap" style="pointer-events: auto; width: 100%; min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: ${isMobile ? 'flex-start' : 'center'}; padding: ${topPad} ${isMobile ? 16 : 18}px ${botPad} ${isMobile ? 16 : 18}px; box-sizing: border-box; background: radial-gradient(circle at top, rgba(57,255,20,0.08), transparent 30%), linear-gradient(180deg, rgba(1,4,3,0.74), rgba(0,0,0,0.8));">
+                <div id="start-screen" style="display: flex; flex-direction: column; align-items: center; width: 100%; max-width: ${isMobile ? 340 : 560}px; background: linear-gradient(180deg, rgba(10,16,18,0.96), rgba(3,7,8,0.92)); padding: ${isMobile ? 20 : 28}px ${isMobile ? 16 : 24}px ${isMobile ? 18 : 24}px; border: 1px solid rgba(255,255,255,0.1); border-top: 3px solid rgba(57,255,20,0.82); border-radius: 22px; box-shadow: 0 28px 80px rgba(0,0,0,0.52), 0 0 32px rgba(57,255,20,0.14), inset 0 1px 0 rgba(255,255,255,0.08); text-align: center; box-sizing: border-box; backdrop-filter: blur(10px); position: relative; overflow: hidden;">
+                    <div style="position:absolute; inset:auto -10% 58% auto; width:${isMobile ? 160 : 220}px; height:${isMobile ? 160 : 220}px; border-radius:50%; background:radial-gradient(circle, rgba(57,255,20,0.18), transparent 68%); pointer-events:none;"></div>
+                    <div style="position:absolute; inset:58% auto auto -8%; width:${isMobile ? 140 : 180}px; height:${isMobile ? 140 : 180}px; border-radius:50%; background:radial-gradient(circle, rgba(0,255,255,0.12), transparent 70%); pointer-events:none;"></div>
 
-                    <div style="display: flex; flex-direction: column; gap: ${gapSz}px; width: 100%; margin-bottom: ${isMobile ? 18 : 30}px;">
-                        <button id="start-button" style="padding: 15px; font-size: ${startFs}px; background: ${startButtonBg}; border: none; color: ${startButtonColor}; font-family: inherit; cursor: pointer; ${tapBtn}">
-                            ${startButtonLabel}
-                        </button>
-                        ${hasSave ? `<button id="new-game-button" style="padding: 12px; font-size: ${btnFs}px; background: #ff4400; border: none; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">NEW JOURNEY</button>` : ''}
-                        ${hasSave ? `<button id="change-mode-button" style="padding: 10px; font-size: ${smFs}px; background: ${modeAccent}; border: none; color: ${this.getCurrentGameMode() === 'STORY' ? 'black' : 'white'}; font-family: inherit; cursor: pointer; ${tapBtn}">GAME MODE: ${modeLabel}</button>` : ''}
-                        <div style="display: flex; gap: 10px;">
-                            <button id="leaderboard-button" style="flex: 1; padding: 12px; font-size: ${smFs}px; background: rgba(0,255,255,0.12); border: 1px solid #00ffff; color: #b8ffff; font-family: inherit; cursor: pointer; ${tapBtn}">LIVE LEADERBOARD</button>
-                            <button id="hall-of-fame-button" style="flex: 1; padding: 12px; font-size: ${smFs}px; background: rgba(255,170,0,0.12); border: 1px solid #ffaa00; color: #ffd280; font-family: inherit; cursor: pointer; ${tapBtn}">HALL OF FAME</button>
-                        </div>
-                        <button id="settings-button" style="padding: 12px; font-size: ${btnFs}px; background: #2f3436; border: 1px solid #6f7a74; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">SETTINGS</button>
+                    <div style="display:flex; flex-wrap:wrap; justify-content:center; gap:8px; width:100%; margin-bottom:${isMobile ? 14 : 16}px; position:relative; z-index:1;">
+                        ${heroSignals.map(signal => `
+                            <div style="padding:8px 10px; min-width:${isMobile ? '96px' : '108px'}; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:12px; text-align:left; box-shadow:inset 0 1px 0 rgba(255,255,255,0.05);">
+                                <div style="font-size:7px; color:#8a9891; margin-bottom:4px; letter-spacing:1px;">${signal.label}</div>
+                                <div style="font-size:8px; color:${signal.accent}; line-height:1.45;">${signal.value}</div>
+                            </div>
+                        `).join('')}
                     </div>
 
-                    <div style="width: 100%; height: 1px; background: #333; margin-bottom: ${isMobile ? 16 : 25}px;"></div>
+                    <div style="position:relative; z-index:1; display:flex; flex-direction:column; align-items:center; gap:8px; margin-bottom:${isMobile ? 16 : 18}px;">
+                        <div style="padding:6px 12px; background:rgba(57,255,20,0.1); border:1px solid rgba(57,255,20,0.24); border-radius:999px; font-size:8px; color:#c6ffbf; letter-spacing:1.4px;">PSYCHEDELIC ACTION RPG · LIVE KINGDOM BUILD</div>
+                        <h1 class="neon-text" style="font-size: ${titleSz}px; margin: 0; color: #39FF14; text-shadow: 0 0 12px rgba(57,255,20,0.9), 0 0 28px rgba(57,255,20,0.22); line-height: 1.02;">MYCO KINGDOM</h1>
+                        <p style="font-size: ${subSz}px; margin: 0; color: #f5fff5; letter-spacing: ${isMobile ? 1.3 : 2}px; line-height: 1.55; max-width: ${isMobile ? 230 : 390}px;">${subtitleHtml}</p>
+                        <p style="font-size: ${lvlSz}px; margin: 0; color: #b6c8c0; letter-spacing: 1px; line-height:1.7; max-width:${isMobile ? '100%' : '430px'};">${statusLine}</p>
+                    </div>
 
-                    <div style="display: flex; flex-direction: column; gap: 10px; align-items: center; width: 100%;">
-                        <button id="wallet-button" style="width: 100%; padding: 12px 16px; font-size: ${smFs}px; background: ${access.walletVerified ? 'rgba(0,255,255,0.14)' : isConnected ? '#333' : 'rgba(106,13,173,0.16)'}; border: 1px solid ${access.walletVerified ? '#00ffff' : '#6a0dad'}; color: white; font-family: inherit; cursor: pointer; border-radius: 5px; ${tapBtn}">
-                            ${walletLabel}
+                    <div style="display:grid; grid-template-columns:${isMobile ? '1fr' : 'repeat(3, minmax(0, 1fr))'}; gap:10px; width:100%; margin-bottom:${isMobile ? 18 : 22}px; position:relative; z-index:1; text-align:left;">
+                        ${openerHighlights.map(item => `
+                            <div style="padding:12px; background:rgba(255,255,255,0.035); border:1px solid rgba(255,255,255,0.08); border-radius:14px; min-height:${isMobile ? 0 : '86px'}; display:flex; flex-direction:column; justify-content:flex-start; gap:6px;">
+                                <div style="font-size:8px; color:${item.accent}; letter-spacing:1px;">${item.label}</div>
+                                <div style="font-size:${isMobile ? 8 : 9}px; color:#d4ded8; line-height:1.6;">${item.value}</div>
+                            </div>
+                        `).join('')}
+                    </div>
+
+                    <div style="display: flex; flex-direction: column; gap: ${gapSz}px; width: 100%; margin-bottom: ${isMobile ? 18 : 24}px; position:relative; z-index:1;">
+                        <button id="start-button" style="padding: 15px; font-size: ${startFs}px; background: linear-gradient(135deg, ${startButtonBg}, ${canEnterCurrentMode ? '#7dff64' : '#ffd15c'}); border: none; color: ${startButtonColor}; font-family: inherit; cursor: pointer; ${tapBtn} box-shadow: 0 18px 36px rgba(0,0,0,0.28);">
+                            ${startButtonLabel}
                         </button>
-                        <div style="font-size: ${isMobile ? 9 : 8}px; color: #a0aba6; line-height: 1.55; max-width: ${isMobile ? '100%' : '340px'};">${walletHint}</div>
-                        <div style="width: 100%; padding: 10px 12px; background: rgba(0,0,0,0.28); border: 1px solid rgba(0,255,255,0.2); border-radius: 6px; text-align: left; box-sizing: border-box;">
-                            <div style="font-size: 8px; color: #00ffff; letter-spacing: 1px; margin-bottom: 4px;">${cloudStatus.title}</div>
-                            <div style="font-size: 8px; color: #8fa6a2; line-height: 1.5;">${cloudStatus.body}</div>
+                        <div style="display:grid; grid-template-columns:${hasSave ? (isMobile ? '1fr' : '1fr 1fr') : '1fr'}; gap:10px;">
+                            ${hasSave ? `<button id="new-game-button" style="padding: 12px; font-size: ${btnFs}px; background: linear-gradient(135deg, #a82a12, #ff5a1f); border: 1px solid rgba(255,255,255,0.08); color: white; font-family: inherit; cursor: pointer; ${tapBtn}">NEW JOURNEY</button>` : ''}
+                            ${hasSave ? `<button id="change-mode-button" style="padding: 12px; font-size: ${btnFs}px; background: linear-gradient(135deg, ${modeAccent}, rgba(255,255,255,0.14)); border: 1px solid rgba(255,255,255,0.08); color: ${this.getCurrentGameMode() === 'STORY' ? 'black' : 'white'}; font-family: inherit; cursor: pointer; ${tapBtn}">MODE: ${modeLabel}</button>` : `<button id="settings-button" style="padding: 12px; font-size: ${btnFs}px; background: #2f3436; border: 1px solid #6f7a74; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">SETTINGS</button>`}
+                        </div>
+                        <div style="display:grid; grid-template-columns:${isMobile ? '1fr' : 'repeat(3, minmax(0, 1fr))'}; gap:10px;">
+                            <button id="leaderboard-button" style="padding: 12px; font-size: ${smFs}px; background: rgba(0,255,255,0.12); border: 1px solid #00ffff; color: #b8ffff; font-family: inherit; cursor: pointer; ${tapBtn}">LIVE LEADERBOARD</button>
+                            <button id="hall-of-fame-button" style="padding: 12px; font-size: ${smFs}px; background: rgba(255,170,0,0.12); border: 1px solid #ffaa00; color: #ffd280; font-family: inherit; cursor: pointer; ${tapBtn}">HALL OF FAME</button>
+                            ${hasSave ? `<button id="settings-button" style="padding: 12px; font-size: ${smFs}px; background: #2f3436; border: 1px solid #6f7a74; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">SETTINGS</button>` : `<button id="wallet-button-inline" style="padding: 12px; font-size: ${smFs}px; background: rgba(106,13,173,0.16); border: 1px solid #6a0dad; color: #e4d0ff; font-family: inherit; cursor: pointer; ${tapBtn}">WALLET ACCESS</button>`}
+                        </div>
+                    </div>
+
+                    <div style="width: 100%; height: 1px; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.16), transparent); margin-bottom: ${isMobile ? 16 : 20}px;"></div>
+
+                    <div style="display: flex; flex-direction: column; gap: 10px; align-items: center; width: 100%; position:relative; z-index:1;">
+                        <div style="width:100%; padding:12px; background:rgba(255,255,255,0.035); border:1px solid rgba(255,255,255,0.08); border-radius:16px; box-sizing:border-box; display:grid; gap:10px; text-align:left;">
+                            <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start; flex-wrap:wrap;">
+                                <div>
+                                    <div style="font-size:8px; color:#9cb8b1; letter-spacing:1px; margin-bottom:4px;">WALLET + CLOUD STATUS</div>
+                                    <div style="font-size:${smFs}px; color:${access.walletVerified ? '#00ffff' : '#ffffff'}; line-height:1.55;">${walletLabel}</div>
+                                </div>
+                                <div style="padding:6px 10px; border-radius:999px; border:1px solid ${access.walletVerified ? 'rgba(0,255,255,0.28)' : 'rgba(255,170,0,0.22)'}; background:${access.walletVerified ? 'rgba(0,255,255,0.08)' : 'rgba(255,170,0,0.08)'}; font-size:7px; color:${access.walletVerified ? '#8ef9ff' : '#ffd280'};">${access.walletVerified ? 'VERIFIED HOLDER' : 'GUEST READY'}</div>
+                            </div>
+                            <button id="wallet-button" style="width: 100%; padding: 12px 16px; font-size: ${smFs}px; background: ${access.walletVerified ? 'rgba(0,255,255,0.14)' : isConnected ? '#333' : 'rgba(106,13,173,0.16)'}; border: 1px solid ${access.walletVerified ? '#00ffff' : '#6a0dad'}; color: white; font-family: inherit; cursor: pointer; ${tapBtn}">
+                                ${access.walletVerified ? 'SYNC WALLET + CLOUD SAVE' : walletLabel}
+                            </button>
+                            <div style="font-size: ${isMobile ? 9 : 8}px; color: #a0aba6; line-height: 1.62; max-width: ${isMobile ? '100%' : '100%'};">${walletHint}</div>
+                            <div style="width: 100%; padding: 10px 12px; background: rgba(0,0,0,0.28); border: 1px solid rgba(0,255,255,0.2); border-radius: 10px; text-align: left; box-sizing: border-box;">
+                                <div style="font-size: 8px; color: #00ffff; letter-spacing: 1px; margin-bottom: 4px;">${cloudStatus.title}</div>
+                                <div style="font-size: 8px; color: #8fa6a2; line-height: 1.55;">${cloudStatus.body}</div>
+                            </div>
                         </div>
                         <div style="width: 100%; display:grid; grid-template-columns: 1fr; gap: 8px;">
                             ${this.renderHolderTierLadder(access)}
                         </div>
-                        ${isConnected ? `<button id="disconnect-wallet" style="font-size: 8px; color: #666; background: none; border: none; cursor: pointer; text-decoration: underline; ${tapBtn}">Disconnect</button>` : ''}
+                        ${isConnected ? `<button id="disconnect-wallet" style="font-size: 8px; color: #77807d; background: none; border: none; cursor: pointer; text-decoration: underline; ${tapBtn}">Disconnect wallet</button>` : ''}
                     </div>
 
-                    <div style="margin-top: ${isMobile ? 14 : 24}px; width: 100%; display: flex; flex-direction: ${isMobile ? 'column' : 'row'}; align-items: ${isMobile ? 'stretch' : 'center'}; justify-content: space-between; gap: ${isMobile ? 8 : 10}px; padding: 8px 10px; background: rgba(255,255,255,0.03); border: 1px solid #222; border-radius: 6px;">
+                    <div style="margin-top: ${isMobile ? 14 : 20}px; width: 100%; display: flex; flex-direction: ${isMobile ? 'column' : 'row'}; align-items: ${isMobile ? 'stretch' : 'center'}; justify-content: space-between; gap: ${isMobile ? 8 : 10}px; padding: 10px 12px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; position:relative; z-index:1;">
                         <div style="text-align: left; flex: 1;">
                             <div style="font-size: 9px; color: #ccc; letter-spacing: 1px;">GRAPHICS PROFILE</div>
-                            <div style="font-size: 7px; color: #8b9992; margin-top: 2px; line-height: 1.4;">
+                            <div style="font-size: 7px; color: #8b9992; margin-top: 4px; line-height: 1.55;">
                                 ${graphicsHelper}
                             </div>
                         </div>
-                        <button id="low-perf-toggle" style="padding: 8px 12px; font-size: 9px; background: ${this.progression.data.settings.lowPerfMode === true ? '#ff8800' : this.progression.data.settings.lowPerfMode === false ? '#39FF14' : '#444'}; color: ${this.progression.data.settings.lowPerfMode === false ? '#000' : '#fff'}; border: none; font-family: inherit; cursor: pointer; border-radius: 4px; min-width: 70px; width: ${isMobile ? '100%' : 'auto'}; ${tapBtn}">
+                        <button id="low-perf-toggle" style="padding: 9px 12px; font-size: 9px; background: ${this.progression.data.settings.lowPerfMode === true ? '#ff8800' : this.progression.data.settings.lowPerfMode === false ? '#39FF14' : '#444'}; color: ${this.progression.data.settings.lowPerfMode === false ? '#000' : '#fff'}; border: none; font-family: inherit; cursor: pointer; min-width: 84px; width: ${isMobile ? '100%' : 'auto'}; ${tapBtn}">
                             ${this.progression.data.settings.lowPerfMode === true ? 'BATTERY' : this.progression.data.settings.lowPerfMode === false ? 'HIGH' : 'AUTO'}
                         </button>
                     </div>
 
-                    <div style="margin-top: ${isMobile ? 16 : 24}px; font-size: ${isMobile ? 9 : 8}px; color: #7e8b85; letter-spacing: 1px; opacity: 0.95;">
+                    <div style="margin-top: ${isMobile ? 16 : 20}px; font-size: ${isMobile ? 9 : 8}px; color: #7e8b85; letter-spacing: 1px; opacity: 0.95; position:relative; z-index:1;">
                         LIVE BUILD v${this.getGameBuild()}
                     </div>
                 </div>
@@ -8382,6 +9165,11 @@ class Game3D {
         document.getElementById('leaderboard-button').addEventListener('click', () => this.showLeaderboard());
         document.getElementById('hall-of-fame-button').addEventListener('click', () => this.showHallOfFame());
         document.getElementById('settings-button').addEventListener('click', () => this.showSettingsMenu());
+        const walletInlineButton = document.getElementById('wallet-button-inline');
+        if (walletInlineButton) walletInlineButton.addEventListener('click', () => {
+            const walletButton = document.getElementById('wallet-button');
+            if (walletButton) walletButton.click();
+        });
         document.getElementById('wallet-button').addEventListener('click', () => {
             if (!isConnected) {
                 void this.trackTelemetryEvent('wallet_connect_clicked', {
@@ -8443,73 +9231,106 @@ class Game3D {
                 : !access.walletVerified
                     ? 'VERIFY FOR WAR'
                     : `HOLD ${access.minimum.toLocaleString('en-US')} MYCO`;
-        this.uiOverlay.innerHTML = `
-            <div style="pointer-events: auto; display: flex; flex-direction: column; align-items: center; width: 100%; min-height: 100%; background: rgba(0,0,0,0.92); padding: 30px; overflow-y: auto;">
-                <h2 class="neon-text" style="margin-bottom: 8px; font-size: 28px; color: #39FF14;">CHOOSE YOUR PATH</h2>
-                <p style="color: #aaa; font-size: 11px; margin-bottom: 28px; letter-spacing: 1px;">How will King Myco walk the Mycoverse today?</p>
-
-                <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 24px; width: 100%; max-width: 1140px;">
-
-                    <div class="mode-card" id="mode-story"
-                         style="width: 360px; background: #0a0a0a; border: 2px solid ${current === 'STORY' ? '#39FF14' : '#333'}; border-radius: 12px; padding: 24px; cursor: pointer; transition: all 0.25s;"
-                         onmouseover="this.style.borderColor='#39FF14'; this.style.boxShadow='0 0 22px #39FF14'; this.style.transform='translateY(-6px)'"
-                         onmouseout="this.style.borderColor='${current === 'STORY' ? '#39FF14' : '#333'}'; this.style.boxShadow='none'; this.style.transform='translateY(0)'">
-                        <div style="font-size: 32px; margin-bottom: 8px;">⚔️</div>
-                        <h3 style="color: #39FF14; font-size: 16px; margin: 0 0 6px 0; letter-spacing: 1px;">STORY MODE</h3>
-                        <p style="color: #888; font-size: 9px; letter-spacing: 1px; margin: 0 0 14px 0;">FULL CAMPAIGN</p>
-                        <ul style="color: #ddd; font-size: 11px; line-height: 1.6; padding-left: 18px; margin: 0 0 18px 0;">
-                            <li>Full quest, combat, and progression</li>
-                            <li>Reclaim 7 Crown Shards</li>
-                            <li>NPCs, shops, upgrades, daily rot</li>
-                            <li>Bosses, dungeons, and the Rot</li>
-                        </ul>
-                        <button id="pick-story" style="width: 100%; padding: 12px; background: #39FF14; border: none; color: black; font-family: inherit; font-weight: bold; cursor: pointer;">
-                            ${current === 'STORY' ? 'CONTINUE STORY' : 'BEGIN STORY'}
-                        </button>
+        const isMobile = !!this.isMobile;
+        const renderModeCard = ({ id, icon, accent, glow, title, subtitle, notes, buttonLabel, buttonTextColor = 'white', active, locked = false, warning = null }) => `
+            <div class="mode-card" id="mode-${id}"
+                 style="position:relative; min-height:${isMobile ? '0' : '430px'}; background:linear-gradient(180deg, rgba(12,16,18,0.98), rgba(6,9,11,0.94)); border:1px solid ${active ? accent : 'rgba(255,255,255,0.08)'}; border-top:3px solid ${accent}; border-radius:20px; padding:${isMobile ? 18 : 22}px; cursor:pointer; transition:all 0.25s; opacity:${locked ? 0.86 : 1}; box-shadow:${active ? `0 22px 56px rgba(0,0,0,0.46), 0 0 28px ${glow}` : '0 18px 38px rgba(0,0,0,0.32)'}; overflow:hidden;"
+                 onmouseover="this.style.borderColor='${accent}'; this.style.boxShadow='0 24px 60px rgba(0,0,0,0.48), 0 0 30px ${glow}'; this.style.transform='translateY(-6px)'"
+                 onmouseout="this.style.borderColor='${active ? accent : 'rgba(255,255,255,0.08)'}'; this.style.boxShadow='${active ? `0 22px 56px rgba(0,0,0,0.46), 0 0 28px ${glow}` : '0 18px 38px rgba(0,0,0,0.32)'}'; this.style.transform='translateY(0)'">
+                <div style="position:absolute; inset:auto -12% 68% auto; width:150px; height:150px; border-radius:50%; background:radial-gradient(circle, ${glow}, transparent 72%); pointer-events:none;"></div>
+                <div style="position:relative; z-index:1; display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:14px;">
+                    <div>
+                        <div style="font-size:34px; margin-bottom:10px; filter:drop-shadow(0 10px 18px rgba(0,0,0,0.35));">${icon}</div>
+                        <h3 style="color:${accent}; font-size:${isMobile ? 14 : 16}px; margin:0 0 6px 0; letter-spacing:1px;">${title}</h3>
+                        <p style="color:#98a39e; font-size:9px; letter-spacing:1.1px; margin:0; line-height:1.5;">${subtitle}</p>
                     </div>
-
-                    <div class="mode-card" id="mode-territory"
-                         style="width: 360px; background: #0a0a0a; border: 2px solid ${current === 'TERRITORY' ? '#ff6b2c' : '#333'}; border-radius: 12px; padding: 24px; cursor: pointer; transition: all 0.25s; opacity: ${territoryUnlocked ? 1 : 0.82};"
-                         onmouseover="this.style.borderColor='#ff6b2c'; this.style.boxShadow='0 0 22px #ff6b2c'; this.style.transform='translateY(-6px)'"
-                         onmouseout="this.style.borderColor='${current === 'TERRITORY' ? '#ff6b2c' : '#333'}'; this.style.boxShadow='none'; this.style.transform='translateY(0)'">
-                        <div style="font-size: 32px; margin-bottom: 8px;">🔥</div>
-                        <h3 style="color: #ff8a3d; font-size: 16px; margin: 0 0 6px 0; letter-spacing: 1px;">TERRITORY WAR</h3>
-                        <p style="color: #888; font-size: 9px; letter-spacing: 1px; margin: 0 0 14px 0;">${territoryUnlocked ? 'LIVE CLAN CONTROL' : 'LIVE HOLDER ACCESS'}</p>
-                        <ul style="color: #ddd; font-size: 11px; line-height: 1.6; padding-left: 18px; margin: 0 0 18px 0;">
-                            <li>All portals open, every warfront reachable instantly</li>
-                            <li>Regions flip live based on clan pressure</li>
-                            <li>Stand on the region flag for 20s to raise your banner</li>
-                            <li>Owned land buffs allies, hostile land fights back</li>
-                            <li>Portal banners, flags, players, and control percentages update live</li>
-                            <li style="color:${territoryUnlocked ? '#fff2a8' : '#ffb48a'};">Requires a verified wallet with ${access.minimum.toLocaleString('en-US')} MYCO</li>
-                        </ul>
-                        <button id="pick-territory" style="width: 100%; padding: 12px; background: #ff6b2c; border: none; color: white; font-family: inherit; font-weight: bold; cursor: pointer;">
-                            ${territoryButtonLabel}
-                        </button>
-                    </div>
-
-                    <div class="mode-card" id="mode-collector"
-                         style="width: 360px; background: #0a0a0a; border: 2px solid ${current === 'COLLECTOR' ? '#6a0dad' : '#333'}; border-radius: 12px; padding: 24px; cursor: pointer; transition: all 0.25s;"
-                         onmouseover="this.style.borderColor='#aa44ff'; this.style.boxShadow='0 0 22px #aa44ff'; this.style.transform='translateY(-6px)'"
-                         onmouseout="this.style.borderColor='${current === 'COLLECTOR' ? '#6a0dad' : '#333'}'; this.style.boxShadow='none'; this.style.transform='translateY(0)'">
-                        <div style="font-size: 32px; margin-bottom: 8px;">🍄</div>
-                        <h3 style="color: #aa44ff; font-size: 16px; margin: 0 0 6px 0; letter-spacing: 1px;">SPORE COLLECTOR</h3>
-                        <p style="color: #888; font-size: 9px; letter-spacing: 1px; margin: 0 0 14px 0;">SANDBOX · NO COMBAT</p>
-                        <ul style="color: #ddd; font-size: 11px; line-height: 1.6; padding-left: 18px; margin: 0 0 18px 0;">
-                            <li>All regions open - every portal unlocked</li>
-                            <li>Collect up to <span style="color:#fff2a8;">1000 spores / day</span></li>
-                            <li>Burn spores at the Burn Pit</li>
-                            <li>No enemies · no bosses · no quests</li>
-                            <li>NPCs just say hi · shops closed · no upgrades</li>
-                        </ul>
-                        <button id="pick-collector" style="width: 100%; padding: 12px; background: #6a0dad; border: none; color: white; font-family: inherit; font-weight: bold; cursor: pointer;">
-                            ${current === 'COLLECTOR' ? 'CONTINUE COLLECTING' : 'COLLECT SPORES'}
-                        </button>
-                    </div>
-
+                    <div style="padding:6px 10px; border-radius:999px; background:${active ? glow.replace('0.28', '0.16') : 'rgba(255,255,255,0.04)'}; border:1px solid ${active ? accent : 'rgba(255,255,255,0.08)'}; color:${active ? accent : '#b7c0bc'}; font-size:7px; letter-spacing:1px; white-space:nowrap;">${active ? 'ACTIVE PATH' : 'AVAILABLE'}</div>
                 </div>
+                <ul style="position:relative; z-index:1; color:#dfe7e2; font-size:${isMobile ? 10 : 11}px; line-height:1.7; padding-left:18px; margin:0 0 18px 0; display:grid; gap:6px;">
+                    ${notes.map(note => `<li style="color:${note.accent || '#dfe7e2'};">${note.text}</li>`).join('')}
+                </ul>
+                ${warning ? `<div style="position:relative; z-index:1; margin:0 0 16px 0; padding:10px 12px; border-radius:12px; background:rgba(255,170,0,0.08); border:1px solid rgba(255,170,0,0.18); color:#ffd280; font-size:8px; line-height:1.6;">${warning}</div>` : ''}
+                <button id="pick-${id}" style="position:relative; z-index:1; width:100%; padding:13px; background:linear-gradient(135deg, ${accent}, ${accent === '#39FF14' ? '#7dff64' : accent === '#ff8a3d' ? '#ffb36d' : '#d08dff'}); border:none; color:${buttonTextColor}; font-family:inherit; font-weight:bold; cursor:pointer; box-shadow:0 14px 30px rgba(0,0,0,0.24);">
+                    ${buttonLabel}
+                </button>
+            </div>
+        `;
+        this.uiOverlay.innerHTML = `
+            <div style="pointer-events: auto; display: flex; flex-direction: column; align-items: center; width: 100%; min-height: 100%; background: radial-gradient(circle at top, rgba(57,255,20,0.06), transparent 26%), linear-gradient(180deg, rgba(0,0,0,0.92), rgba(2,5,6,0.96)); padding:${isMobile ? '20px 14px 26px' : '34px 24px 40px'}; overflow-y: auto; box-sizing:border-box;">
+                <div style="width:100%; max-width:1180px; display:grid; gap:${isMobile ? 18 : 24}px;">
+                    <div style="background:linear-gradient(180deg, rgba(9,14,16,0.95), rgba(4,7,8,0.92)); border:1px solid rgba(255,255,255,0.08); border-top:3px solid #39FF14; border-radius:22px; padding:${isMobile ? 18 : 24}px; box-shadow:0 24px 64px rgba(0,0,0,0.42); position:relative; overflow:hidden;">
+                        <div style="position:absolute; inset:auto -8% 58% auto; width:190px; height:190px; border-radius:50%; background:radial-gradient(circle, rgba(57,255,20,0.16), transparent 70%);"></div>
+                        <div style="position:relative; z-index:1; display:grid; gap:14px;">
+                            <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+                                <div style="padding:7px 12px; background:rgba(57,255,20,0.1); border:1px solid rgba(57,255,20,0.24); border-radius:999px; font-size:8px; color:#c7ffbf; letter-spacing:1.2px;">KINGDOM DEPLOYMENT</div>
+                                <div style="padding:7px 12px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:999px; font-size:8px; color:#b7c0bc; letter-spacing:1.2px;">CURRENT: ${this.getGameModeLabel()}</div>
+                                <div style="padding:7px 12px; background:${territoryUnlocked ? 'rgba(255,138,61,0.12)' : 'rgba(255,255,255,0.04)'}; border:1px solid ${territoryUnlocked ? 'rgba(255,138,61,0.24)' : 'rgba(255,255,255,0.08)'}; border-radius:999px; font-size:8px; color:${territoryUnlocked ? '#ffb36d' : '#b7c0bc'}; letter-spacing:1.2px;">${territoryUnlocked ? 'LIVE WAR UNLOCKED' : `${access.minimum.toLocaleString('en-US')} MYCO FOR WAR`}</div>
+                            </div>
+                            <div>
+                                <h2 class="neon-text" style="margin:0 0 10px 0; font-size:${isMobile ? 24 : 30}px; color:#39FF14;">CHOOSE YOUR PATH</h2>
+                                <p style="color:#aab6b0; font-size:${isMobile ? 10 : 11}px; margin:0; letter-spacing:1px; line-height:1.7; max-width:760px;">Pick the mood for this session. Story mode is the full cinematic campaign, Territory War is the live holder battleground, and Spore Collector is the clean sandbox loop.</p>
+                            </div>
+                        </div>
+                    </div>
 
-                <button id="mode-back" style="margin-top: 36px; padding: 10px 26px; background: transparent; border: 1px solid #666; color: #888; font-family: inherit; font-size: 10px; cursor: pointer;">${fromStart ? 'BACK' : 'CANCEL'}</button>
+                    <div style="display:grid; grid-template-columns:${isMobile ? '1fr' : 'repeat(3, minmax(0, 1fr))'}; gap:${isMobile ? 14 : 20}px; align-items:stretch;">
+                        ${renderModeCard({
+                            id: 'story',
+                            icon: '⚔️',
+                            accent: '#39FF14',
+                            glow: 'rgba(57,255,20,0.28)',
+                            title: 'STORY MODE',
+                            subtitle: 'FULL CAMPAIGN',
+                            active: current === 'STORY',
+                            notes: [
+                                { text: 'Full quest, combat, and progression' },
+                                { text: 'Reclaim 7 Crown Shards' },
+                                { text: 'NPCs, shops, upgrades, and daily rot' },
+                                { text: 'Bosses, dungeons, and corrupted warzones' }
+                            ],
+                            buttonLabel: current === 'STORY' ? 'CONTINUE STORY' : 'BEGIN STORY',
+                            buttonTextColor: 'black'
+                        })}
+                        ${renderModeCard({
+                            id: 'territory',
+                            icon: '🔥',
+                            accent: '#ff8a3d',
+                            glow: 'rgba(255,138,61,0.28)',
+                            title: 'TERRITORY WAR',
+                            subtitle: territoryUnlocked ? 'LIVE CLAN CONTROL' : 'LIVE HOLDER ACCESS',
+                            active: current === 'TERRITORY',
+                            locked: !territoryUnlocked,
+                            warning: territoryUnlocked ? 'Every portal is open. Region flags, clan pressure, portal banners, and hostile buffs all update live.' : `Requires a verified wallet holding ${access.minimum.toLocaleString('en-US')} MYCO to enter live war.`,
+                            notes: [
+                                { text: 'All portals open, every warfront reachable instantly' },
+                                { text: 'Regions flip live based on clan pressure' },
+                                { text: 'Stand on a region flag for 20s to raise your banner' },
+                                { text: 'Owned land buffs allies, hostile land fights back', accent: territoryUnlocked ? '#fff2a8' : '#ffcfad' }
+                            ],
+                            buttonLabel: territoryButtonLabel
+                        })}
+                        ${renderModeCard({
+                            id: 'collector',
+                            icon: '🍄',
+                            accent: '#aa44ff',
+                            glow: 'rgba(170,68,255,0.26)',
+                            title: 'SPORE COLLECTOR',
+                            subtitle: 'SANDBOX · NO COMBAT',
+                            active: current === 'COLLECTOR',
+                            notes: [
+                                { text: 'All regions open, every portal unlocked' },
+                                { text: 'Collect up to 1000 spores per day', accent: '#fff2a8' },
+                                { text: 'Burn spores at the Burn Pit' },
+                                { text: 'No enemies, no bosses, no quest pressure' }
+                            ],
+                            buttonLabel: current === 'COLLECTOR' ? 'CONTINUE COLLECTING' : 'COLLECT SPORES'
+                        })}
+                    </div>
+
+                    <div style="display:flex; justify-content:center;">
+                        <button id="mode-back" style="padding: 12px 26px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.12); color: #9fa8a4; font-family: inherit; font-size: 10px; cursor: pointer; min-width:${isMobile ? '100%' : '180px'};">${fromStart ? 'BACK TO TITLE' : 'CANCEL'}</button>
+                    </div>
+                </div>
             </div>
         `;
 
@@ -8867,6 +9688,7 @@ class Game3D {
         // FX
         try { this.showBurnEffect(amount); } catch (_) {}
         this.showFloatingText(`🔥 BURNED ${amount} SPORES`, 0xff5500, true);
+        this.tryAwardBurnRelic(amount, 'collector-dashboard');
         try {
             const synth = new TONE.NoiseSynth({ noise: { type: 'brown' }, envelope: { attack: 0.1, decay: 0.8, sustain: 0 } }).toDestination();
             synth.triggerAttackRelease("4n");
@@ -10781,6 +11603,190 @@ class Game3D {
         };
     }
 
+    getPixelRelicConfig(relicId) {
+        return (CONFIG.PIXEL_RELICS || []).find(relic => relic.id === relicId) || null;
+    }
+
+    getPixelRelicAccentColor(relicInput, fallback = '#ffaa00') {
+        const relic = typeof relicInput === 'string' ? this.getPixelRelicConfig(relicInput) : relicInput;
+        const palette = relic?.palette || {};
+        return palette.c || palette.b || palette.a || fallback;
+    }
+
+    getPixelRelicColorValue(color, fallback = 0xffaa00) {
+        if (typeof color === 'number' && Number.isFinite(color)) return color;
+        if (typeof color === 'string') {
+            const parsed = Number.parseInt(color.replace('#', ''), 16);
+            if (Number.isFinite(parsed)) return parsed;
+        }
+        return fallback;
+    }
+
+    isPixelRelicMintEligible(relicInput) {
+        const relic = typeof relicInput === 'string' ? this.getPixelRelicConfig(relicInput) : relicInput;
+        const rarity = String(relic?.rarity || '').toUpperCase();
+        return rarity === 'EPIC' || rarity === 'LEGENDARY';
+    }
+
+    getPixelRelicMintState(relicId) {
+        const minted = this.progression?.getMintedRelics?.() || {};
+        const state = minted?.[relicId];
+        return state && typeof state === 'object' && !Array.isArray(state) ? state : null;
+    }
+
+    async mintPixelRelicNft(relicId) {
+        const relic = this.getPixelRelicConfig(relicId);
+        if (!relic) return false;
+        if (!this.isPixelRelicMintEligible(relic)) {
+            this.showGlobalNotification('ONLY EPIC AND LEGENDARY RELICS MINT ON-CHAIN', '#ff66cc');
+            return false;
+        }
+        if (!this.hasVerifiedWalletSession()) {
+            this.showGlobalNotification('VERIFY WALLET TO MINT TROPHIES', '#ff66cc');
+            try {
+                await this.verifyWalletSession({ source: 'pixel_relic_mint' });
+            } catch (_) {}
+            return false;
+        }
+        const existingMint = this.getPixelRelicMintState(relicId);
+        if (existingMint?.status === 'minted') {
+            this.showGlobalNotification(`${relic.name.toUpperCase()} ALREADY MINTED`, '#7dff9f');
+            return true;
+        }
+        if (this.pendingRelicMintId) return false;
+
+        const accent = this.getPixelRelicAccentColor(relic, '#ff66cc');
+        this.pendingRelicMintId = relicId;
+        this.showGlobalNotification(`MINTING ${relic.name.toUpperCase()} NFT`, accent);
+        try {
+            const result = await this.apiRequest('/api/game3d/relics/mint', {
+                method: 'POST',
+                auth: true,
+                body: JSON.stringify({ relicId })
+            });
+            if (result?.profile) {
+                await this.applyCloudProfile(result.profile, { silent: true, force: true });
+            }
+            this.showInventoryMenu();
+            this.showGlobalNotification(`${relic.name.toUpperCase()} NFT MINTED`, '#7dff9f');
+            try { this.uiSynth.triggerAttackRelease(["C5", "E5", "A5"], "8n"); } catch (_) {}
+            return true;
+        } catch (error) {
+            const code = error?.data?.error || error?.message || 'relic_mint_failed';
+            let text = 'RELIC MINT FAILED';
+            if (code === 'wallet_verified_relic_drop_required') text = 'FIND IT AGAIN WHILE WALLET VERIFIED';
+            else if (code === 'relic_not_mintable') text = 'THIS RELIC CANNOT MINT';
+            else if (code === 'relic_mint_not_configured') text = 'MINT VAULT OFFLINE';
+            else if (code === 'relic_mint_pending') text = 'MINT ALREADY PROCESSING';
+            this.showGlobalNotification(text, '#ff5555');
+            try { this.uiSynth.triggerAttackRelease("C3", "8n"); } catch (_) {}
+            return false;
+        } finally {
+            if (this.pendingRelicMintId === relicId) this.pendingRelicMintId = null;
+        }
+    }
+
+    renderPixelRelicGlyphMarkup(relicInput, { pixelSize = 8, padding = 6, background = 'rgba(0,0,0,0.4)' } = {}) {
+        const relic = typeof relicInput === 'string' ? this.getPixelRelicConfig(relicInput) : relicInput;
+        if (!relic || !Array.isArray(relic.sprite) || !relic.sprite.length) {
+            return `<div style="width:${pixelSize * 8}px; height:${pixelSize * 8}px; border:1px solid #222; background:${background};"></div>`;
+        }
+        const palette = relic.palette || {};
+        const cols = String(relic.sprite[0] || '').length || 8;
+        const borderColor = this.getPixelRelicAccentColor(relic, '#ffaa00');
+        const cells = relic.sprite.map(row => {
+            return [...String(row)].map(token => {
+                if (!token || token === '.' || token === '0' || token === ' ') {
+                    return `<span style="width:${pixelSize}px; height:${pixelSize}px;"></span>`;
+                }
+                const color = palette[token] || palette.a || '#ffffff';
+                return `<span style="width:${pixelSize}px; height:${pixelSize}px; background:${color}; box-shadow:0 0 0 1px rgba(0,0,0,0.14) inset;"></span>`;
+            }).join('');
+        }).join('');
+        return `
+            <div style="display:inline-grid; grid-template-columns:repeat(${cols}, ${pixelSize}px); grid-auto-rows:${pixelSize}px; gap:1px; padding:${padding}px; background:${background}; border:1px solid ${borderColor}; image-rendering:pixelated; box-shadow:0 0 14px rgba(0,0,0,0.28) inset;">
+                ${cells}
+            </div>
+        `;
+    }
+
+    tryAwardPixelRelic(poolKey, options = {}) {
+        const reward = this.progression?.awardRandomPixelRelic?.(poolKey, options);
+        if (!reward || !reward.relic) return null;
+
+        const accent = this.getPixelRelicAccentColor(reward.relic, '#ffaa00');
+        const accentValue = this.getPixelRelicColorValue(accent, 0xffaa00);
+        const relicName = reward.relic.name.toUpperCase();
+        const sourceLabel = options.sourceLabel || poolKey;
+
+        this.showGlobalNotification(
+            reward.isNew ? `NEW 8-BIT RELIC: ${relicName}` : `RELIC FOUND: ${relicName} x${reward.count}`,
+            accent
+        );
+        this.showFloatingText(
+            reward.isNew ? `NEW RELIC - ${relicName}` : `${relicName} x${reward.count}`,
+            accentValue,
+            true
+        );
+        try {
+            this.uiSynth.triggerAttackRelease(reward.isNew ? ["C5", "E5", "G5"] : "E5", reward.isNew ? "8n" : "16n");
+        } catch (_) {}
+
+        if (this.hasVerifiedWalletSession()) {
+            void this.submitProgressionEvent('pixel_relic_found', {
+                eventKey: options.eventKey || `pixel_relic:${poolKey}:${reward.relic.id}:${Date.now()}`,
+                regionId: options.regionId || this.currentRegion?.id || null,
+                loreId: options.loreId || null,
+                metadata: {
+                    relicId: reward.relic.id,
+                    relicName: reward.relic.name,
+                    rarity: reward.relic.rarity || 'COMMON',
+                    poolKey,
+                    sourceLabel,
+                    count: reward.count,
+                    isNew: reward.isNew,
+                    autoDisplayed: reward.autoDisplayed
+                }
+            });
+        }
+
+        return reward;
+    }
+
+    tryAwardBurnRelic(amount, source = 'burn') {
+        if (!Number.isFinite(amount) || amount < 75) return null;
+        const scaledChance = Math.max(0.2, Math.min(0.78, 0.2 + (Math.min(1000, amount) / 1000) * 0.46));
+        return this.tryAwardPixelRelic('burn', {
+            chance: scaledChance,
+            sourceLabel: `Great Burn ${amount} spores`,
+            regionId: this.currentRegion?.id || null,
+            eventKey: `pixel_relic:burn:${source}:${amount}:${Date.now()}`
+        });
+    }
+
+    toggleDisplayedPixelRelic(relicId) {
+        const result = this.progression?.toggleDisplayedRelic?.(relicId);
+        const relic = this.getPixelRelicConfig(relicId);
+        const accent = this.getPixelRelicAccentColor(relic, '#ffaa00');
+        if (!result?.ok) {
+            const text = result?.reason === 'limit'
+                ? `TROPHY ROOM FULL (${result.limit} SLOTS)`
+                : 'RELIC NOT OWNED';
+            this.showGlobalNotification(text, '#ff5555');
+            try { this.uiSynth.triggerAttackRelease("C3", "8n"); } catch (_) {}
+            return false;
+        }
+        this.showGlobalNotification(
+            result.displayed
+                ? `${(relic?.name || relicId).toUpperCase()} ON DISPLAY`
+                : `${(relic?.name || relicId).toUpperCase()} STORED`,
+            accent
+        );
+        try { this.uiSynth.triggerAttackRelease(result.displayed ? "G4" : "E4", "16n"); } catch (_) {}
+        this.showInventoryMenu();
+        return true;
+    }
+
     getAccessoriesContent() {
         const p = this.progression.data;
         const clanColor = this.getClanColor(this.selectedClan);
@@ -10794,6 +11800,17 @@ class Game3D {
         const decorCount = (p.home?.decorations || []).length;
         const forgeCount = (p.home?.decorations || []).filter(id => id === 'forge').length;
         const storageCount = (p.home?.decorations || []).filter(id => id === 'storage_chest').length;
+        const relicCollection = this.progression.getPixelRelicState();
+        const relicSummary = this.progression.getPixelRelicSummary();
+        const displayedRelics = this.progression.getDisplayedRelics();
+        const displayedRelicSet = new Set(displayedRelics);
+        const regionId = this.currentRegion?.id || p.currentRegionId || 'region8';
+        const currentRegionBuildCount = Array.isArray(p.regionBuilds?.[regionId]) ? p.regionBuilds[regionId].length : 0;
+        const totalBuildBlocks = Object.values(p.regionBuilds || {}).reduce((sum, entry) => sum + (Array.isArray(entry) ? entry.length : 0), 0);
+        const ownedRelics = Object.entries(relicCollection)
+            .map(([id, state]) => ({ relic: this.getPixelRelicConfig(id), state }))
+            .filter(entry => entry.relic && Number(entry.state?.count || 0) > 0)
+            .sort((a, b) => Number(b.state?.lastFoundAt || 0) - Number(a.state?.lastFoundAt || 0));
         const nextDwelling = (CONFIG.DWELLING_UPGRADES || []).find(upgrade => upgrade.tier === (summary.dwellingTier + 1));
         const canAffordDwelling = nextDwelling
             ? p.blueSpores >= (nextDwelling.costBlue || 0) && p.goldenSpores >= (nextDwelling.costGold || 0)
@@ -10816,6 +11833,62 @@ class Game3D {
                 </div>
             `;
         }).join('');
+        const renderRelicCard = ({ relic, state }) => {
+            const accent = this.getPixelRelicAccentColor(relic, '#ffaa00');
+            const isDisplayed = displayedRelicSet.has(relic.id);
+            const canDisplay = isDisplayed || displayedRelics.length < relicSummary.displayLimit;
+            const mintState = this.getPixelRelicMintState(relic.id);
+            const isMintable = this.isPixelRelicMintEligible(relic);
+            const mintReady = isMintable && this.hasVerifiedWalletSession();
+            const mintButtonLabel = mintState?.status === 'minted'
+                ? 'ON-CHAIN TROPHY MINTED'
+                : (!isMintable
+                    ? ''
+                    : (mintReady ? 'MINT SOLANA TROPHY NFT' : 'VERIFY WALLET TO MINT NFT'));
+            const mintButtonAction = mintReady
+                ? `window.game.mintPixelRelicNft('${relic.id}')`
+                : `window.game.verifyWalletSession({ source: 'pixel_relic_mint_button' })`;
+            return `
+                <div style="background:#111; border:1px solid ${accent}; padding:14px; display:flex; flex-direction:column; gap:10px; min-width:0;">
+                    <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
+                        ${this.renderPixelRelicGlyphMarkup(relic, { pixelSize: this.isMobile ? 6 : 7, padding: 5, background: 'rgba(0,0,0,0.55)' })}
+                        <div style="text-align:right; font-size:7px; color:#bbb; line-height:1.7;">
+                            <div>${relic.rarity}</div>
+                            <div>x${Number(state?.count || 0)}</div>
+                            <div>${isDisplayed ? 'DISPLAYED' : 'STORED'}</div>
+                            ${mintState?.status === 'minted' ? '<div style="color:#7dff9f;">NFT MINTED</div>' : (isMintable ? '<div style="color:#ff9ff0;">NFT ELIGIBLE</div>' : '')}
+                        </div>
+                    </div>
+                    <div>
+                        <div style="font-size:10px; color:${accent}; margin-bottom:6px;">${relic.name.toUpperCase()}</div>
+                        <p style="font-size:7px; color:#9fa6ad; line-height:1.7; margin:0;">${relic.lore}</p>
+                    </div>
+                    <div style="font-size:7px; color:#777; line-height:1.6;">LAST FOUND VIA ${String(state?.lastSource || 'FIELD').toUpperCase()}</div>
+                    ${mintState?.status === 'minted' && mintState?.explorerUrl ? `<a href="${mintState.explorerUrl}" target="_blank" rel="noopener noreferrer" style="font-size:7px; color:#7dff9f; text-decoration:none;">VIEW SOLANA MINT TX</a>` : ''}
+                    ${isMintable ? `
+                        <button onclick="${mintButtonAction}" style="width:100%; padding:8px; background:${mintState?.status === 'minted' ? '#17351d' : '#ff66cc'}; color:${mintState?.status === 'minted' ? '#caffd2' : '#12070f'}; border:none; font-family:inherit; font-size:8px; cursor:pointer; opacity:1;">
+                            ${mintButtonLabel}
+                        </button>
+                    ` : ''}
+                    <button onclick="window.game.toggleDisplayedPixelRelic('${relic.id}')" style="width:100%; padding:8px; background:${isDisplayed ? '#2b102f' : (canDisplay ? accent : '#333')}; color:${isDisplayed ? '#ffd2ff' : (canDisplay ? '#050505' : '#777')}; border:none; font-family:inherit; font-size:8px; cursor:${canDisplay || isDisplayed ? 'pointer' : 'not-allowed'}; opacity:${canDisplay || isDisplayed ? 1 : 0.75};">
+                        ${isDisplayed ? 'HIDE FROM TROPHY ROOM' : (canDisplay ? 'DISPLAY IN TROPHY ROOM' : 'ROOM FULL')}
+                    </button>
+                </div>
+            `;
+        };
+        const displayedRelicPreview = displayedRelics.length > 0
+            ? displayedRelics.map(id => {
+                const relic = this.getPixelRelicConfig(id);
+                if (!relic) return '';
+                const accent = this.getPixelRelicAccentColor(relic, '#ffaa00');
+                return `
+                    <div style="background:#111; border:1px solid ${accent}; padding:10px; display:flex; flex-direction:column; align-items:center; gap:8px; min-width:0;">
+                        ${this.renderPixelRelicGlyphMarkup(relic, { pixelSize: 6, padding: 5, background: 'rgba(0,0,0,0.55)' })}
+                        <div style="font-size:7px; color:${accent}; text-align:center; line-height:1.6;">${relic.name.toUpperCase()}</div>
+                    </div>
+                `;
+            }).join('')
+            : '<p style="font-size:8px; color:#888; margin:0; line-height:1.8;">No relics on display yet. Discover lore, claim territory, build the kingdom, purify rot, beat bosses, and perform Great Burns to uncover pixel trophies.</p>';
 
         return `
             <div style="padding: 20px; display: flex; flex-direction: column; gap: 16px;">
@@ -10823,7 +11896,7 @@ class Game3D {
                     <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start; flex-wrap:wrap;">
                         <div>
                             <h3 style="color: ${clanColor}; font-size: 12px; margin: 0 0 10px 0;">KINGDOM BUILDER</h3>
-                            <p style="font-size: 8px; color: #aaa; margin: 0; line-height: 1.8;">Turn Spore Collector into a grind loop. Build houses, castles, huts, stores, NPC lanes, enemy outskirts, and a custom royal dwelling with the spores you harvest.</p>
+                            <p style="font-size: 8px; color: #aaa; margin: 0; line-height: 1.8;">Turn Spore Collector into a grind loop. Build houses, castles, huts, stores, NPC lanes, enemy outskirts, and a custom royal dwelling with the spores you harvest. Then press G in the field, or use the button below, to place Minecraft-style voxel blocks in story or collector mode.</p>
                         </div>
                         <div style="font-size: 8px; color: #7effa1; line-height: 1.8;">
                             <div>BLUE ${p.blueSpores}</div>
@@ -10871,15 +11944,40 @@ class Game3D {
                             <div>TIER ${summary.dwellingTier}</div>
                             <div>${decorCount} DECOR</div>
                             <div>${storageCount} CHESTS • ${forgeCount} FORGES</div>
+                            <div>${currentRegionBuildCount} VOXELS HERE • ${totalBuildBlocks} TOTAL</div>
+                            <div>${relicSummary.displayedCount}/${relicSummary.displayLimit} TROPHIES DISPLAYED</div>
                         </div>
                     </div>
                     <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                        <button onclick="window.game.launchVoxelBuilder()" style="flex:1; min-width:180px; padding:10px; background:#8de1ff; color:black; border:none; font-family:inherit; font-size:8px; cursor:pointer;">OPEN VOXEL BUILDER</button>
                         <button onclick="window.game.showDecorationShop(true)" style="flex:1; min-width:180px; padding:10px; background:#39FF14; color:black; border:none; font-family:inherit; font-size:8px; cursor:pointer;">DECORATE INTERIOR</button>
                         <button onclick="window.game.upgradeDwelling()" style="flex:1; min-width:180px; padding:10px; background:${canAffordDwelling ? '#fff2a8' : '#333'}; color:${canAffordDwelling ? '#050505' : '#777'}; border:none; font-family:inherit; font-size:8px; cursor:${canAffordDwelling ? 'pointer' : 'not-allowed'}; opacity:${nextDwelling ? 1 : 0.7};">
                             ${nextDwelling ? `EXPAND (${nextDwelling.costBlue} BLUE${nextDwelling.costGold ? `, ${nextDwelling.costGold} GOLD` : ''})` : 'MAX DWELLING'}
                         </button>
                     </div>
                     ${nextDwelling ? `<p style="font-size:7px; color:#888; margin:0; line-height:1.7;">NEXT: ${nextDwelling.name.toUpperCase()} • ${nextDwelling.desc} • +${nextDwelling.capBonus || 0} daily collector cap.</p>` : '<p style="font-size:7px; color:#39FF14; margin:0;">Your royal dwelling is fully upgraded.</p>'}
+                </div>
+
+                <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,102,204,0.2); padding: 16px; display:flex; flex-direction:column; gap:12px;">
+                    <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start; flex-wrap:wrap;">
+                        <div>
+                            <h4 style="color:#ff66cc; font-size:10px; margin:0 0 8px 0;">TROPHY ROOM • 8-BIT LORE RELICS</h4>
+                            <p style="font-size:8px; color:#aaa; margin:0; line-height:1.8;">Rare pixel relics auto-surface across story runs, boss clears, territory claims, Great Burns, and kingdom building. Anything you display here appears in your royal interior, and epic plus legendary finds can now mint into Solana trophy NFTs.</p>
+                        </div>
+                        <div style="font-size:8px; color:#f4d5ff; line-height:1.8; text-align:right;">
+                            <div>${relicSummary.totalUnlocked}/${(CONFIG.PIXEL_RELICS || []).length} UNIQUE RELICS</div>
+                            <div>${relicSummary.totalFinds} TOTAL FINDS</div>
+                            <div>${relicSummary.displayedCount}/${relicSummary.displayLimit} DISPLAY SLOTS</div>
+                        </div>
+                    </div>
+                    <div style="display:grid; grid-template-columns:${this.isMobile ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))'}; gap:10px;">
+                        ${displayedRelicPreview}
+                    </div>
+                    ${ownedRelics.length > 0 ? `
+                        <div style="display:grid; grid-template-columns:${cardColumns}; gap:12px;">
+                            ${ownedRelics.map(renderRelicCard).join('')}
+                        </div>
+                    ` : '<p style="font-size:8px; color:#777; margin:0; line-height:1.8;">No relics found yet. Story lore drops them first, then the rarer boss, burn, build, and territory pools start opening up.</p>'}
                 </div>
 
                 <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(170,102,255,0.2); padding: 16px;">
@@ -10955,6 +12053,12 @@ class Game3D {
         kingdom[bucketKey][id] = Number(kingdom[bucketKey][id] || 0) + 1;
         p.home.level = Math.max(Number(p.home.level) || 1, Number(kingdom.dwellingTier) || 1);
         this.progression.save();
+        this.tryAwardPixelRelic('builder', {
+            chance: 0.35,
+            sourceLabel: `Built ${item.name}`,
+            regionId: 'mushroomKingdom',
+            eventKey: `pixel_relic:builder:${bucketKey}:${id}:${kingdom[bucketKey][id]}`
+        });
         this.updateHud();
         this.showInventoryMenu();
         this.showGlobalNotification(`${item.name.toUpperCase()} BUILT`, '#39FF14');
@@ -10981,6 +12085,12 @@ class Game3D {
         kingdom.dwellingTier = nextUpgrade.tier;
         p.home.level = Math.max(Number(p.home.level) || 1, nextUpgrade.tier);
         this.progression.save();
+        this.tryAwardPixelRelic('builder', {
+            chance: 1,
+            sourceLabel: `Dwelling upgraded to tier ${nextUpgrade.tier}`,
+            regionId: 'mushroomKingdom',
+            eventKey: `pixel_relic:dwelling:${nextUpgrade.tier}`
+        });
         this.updateHud();
         this.showInventoryMenu();
         this.showGlobalNotification(`${nextUpgrade.name.toUpperCase()} UNLOCKED`, '#fff2a8');
@@ -11878,6 +12988,12 @@ class Game3D {
 
                     <!-- Top Right Menu Buttons -->
                     <div style="position: absolute; top: ${topButtonsTop}; right: ${topButtonsRight}; pointer-events: auto; display: flex; gap: 10px; z-index: 4;">
+                        <button onclick="window.game.toggleBuildMode()" style="
+                            min-width: ${isMobileHud ? '54px' : '44px'}; height: 32px; border-radius: 5px;
+                            background: ${this.buildMode?.active ? 'rgba(141,225,255,0.92)' : 'rgba(0,0,0,0.5)'}; border: 2px solid #8de1ff;
+                            color: ${this.buildMode?.active ? '#041015' : '#8de1ff'}; font-size: 10px; cursor: pointer;
+                            display: flex; align-items: center; justify-content: center; font-weight: bold;
+                        ">BUILD</button>
                         <button onclick="window.game.toggleMinimap()" style="
                             width: 32px; height: 32px; border-radius: 5px;
                             background: rgba(0,0,0,0.5); border: 2px solid #39FF14;
@@ -12525,8 +13641,8 @@ class Game3D {
         const controlHint = this.isMobile
             ? ''
             : this.progression.isCollectorMode()
-                ? `WASD: FREE MOVE • ARROWS: TURN / DRIVE • SPACE: JUMP • E: COLLECT / INTERACT • SHIFT: DASH • B: BURN PIT`
-                : `WASD: FREE MOVE • ARROWS: TURN / DRIVE • SPACE: JUMP (x2) • X: ATTACK • Q / PAD B: EQUIPPED MAGIC • E: INTERACT • SHIFT: DASH • U: UPGRADES • B: BURN PIT`;
+                ? `WASD: FREE MOVE • ARROWS: TURN / DRIVE • SPACE: JUMP • E: COLLECT / INTERACT • SHIFT: DASH • G: BUILD • B: BURN PIT`
+                : `WASD: FREE MOVE • ARROWS: TURN / DRIVE • SPACE: JUMP (x2) • X: ATTACK • Q / PAD B: EQUIPPED MAGIC • E: INTERACT • SHIFT: DASH • G: BUILD • U: UPGRADES • B: BURN PIT`;
 
         this.uiOverlay.innerHTML = `
             <div id="hud" style="position: absolute; inset: 0; pointer-events: none;"></div>
@@ -12599,6 +13715,38 @@ class Game3D {
             window.removeEventListener('keydown', this._gameplayHotkeyHandler);
         }
         this._gameplayHotkeyHandler = (e) => {
+            if (e.code === 'KeyG' && this.gameState === 'PLAYING') {
+                e.preventDefault();
+                this.toggleBuildMode();
+                return;
+            }
+            if (this.buildMode?.active && this.gameState === 'PLAYING') {
+                if (e.code === 'KeyR') {
+                    e.preventDefault();
+                    this.placeBuildBlock();
+                    return;
+                }
+                if (e.code === 'KeyT') {
+                    e.preventDefault();
+                    this.removeBuildBlock();
+                    return;
+                }
+                if (e.code === 'BracketLeft') {
+                    e.preventDefault();
+                    this.adjustBuildHeight(-1);
+                    return;
+                }
+                if (e.code === 'BracketRight') {
+                    e.preventDefault();
+                    this.adjustBuildHeight(1);
+                    return;
+                }
+                if (e.code === 'KeyC') {
+                    e.preventDefault();
+                    this.cycleBuildMaterial(1);
+                    return;
+                }
+            }
             if (e.code === 'KeyQ' && this.gameState === 'PLAYING') {
                 if (!this.getEquippedSkillId()) {
                     this.showFloatingText("EQUIP A SKILL (U)", 0x888888);
@@ -13105,6 +14253,9 @@ class Game3D {
 
         this.updateDayCycle();
         this.simulateGlobalActivity();
+        this.updateSkyDragon(now);
+        this.updateStageCookingStation(now);
+        this.updateBuildModePreview();
         if ((this.gameState === 'PLAYING' || this.isPaused) && now >= (this.nextTerritoryRefreshAt || 0)) {
             this.nextTerritoryRefreshAt = now + (this.progression?.isTerritoryWarMode?.() ? TERRITORY_REFRESH_LOOP_MS : 15000);
             void this.refreshLiveTerritory();
@@ -13408,6 +14559,14 @@ class Game3D {
                 }
             });
 
+            if (this.stageCookingStation && this.player.group.position.distanceTo(this.stageCookingStation.position) < 4) {
+                this.showProximityPrompt(this.stageCookingStation, "WITCH'S CAULDRON (E)");
+                if (this.player.keys.interact) {
+                    this.player.keys.interact = false;
+                    this.showCookingMenu();
+                }
+            }
+
             // V1.9.14 - Interaction: Boss Dungeon door. Inspectable from a wide ring so
             // the prompt fires before the player walks through the gateway.
             if (!this.isInterior && this.bossDungeon) {
@@ -13653,6 +14812,12 @@ class Game3D {
                         this.progression.data.shardsCollected = (this.progression.data.shardsCollected || 0) + 1;
                         this.progression.save();
                         if (col.rewardRegionId) this.progression.clearBossReward(col.rewardRegionId, 'shard');
+                        this.tryAwardPixelRelic('boss', {
+                            chance: 1,
+                            sourceLabel: `${this.currentRegion?.name || col.rewardRegionId || 'Boss'} crown shard`,
+                            regionId: this.currentRegion?.id || col.rewardRegionId || null,
+                            eventKey: `pixel_relic:crown_shard:${this.currentRegion?.id || 'unknown'}:${this.progression.data.shardsCollected}`
+                        });
                         if (this.hasVerifiedWalletSession()) {
                             void this.submitProgressionEvent('crown_shard_collected', {
                                 eventKey: `crown_shard:${this.currentRegion?.id || 'unknown'}:${this.progression.data.shardsCollected}`,
@@ -13821,7 +14986,7 @@ class Game3D {
     talkToNPC(npc) {
         if (this.gameState === 'DIALOGUE') return;
         // V1.9.21 - Spore Collector mode: NPCs only offer a friendly wave. No quests.
-        if (this.progression.isCollectorMode()) {
+        if (this.progression.isCollectorMode() && !npc?.allowCollectorDialogue && !npc?.config?.allowCollectorDialogue) {
             this.gameState = 'DIALOGUE';
             const greetings = [
                 "Hello, harvester! The spores are plentiful today.",

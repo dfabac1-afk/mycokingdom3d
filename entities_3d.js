@@ -4372,7 +4372,7 @@ export class Player3D {
         // hub world from feeling slow to cross.
         this.baseSpeed = 0.28;
         this.rotationSpeed = 0.05;
-        this.turnInPlaceSpeed = 0.18;
+        this.turnInPlaceSpeed = 0.06;
         this.slowFactor = 1.0;
         this.baseGravity = -0.015;
         this.jumpPower = 0.35;

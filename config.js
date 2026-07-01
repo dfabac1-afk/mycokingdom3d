@@ -298,6 +298,128 @@ export const CONFIG = {
         { id: 'royal_bloodline', title: 'The Lineage', text: 'Every King before Myco has burned spores to keep the network alive. The Great Burn is a necessity, not a choice.' },
         { id: 'dark_mycelius_origin', title: 'The Glitch King', text: 'Dark Mycelius was originally a backup protocol that became corrupted after the Void leak.' }
     ],
+    PIXEL_RELICS: [
+        {
+            id: 'chronicler_chip',
+            name: 'Chronicler Chip',
+            rarity: 'COMMON',
+            weight: 18,
+            pools: ['lore', 'builder'],
+            lore: 'A story-slate the Chronicler used to cache royal line notes before the Rot blackout.',
+            palette: { a: '#4c2b16', b: '#ffaa00', c: '#fff2a8' },
+            sprite: ['..bb....', '.baab...', '.baab...', '.baab...', '.baab...', '.baab...', '.bccb...', '........']
+        },
+        {
+            id: 'sporewood_idol',
+            name: 'Sporewood Idol',
+            rarity: 'COMMON',
+            weight: 16,
+            pools: ['lore', 'quest'],
+            lore: 'A toy totem carved for the nursery groves where the first data-shrooms were raised.',
+            palette: { a: '#20542a', b: '#7dff9f', c: '#d7ff6b' },
+            sprite: ['..bb....', '.bbbb...', 'bbccbb..', '..cc....', '.acca...', '.acca...', '.a..a...', '........']
+        },
+        {
+            id: 'crystal_archive',
+            name: 'Crystal Archive',
+            rarity: 'RARE',
+            weight: 12,
+            pools: ['lore', 'boss'],
+            lore: 'A shard-drive that still hums with fragments of the cavern archive.',
+            palette: { a: '#1c3d58', b: '#00ffff', c: '#c8fbff' },
+            sprite: ['...b....', '..bcb...', '.bcacb..', 'bcaaacb.', '.bcacb..', '..bcb...', '...b....', '........']
+        },
+        {
+            id: 'bog_pearl_tablet',
+            name: 'Bog Pearl Tablet',
+            rarity: 'RARE',
+            weight: 11,
+            pools: ['quest', 'territory'],
+            lore: 'Marsh keepers etched route markers into pearl-shell tablets before the rot tides rose.',
+            palette: { a: '#355d3d', b: '#ffcc88', c: '#ffe8c6' },
+            sprite: ['..bbb...', '.bcccb..', 'bccaccb.', 'bcaaacb.', 'bccaccb.', '.bcccb..', '..bbb...', '........']
+        },
+        {
+            id: 'silkloom_seal',
+            name: 'Silkloom Seal',
+            rarity: 'RARE',
+            weight: 10,
+            pools: ['territory', 'lore'],
+            lore: 'A web-stamped signet once used to secure clan messages across the canopy.',
+            palette: { a: '#53416f', b: '#d9c8ff', c: '#fefefe' },
+            sprite: ['b......b', '.b....b.', '..b..b..', '...bb...', '..bccb..', '.bcaccb.', 'bcc..ccb', '........']
+        },
+        {
+            id: 'ember_core_totem',
+            name: 'Ember Core Totem',
+            rarity: 'EPIC',
+            weight: 8,
+            pools: ['burn', 'boss'],
+            lore: 'A furnace charm wired to remember every Great Burn that kept the kingdom alive.',
+            palette: { a: '#5b1900', b: '#ff5500', c: '#ffd166' },
+            sprite: ['...b....', '..bcb...', '.bcacb..', '.bcacb..', '..cac...', '.bcacb..', 'bccaccb.', '........']
+        },
+        {
+            id: 'null_eye_disk',
+            name: 'Null Eye Disk',
+            rarity: 'EPIC',
+            weight: 7,
+            pools: ['territory', 'boss'],
+            lore: 'An observing disk from the Void leak, polished smooth by endless corrupted watch cycles.',
+            palette: { a: '#3d0d33', b: '#ff4fbf', c: '#ffd2f0' },
+            sprite: ['..bbbb..', '.bcaccb.', 'bcaaacb.', 'bcaaacb.', 'bcaaacb.', '.bcaccb.', '..bbbb..', '....c...']
+        },
+        {
+            id: 'crown_archive',
+            name: 'Crown Archive',
+            rarity: 'EPIC',
+            weight: 7,
+            pools: ['boss', 'builder'],
+            lore: 'A miniature crown-core model used by old architects to plan royal tower expansions.',
+            palette: { a: '#5d4308', b: '#f7d24b', c: '#fff7c2' },
+            sprite: ['.b....b.', 'bbbbbbbb', '.bccccc.', '..cacc..', '..cacc..', '.bbaabb.', 'b......b', '........']
+        },
+        {
+            id: 'war_banner_pin',
+            name: 'War Banner Pin',
+            rarity: 'RARE',
+            weight: 10,
+            pools: ['territory', 'builder'],
+            lore: 'A tiny signal-banner issued to captains who held the front long enough to change the map.',
+            palette: { a: '#2a304e', b: '#66ccff', c: '#ffffff' },
+            sprite: ['..bb....', '..baaaa.', '..baaaa.', '..bacc..', '..baaaa.', '..bb....', '.bcb....', '........']
+        },
+        {
+            id: 'great_burn_ledger',
+            name: 'Great Burn Ledger',
+            rarity: 'RARE',
+            weight: 10,
+            pools: ['burn', 'lore'],
+            lore: 'A pocket ledger that tallied the royal spore tithe when the network heart dimmed.',
+            palette: { a: '#402615', b: '#ff7b39', c: '#ffe4b5' },
+            sprite: ['bbbbbb..', 'baaaab..', 'bacccb..', 'baaaab..', 'bacccb..', 'baaaab..', 'bbbbbb..', '..cc....']
+        },
+        {
+            id: 'rot_quarantine_badge',
+            name: 'Rot Quarantine Badge',
+            rarity: 'RARE',
+            weight: 9,
+            pools: ['quest', 'territory'],
+            lore: 'A ward-badge issued to grove cleansers when a blight front was finally contained.',
+            palette: { a: '#224a38', b: '#39FF14', c: '#c9ffd0' },
+            sprite: ['..bbbb..', '.bc..cb.', 'bc.b.bc.', 'bc....cb', 'bc.b.bc.', '.bc..cb.', '..bbbb..', '...cc...']
+        },
+        {
+            id: 'thronecap_holo_crown',
+            name: 'Thronecap Holo Crown',
+            rarity: 'LEGENDARY',
+            weight: 3,
+            pools: ['boss', 'lore', 'territory'],
+            lore: 'A hologram crown fragment projected by the citadel itself, proof the kingdom still remembers its ruler.',
+            palette: { a: '#6b155f', b: '#ff66cc', c: '#fff08f' },
+            sprite: ['.b....b.', 'bbbbbbbb', 'bccbbccb', '.ccbbcc.', '..caac..', '.bc..cb.', 'b......b', '..bbbb..']
+        }
+    ],
     // V1.9.12 - Portal key items. Each region (after the hub) requires King Myco to hold a unique
     // glowing key item to unlock its portal. Bosses always drop their region's key; the sporewood
     // token drops from the hub's guard enemies as the tutorial introduction.
@@ -587,22 +709,61 @@ export const CONFIG = {
                         name: 'Witch Mirella',
                         sprite: 'npc-sprig.webp',
                         role: 'mage',
+                        allowCollectorDialogue: true,
                         trust: 'good',
                         dialogue: {
                             root: {
-                                text: "Shhh. The trees listen. I am Mirella — last of the Verdant Coven. Would you learn a SPELL, or hear of a HIDDEN GROVE?",
+                                text: "Shhh. The trees listen. I am Mirella, last of the Verdant Coven. My cauldron is awake beside the village. Ask of MEALS, POTIONS, SPELLS, or INGREDIENTS and I will guide you.",
                                 options: [
-                                    { label: "TEACH ME A SPELL", next: "spell" },
-                                    { label: "HIDDEN GROVE?", next: "grove" },
+                                    { label: "MEALS", next: "meals" },
+                                    { label: "POTIONS", next: "potions" },
+                                    { label: "SPELLS", next: "spell" },
+                                    { label: "INGREDIENTS", next: "ingredients" },
                                     { label: "WHO ARE YOU?", next: "lore" }
                                 ]
                             },
+                            meals: {
+                                text: "Simple meals keep a young king alive. Hearty Soup is the first recipe I teach. Three ingredients and five blue spores will warm the body and restore health in a pinch.",
+                                options: [
+                                    { label: "ANY RECIPE CLUES?", next: "recipe_clues" },
+                                    { label: "BACK", next: "root" }
+                                ]
+                            },
+                            potions: {
+                                text: "Potions are meals taught to misbehave. Spore Brew sharpens magic for a short while, and Royal Nectar is a costly rescue draught fit for boss fights. The stronger the brew, the rarer the ingredients.",
+                                options: [
+                                    { label: "WHAT SHOULD I BREW FIRST?", next: "first_brew" },
+                                    { label: "BACK", next: "root" }
+                                ]
+                            },
                             spell: {
-                                text: "The Verdant Pulse - a healing wave that restores HP when MAGIC is high. Mossfang cannot interrupt it if you cast from cover. Practice with your wand and the spell will reveal itself when you are ready.",
-                                options: [{ label: "THANK YOU", next: "root" }]
+                                text: "The Verdant Pulse is a healing wave that restores HP when your magic is high. Mossfang cannot interrupt it if you cast from cover. Meals feed the body, potions feed the reserves, and spells turn preparation into survival.",
+                                options: [
+                                    { label: "HOW DO I PREPARE WELL?", next: "prep" },
+                                    { label: "BACK", next: "root" }
+                                ]
+                            },
+                            ingredients: {
+                                text: "Gather glowing forage from the field and the cauldron will do the rest. Common caps near the paths feed soups. Richer ingredients hide near rot pools, puzzle huts, and boss roads.",
+                                options: [
+                                    { label: "WHERE SHOULD I LOOK?", next: "grove" },
+                                    { label: "BACK", next: "root" }
+                                ]
+                            },
+                            recipe_clues: {
+                                text: "Remember the ladder: three ingredients makes soup, five with ten blue spores makes Spore Brew, and ten ingredients with a touch of gold becomes Royal Nectar. If a fight feels impossible, your cauldron is probably the missing answer.",
+                                options: [{ label: "I'LL USE THE CAULDRON", next: "root" }]
+                            },
+                            first_brew: {
+                                text: "Start with soup until your hands learn the rhythm. When ingredients become steady, brew Spore Brew before long boss treks. Save Royal Nectar for the moment you truly think you might fall.",
+                                options: [{ label: "GOOD ADVICE", next: "root" }]
+                            },
+                            prep: {
+                                text: "Never walk into Mossfang's grove empty. A meal restores flesh, a potion boosts power, and a spell wins the opening you create. Preparation is its own kind of magic.",
+                                options: [{ label: "UNDERSTOOD", next: "root" }]
                             },
                             grove: {
-                                text: "Beyond the spore pools, a circle of standing toadstools hides a Gold Spore offering. Approach at dusk or you'll find only mist. The rot has not yet found it.",
+                                text: "Beyond the spore pools, a circle of standing toadstools hides a Gold Spore offering. Approach at dusk or you'll find only mist. The rot has not yet found it, and the nearby brush often sprouts extra ingredients.",
                                 options: [{ label: "AT DUSK, NOTED", next: "root" }]
                             },
                             lore: {
