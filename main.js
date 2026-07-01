@@ -26,7 +26,7 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { Player3D, Enemy3D, RotInfectedEnemy3D, LightPool3D, Boss3D, MossfangSentinel3D, ShardcapWarden3D, DarkMycelius3D, GrandRotBoss3D, BogbellyMyconid3D, WidowcapWeaver3D, Collectible3D, NPC3D, Portal3D, Chest3D, NetTrap3D, Hazard3D, PuzzlePillar3D, SporeBomb3D, VoxelCorruptedHazard3D, InteractiveBuilding3D, RotCluster3D, CitadelGate3D, TerritoryFlag3D, RemoteClanPlayer3D } from './entities_3d.js';
 import { CONFIG } from './config.js';
 
-const LIVE_BUILD = '1.9.65';
+const LIVE_BUILD = '1.9.66';
 const CLOUD_SESSION_KEY = 'myco_quest_wallet_session_v1';
 const CLOUD_BALANCE_KEY = 'myco_quest_wallet_balance_v1';
 const CLOUD_LAST_SYNC_KEY = 'myco_quest_wallet_last_sync_v1';
@@ -1306,7 +1306,8 @@ class Game3D {
         this.buildMode = {
             active: false,
             materialIndex: 0,
-            height: 0
+            height: 0,
+            firstPerson: true
         };
         this.citadelGate = null;
         this.lootCount = 0;
@@ -5577,6 +5578,19 @@ class Game3D {
         return pos;
     }
 
+    isBuildFirstPersonActive() {
+        return !!(this.buildMode?.active
+            && this.buildMode.firstPerson !== false
+            && this.gameState === 'PLAYING'
+            && !this.isInterior
+            && this.player?.group);
+    }
+
+    syncBuildModePresentation() {
+        if (!this.player?.group) return;
+        this.player.group.visible = !this.isBuildFirstPersonActive();
+    }
+
     hideBuildModeHud() {
         if (this.buildHud) this.buildHud.style.display = 'none';
     }
@@ -5617,7 +5631,8 @@ class Game3D {
             count,
             buildLimit,
             material.id,
-            this.buildMode.height
+            this.buildMode.height,
+            this.buildMode.firstPerson !== false ? 'fp' : 'tp'
         ].join('|');
         if (this.buildHudStateKey === hudStateKey && this.buildHud.style.display === 'block') return;
         this.buildHudStateKey = hudStateKey;
@@ -5628,6 +5643,7 @@ class Game3D {
                     <div style="color:#39FF14; font-size:${this.isMobile ? '12px' : '11px'}; letter-spacing:1px; margin-bottom:4px;">VOXEL BUILDER</div>
                     <div style="color:#cfd8dc; font-size:${this.isMobile ? '10px' : '9px'}; line-height:1.7;">${(this.currentRegion?.name || regionId).toUpperCase()} • ${count}/${buildLimit} BLOCKS</div>
                     <div style="color:#8de1ff; font-size:${this.isMobile ? '10px' : '9px'}; line-height:1.7;">MATERIAL: ${material.name} • HEIGHT: ${this.buildMode.height}</div>
+                    <div style="color:#ecd8ff; font-size:${this.isMobile ? '9px' : '8px'}; line-height:1.7;">CAMERA: FIRST PERSON BUILD VIEW</div>
                 </div>
                 <button onclick="window.game.toggleBuildMode(false)" style="padding:${this.isMobile ? '10px 12px' : '6px 10px'}; min-height:${this.isMobile ? '42px' : '0'}; background:#5a1620; color:#ffd7df; border:none; border-radius:8px; font-size:${this.isMobile ? '10px' : '8px'}; cursor:pointer;">CLOSE</button>
             </div>
@@ -5638,7 +5654,7 @@ class Game3D {
                 <button onclick="window.game.adjustBuildHeight(-1)" style="padding:${this.isMobile ? '12px' : '10px'}; min-height:${this.isMobile ? '46px' : '0'}; background:#1c2f42; color:#8de1ff; border:none; border-radius:10px; font-size:${this.isMobile ? '10px' : '9px'}; cursor:pointer;">HEIGHT -</button>
                 <button onclick="window.game.cycleBuildMaterial(1)" style="grid-column:1 / span 2; padding:${this.isMobile ? '12px' : '10px'}; min-height:${this.isMobile ? '46px' : '0'}; background:#2a203f; color:#ecd8ff; border:none; border-radius:10px; font-size:${this.isMobile ? '10px' : '9px'}; cursor:pointer;">CYCLE MATERIAL</button>
             </div>
-            <div style="color:#7b8a90; font-size:${this.isMobile ? '9px' : '8px'}; line-height:1.7; margin-top:10px;">${this.isMobile ? 'Mobile: use these buttons, then move to aim your preview block.' : 'Desktop: G toggle • R place • T remove • [ / ] height • C material'}</div>
+            <div style="color:#7b8a90; font-size:${this.isMobile ? '9px' : '8px'}; line-height:1.7; margin-top:10px;">${this.isMobile ? 'Mobile: build mode swaps to first person. Turn and move to line up the preview block.' : 'Desktop: build mode uses first person • G toggle • R place • T remove • [ / ] height • C material'}</div>
         `;
     }
 
@@ -5653,12 +5669,14 @@ class Game3D {
             if (this.buildPreview) this.buildPreview.visible = false;
             this.buildHudStateKey = '';
             this.hideBuildModeHud();
+            this.syncBuildModePresentation();
             this.showGlobalNotification('VOXEL BUILDER CLOSED', '#8aa0a8');
             return false;
         }
         this.buildMode.height = Math.max(0, this.buildMode.height || 0);
         this.showGlobalNotification('VOXEL BUILDER LIVE', '#39FF14');
         this.buildHudStateKey = '';
+        this.syncBuildModePresentation();
         this.renderBuildModeHud();
         this.updateBuildModePreview();
         return true;
@@ -5730,8 +5748,10 @@ class Game3D {
         if (!this.buildMode?.active || this.gameState !== 'PLAYING' || this.isInterior || !this.player?.group) {
             if (this.buildPreview) this.buildPreview.visible = false;
             this.hideBuildModeHud();
+            this.syncBuildModePresentation();
             return;
         }
+        this.syncBuildModePresentation();
         const material = this.getActiveBuildMaterial();
         const pos = this.getVoxelBuildPreviewPosition();
         if (!this.buildPreview) {
@@ -14349,34 +14369,15 @@ class Game3D {
                 void this.syncTerritoryPresence();
             }
 
+            const useBuildFirstPerson = this.isBuildFirstPersonActive();
+            this.syncBuildModePresentation();
+
             // Roblox Camera Logic, but with a little more spring and look-ahead so
             // movement feels smoother and combat reads better.
-            this.cameraDist = THREE.MathUtils.lerp(this.cameraDist, this.cameraTargetDist, 0.1);
-
-            const playerYaw = this.player.group.rotation.y;
-            const desiredYaw = playerYaw + Math.PI;
-            if (!this.isRightMouseDown) {
-                let delta = desiredYaw - this.cameraYaw;
-                delta = Math.atan2(Math.sin(delta), Math.cos(delta));
-                this.cameraYaw += delta * (this.player.isWalking ? 0.085 : 0.06);
-                this.cameraPitch = THREE.MathUtils.lerp(this.cameraPitch, -0.35, 0.04);
-            }
-
             const facing = this._tmpCameraFacing.set(0, 0, 1).applyQuaternion(this.player.group.quaternion);
             facing.y = 0;
             if (facing.lengthSq() < 0.001) facing.set(0, 0, 1);
             facing.normalize();
-
-            if (this.cameraPivot.lengthSq() === 0) this.cameraPivot.copy(this.player.group.position);
-
-            const dashLookAhead = performance.now() < (this.player._dashActiveUntil || 0) ? 0.85 : 0;
-            const lookAheadDistance = this.player.isWalking ? 0.7 + dashLookAhead : 0.22 + dashLookAhead;
-            const desiredPivot = this._tmpCameraPivot.copy(this.player.group.position).addScaledVector(facing, this.player.isWalking ? 0.18 : 0);
-            const desiredLookTarget = this._tmpCameraLookTarget.copy(this.player.group.position).addScaledVector(facing, lookAheadDistance);
-            desiredLookTarget.y += this.player.isWalking ? 1.35 : 1.28;
-
-            this.cameraPivot.lerp(desiredPivot, this.player.isWalking ? 0.22 : 0.12);
-            this.cameraLookTarget.lerp(desiredLookTarget, this.player.isWalking ? 0.18 : 0.11);
 
             let shakeX = 0;
             let shakeY = 0;
@@ -14391,12 +14392,51 @@ class Game3D {
                 if (this.cameraShakeEnergy < 0.002) this.cameraShakeEnergy = 0;
             }
 
-            const cameraX = this.cameraPivot.x + Math.sin(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDist + shakeX;
-            const cameraY = this.cameraPivot.y - Math.sin(this.cameraPitch) * this.cameraDist + 1.5 + shakeY;
-            const cameraZ = this.cameraPivot.z + Math.cos(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDist + shakeZ;
+            if (useBuildFirstPerson) {
+                const previewPos = this.getVoxelBuildPreviewPosition();
+                const eyePos = this._tmpCameraPivot.copy(this.player.group.position);
+                eyePos.y += this.isMobile ? 1.58 : 1.64;
+                eyePos.addScaledVector(facing, 0.18);
 
-            this.camera.position.set(cameraX, cameraY, cameraZ);
-            this.camera.lookAt(this.cameraLookTarget.x, this.cameraLookTarget.y, this.cameraLookTarget.z);
+                const lookTarget = this._tmpCameraLookTarget.copy(previewPos);
+                lookTarget.y += 0.4;
+
+                this.camera.position.set(eyePos.x + shakeX, eyePos.y + shakeY, eyePos.z + shakeZ);
+                this.camera.lookAt(lookTarget.x, lookTarget.y, lookTarget.z);
+
+                const buildViewDir = lookTarget.clone().sub(eyePos).normalize();
+                this.cameraYaw = Math.atan2(buildViewDir.x, buildViewDir.z) + Math.PI;
+                this.cameraPitch = -Math.asin(Math.max(-0.98, Math.min(0.98, buildViewDir.y)));
+            } else {
+                this.cameraDist = THREE.MathUtils.lerp(this.cameraDist, this.cameraTargetDist, 0.1);
+
+                const playerYaw = this.player.group.rotation.y;
+                const desiredYaw = playerYaw + Math.PI;
+                if (!this.isRightMouseDown) {
+                    let delta = desiredYaw - this.cameraYaw;
+                    delta = Math.atan2(Math.sin(delta), Math.cos(delta));
+                    this.cameraYaw += delta * (this.player.isWalking ? 0.085 : 0.06);
+                    this.cameraPitch = THREE.MathUtils.lerp(this.cameraPitch, -0.35, 0.04);
+                }
+
+                if (this.cameraPivot.lengthSq() === 0) this.cameraPivot.copy(this.player.group.position);
+
+                const dashLookAhead = performance.now() < (this.player._dashActiveUntil || 0) ? 0.85 : 0;
+                const lookAheadDistance = this.player.isWalking ? 0.7 + dashLookAhead : 0.22 + dashLookAhead;
+                const desiredPivot = this._tmpCameraPivot.copy(this.player.group.position).addScaledVector(facing, this.player.isWalking ? 0.18 : 0);
+                const desiredLookTarget = this._tmpCameraLookTarget.copy(this.player.group.position).addScaledVector(facing, lookAheadDistance);
+                desiredLookTarget.y += this.player.isWalking ? 1.35 : 1.28;
+
+                this.cameraPivot.lerp(desiredPivot, this.player.isWalking ? 0.22 : 0.12);
+                this.cameraLookTarget.lerp(desiredLookTarget, this.player.isWalking ? 0.18 : 0.11);
+
+                const cameraX = this.cameraPivot.x + Math.sin(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDist + shakeX;
+                const cameraY = this.cameraPivot.y - Math.sin(this.cameraPitch) * this.cameraDist + 1.5 + shakeY;
+                const cameraZ = this.cameraPivot.z + Math.cos(this.cameraYaw) * Math.cos(this.cameraPitch) * this.cameraDist + shakeZ;
+
+                this.camera.position.set(cameraX, cameraY, cameraZ);
+                this.camera.lookAt(this.cameraLookTarget.x, this.cameraLookTarget.y, this.cameraLookTarget.z);
+            }
 
             // Update Spatial Audio Listener
             if (this.audioUnlocked) {
