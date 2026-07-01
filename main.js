@@ -3517,6 +3517,45 @@ class Game3D {
         const jumpBtn   = makeBtn('JUMP',   'jump');
         const interactBtn = makeBtn('INTERACT', 'interact');
 
+        const isMobileBuildMode = () => !!(this.buildMode?.active && this.gameState === 'PLAYING' && !this.isInterior);
+        const setMobileButtonTone = (el, tone) => {
+            if (tone === 'build') {
+                el.style.background = 'radial-gradient(circle at 30% 30%, rgba(141,225,255,0.92), rgba(34,76,176,0.92))';
+                el.style.borderColor = '#d0f4ff';
+                el.style.boxShadow = '0 0 14px rgba(120,220,255,0.5), 0 4px 10px rgba(0,0,0,0.45)';
+                return;
+            }
+            el.style.background = '';
+            el.style.borderColor = '';
+            el.style.boxShadow = '';
+        };
+        const refreshMobileActionButtons = () => {
+            if (isMobileBuildMode()) {
+                attackBtn.textContent = 'PLACE';
+                magicBtn.textContent = 'REMOVE';
+                jumpBtn.textContent = 'UP';
+                interactBtn.textContent = 'DOWN';
+                setMobileButtonTone(attackBtn, 'build');
+                setMobileButtonTone(magicBtn, 'build');
+                setMobileButtonTone(jumpBtn, 'build');
+                setMobileButtonTone(interactBtn, 'build');
+                magicBtn.style.opacity = '1';
+                return;
+            }
+
+            attackBtn.textContent = 'ATTACK';
+            jumpBtn.textContent = 'JUMP';
+            interactBtn.textContent = 'INTERACT';
+            setMobileButtonTone(attackBtn, 'default');
+            setMobileButtonTone(jumpBtn, 'default');
+            setMobileButtonTone(interactBtn, 'default');
+
+            const equippedSkill = this.getEquippedSkill();
+            magicBtn.textContent = equippedSkill ? 'MAGIC' : 'EQUIP';
+            magicBtn.style.opacity = equippedSkill ? '1' : '0.72';
+            setMobileButtonTone(magicBtn, 'default');
+        };
+
         // Layout helper - runs on init and on resize/orientation change.
         // Uses safe-area-inset to dodge the home indicator + notch.
         const layout = () => {
@@ -3624,6 +3663,11 @@ class Game3D {
             {
                 el: jumpBtn, id: null,
                 onPress: () => {
+                    if (isMobileBuildMode()) {
+                        this.adjustBuildHeight(1);
+                        this.triggerHaptic('tap');
+                        return;
+                    }
                     if (!this.player) return;
                     this.player.onJumpPress();
                     this.triggerHaptic('tap');
@@ -3632,6 +3676,11 @@ class Game3D {
             {
                 el: interactBtn, id: null,
                 onPress: () => {
+                    if (isMobileBuildMode()) {
+                        this.adjustBuildHeight(-1);
+                        this.triggerHaptic('tap');
+                        return;
+                    }
                     tapInteract();
                     this.triggerHaptic('tap');
                 }
@@ -3639,6 +3688,11 @@ class Game3D {
             {
                 el: magicBtn, id: null,
                 onPress: () => {
+                    if (isMobileBuildMode()) {
+                        this.removeBuildBlock();
+                        this.triggerHaptic('medium');
+                        return;
+                    }
                     this.useEquippedSkill({ source: 'touch' });
                 },
                 onInitialPress: () => this.triggerHaptic('medium')
@@ -3648,10 +3702,16 @@ class Game3D {
             {
                 el: attackBtn, id: null, repeat: true,
                 onPress: () => {
+                    if (isMobileBuildMode()) {
+                        this.placeBuildBlock();
+                        this.triggerHaptic('medium');
+                        return;
+                    }
                     if (!this.player) return;
                     this.player.useActiveSlot();
                 },
-                onInitialPress: () => this.triggerHaptic('medium')
+                onInitialPress: () => this.triggerHaptic('medium'),
+                repeatWhen: () => !isMobileBuildMode()
             }
         ];
         for (const b of buttons) {
@@ -3783,7 +3843,7 @@ class Game3D {
         const tickRepeat = () => {
             const now = performance.now();
             for (const b of buttons) {
-                if (b.repeat && b.id !== null && now - b.lastFire >= REPEAT_MS) {
+                if (b.repeat && b.id !== null && (!b.repeatWhen || b.repeatWhen()) && now - b.lastFire >= REPEAT_MS) {
                     b.onPress();
                     b.lastFire = now;
                 }
@@ -3796,9 +3856,7 @@ class Game3D {
             if (shouldShow && isHidden) root.classList.remove('hidden');
             else if (!shouldShow && !isHidden) root.classList.add('hidden');
 
-            const equippedSkill = this.getEquippedSkill();
-            magicBtn.textContent = equippedSkill ? 'MAGIC' : 'EQUIP';
-            magicBtn.style.opacity = equippedSkill ? '1' : '0.72';
+            refreshMobileActionButtons();
 
             requestAnimationFrame(tickRepeat);
         };
